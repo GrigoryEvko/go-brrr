@@ -1,0 +1,72 @@
+[submodule "data/ffi/usearch"]
+	path = data/ffi/usearch
+	url = https://github.com/unum-cloud/usearch.git
+[submodule "data/projects/python/flask"]
+	path = data/projects/python/flask
+	url = https://github.com/pallets/flask.git
+[submodule "data/projects/python/httpx"]
+	path = data/projects/python/httpx
+	url = https://github.com/encode/httpx.git
+[submodule "data/projects/typescript/deno_std"]
+	path = data/projects/typescript/deno_std
+	url = https://github.com/denoland/deno_std.git
+[submodule "data/projects/rust/ripgrep"]
+	path = data/projects/rust/ripgrep
+	url = https://github.com/BurntSushi/ripgrep.git
+[submodule "data/projects/go/gin"]
+	path = data/projects/go/gin
+	url = https://github.com/gin-gonic/gin.git
+[submodule "data/projects/c/redis"]
+	path = data/projects/c/redis
+	url = https://github.com/redis/redis.git
+[submodule "data/projects/cpp/json"]
+	path = data/projects/cpp/json
+	url = https://github.com/nlohmann/json.git
+[submodule "data/ffi/pybind11"]
+	path = data/ffi/pybind11
+	url = https://github.com/pybind/pybind11.git
+[submodule "data/ffi/pyo3"]
+	path = data/ffi/pyo3
+	url = https://github.com/PyO3/pyo3.git
+[submodule "data/ffi/napi-rs"]
+	path = data/ffi/napi-rs
+	url = https://github.com/napi-rs/napi-rs.git
+[submodule "data/projects/csharp/newtonsoft-json"]
+	path = data/projects/csharp/newtonsoft-json
+	url = https://github.com/JamesNK/Newtonsoft.Json.git
+[submodule "data/projects/swift/alamofire"]
+	path = data/projects/swift/alamofire
+	url = https://github.com/Alamofire/Alamofire.git
+[submodule "data/projects/kotlin/kotlinx-coroutines"]
+	path = data/projects/kotlin/kotlinx-coroutines
+	url = https://github.com/Kotlin/kotlinx.coroutines.git
+[submodule "data/projects/ruby/sinatra"]
+	path = data/projects/ruby/sinatra
+	url = https://github.com/sinatra/sinatra.git
+[submodule "data/projects/php/guzzle"]
+	path = data/projects/php/guzzle
+	url = https://github.com/guzzle/guzzle.git
+[submodule "data/projects/scala/cats"]
+	path = data/projects/scala/cats
+	url = https://github.com/typelevel/cats.git
+[submodule "data/projects/elixir/phoenix"]
+	path = data/projects/elixir/phoenix
+	url = https://github.com/phoenixframework/phoenix.git
+[submodule "data/projects/lua/kong"]
+	path = data/projects/lua/kong
+	url = https://github.com/Kong/kong.git
+[submodule "data/projects/javascript/express"]
+	path = data/projects/javascript/express
+	url = https://github.com/expressjs/express.git
+[submodule "data/projects/zig/ziglings"]
+	path = data/projects/zig/ziglings
+	url = https://github.com/ratfactor/ziglings.git
+[submodule "data/projects/clojure/hiccup"]
+	path = data/projects/clojure/hiccup
+	url = https://github.com/weavejester/hiccup.git
+[submodule "data/projects/haskell/hakyll"]
+	path = data/projects/haskell/hakyll
+	url = https://github.com/jaspervdj/hakyll.git
+[submodule "data/projects/java/gson"]
+	path = data/projects/java/gson
+	url = https://github.com/google/gson.git
