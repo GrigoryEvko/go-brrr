@@ -245,9 +245,9 @@ yarn-error.log*
 *.log
 logs/
 
-# Core dumps
-core
-core.*
+# Core dumps (use pattern that won't match directories named 'core')
+/core
+core.[0-9]*
 vgcore.*
 
 # Database files (local caches)
