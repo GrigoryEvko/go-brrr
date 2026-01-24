@@ -286,10 +286,14 @@ pub fn require_exists(path: &Path) -> Result<(), PathValidationError> {
 /// ```
 pub fn require_file(path: &Path) -> Result<(), PathValidationError> {
     if !path.exists() {
-        return Err(PathValidationError::FileNotFound(path.display().to_string()));
+        return Err(PathValidationError::FileNotFound(
+            path.display().to_string(),
+        ));
     }
     if !path.is_file() {
-        return Err(PathValidationError::ExpectedFile(path.display().to_string()));
+        return Err(PathValidationError::ExpectedFile(
+            path.display().to_string(),
+        ));
     }
     Ok(())
 }
@@ -317,10 +321,14 @@ pub fn require_file(path: &Path) -> Result<(), PathValidationError> {
 /// ```
 pub fn require_directory(path: &Path) -> Result<(), PathValidationError> {
     if !path.exists() {
-        return Err(PathValidationError::DirectoryNotFound(path.display().to_string()));
+        return Err(PathValidationError::DirectoryNotFound(
+            path.display().to_string(),
+        ));
     }
     if !path.is_dir() {
-        return Err(PathValidationError::ExpectedDirectory(path.display().to_string()));
+        return Err(PathValidationError::ExpectedDirectory(
+            path.display().to_string(),
+        ));
     }
     Ok(())
 }
@@ -350,7 +358,9 @@ impl std::fmt::Display for PathValidationError {
             Self::FileNotFound(path) => write!(f, "File not found: {}", path),
             Self::DirectoryNotFound(path) => write!(f, "Directory not found: {}", path),
             Self::ExpectedFile(path) => write!(f, "Expected file but found directory: {}", path),
-            Self::ExpectedDirectory(path) => write!(f, "Expected directory but found file: {}", path),
+            Self::ExpectedDirectory(path) => {
+                write!(f, "Expected directory but found file: {}", path)
+            }
         }
     }
 }
@@ -629,7 +639,11 @@ mod tests {
         let node_modules = project_dir.join("node_modules").join("some_package");
         fs::create_dir_all(&node_modules).unwrap();
         for i in 0..10 {
-            fs::write(node_modules.join(format!("file{i}.js")), "module.exports = {}").unwrap();
+            fs::write(
+                node_modules.join(format!("file{i}.js")),
+                "module.exports = {}",
+            )
+            .unwrap();
         }
 
         // Create one Python file in root
@@ -719,7 +733,9 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, PathValidationError::ExpectedFile(_)));
-        assert!(err.to_string().contains("Expected file but found directory"));
+        assert!(err
+            .to_string()
+            .contains("Expected file but found directory"));
     }
 
     #[test]
@@ -753,7 +769,9 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, PathValidationError::ExpectedDirectory(_)));
-        assert!(err.to_string().contains("Expected directory but found file"));
+        assert!(err
+            .to_string()
+            .contains("Expected directory but found file"));
     }
 
     #[test]

@@ -38,6 +38,11 @@ pub mod types;
 #[allow(unused_imports)]
 pub use arch::{analyze_architecture, ArchAnalysis, ArchStats, CycleDependency};
 #[allow(unused_imports)]
+pub use cache::{
+    get_cache_dir, get_cache_file, get_or_build_graph_with_config, invalidate_cache,
+    warm_cache_with_config, CachedCallGraph, CachedEdge,
+};
+#[allow(unused_imports)]
 pub use dead::{
     analyze_dead_code, analyze_dead_code_with_config, classify_entry_point,
     detect_entry_points_with_config, DeadCodeConfig, DeadCodeResult, DeadCodeStats, DeadFunction,
@@ -53,12 +58,6 @@ pub use scanner::{
 };
 #[allow(unused_imports)]
 pub use types::{CallEdge, CallGraph, FunctionRef};
-#[allow(unused_imports)]
-pub use cache::{
-    get_or_build_graph_with_config, warm_cache_with_config, invalidate_cache,
-    CachedCallGraph, CachedEdge,
-    get_cache_dir, get_cache_file,
-};
 
 use crate::error::Result;
 
@@ -215,7 +214,10 @@ pub fn get_context_with_lang(
         // Skip functions with no file (unresolved references)
         if func_ref.file.is_empty() {
             function_contexts.push(FunctionContextInfo {
-                name: func_ref.qualified_name.clone().unwrap_or_else(|| func_ref.name.clone()),
+                name: func_ref
+                    .qualified_name
+                    .clone()
+                    .unwrap_or_else(|| func_ref.name.clone()),
                 file: "?".to_string(),
                 line: 0,
                 signature: format!("def {}(...)", func_ref.name),
@@ -241,7 +243,10 @@ pub fn get_context_with_lang(
                 Err(_) => {
                     // File couldn't be parsed, use basic info
                     function_contexts.push(FunctionContextInfo {
-                        name: func_ref.qualified_name.clone().unwrap_or_else(|| func_ref.name.clone()),
+                        name: func_ref
+                            .qualified_name
+                            .clone()
+                            .unwrap_or_else(|| func_ref.name.clone()),
                         file: func_ref.file.clone(),
                         line: 0,
                         signature: format!("def {}(...)", func_ref.name),
@@ -266,8 +271,7 @@ pub fn get_context_with_lang(
                 // Check class methods
                 module_info.classes.iter().find_map(|c| {
                     c.methods.iter().find(|m| {
-                        m.name == func_ref.name
-                            || func_ref.name == format!("{}.{}", c.name, m.name)
+                        m.name == func_ref.name || func_ref.name == format!("{}.{}", c.name, m.name)
                     })
                 })
             });
@@ -291,7 +295,10 @@ pub fn get_context_with_lang(
             .unwrap_or_default();
 
         function_contexts.push(FunctionContextInfo {
-            name: func_ref.qualified_name.clone().unwrap_or_else(|| func_ref.name.clone()),
+            name: func_ref
+                .qualified_name
+                .clone()
+                .unwrap_or_else(|| func_ref.name.clone()),
             file: func_ref.file.clone(),
             line,
             signature,

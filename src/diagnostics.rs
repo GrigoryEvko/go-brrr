@@ -31,14 +31,12 @@ static TSC_RE: Lazy<Regex> = Lazy::new(|| {
 });
 
 /// Go vet output format: file.go:line:col: message
-static GO_VET_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(.+?):(\d+):(\d+):\s*(.+)").expect("Invalid go vet regex pattern")
-});
+static GO_VET_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(.+?):(\d+):(\d+):\s*(.+)").expect("Invalid go vet regex pattern"));
 
 /// GCC/G++ output format: file.c:line:col: error: message
 static GCC_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(.+?):(\d+):(\d+):\s*(error|warning):\s*(.+)")
-        .expect("Invalid GCC regex pattern")
+    Regex::new(r"(.+?):(\d+):(\d+):\s*(error|warning):\s*(.+)").expect("Invalid GCC regex pattern")
 });
 
 /// Javac output format: file.java:line: error: message
@@ -100,10 +98,7 @@ pub struct DiagnosticsResult {
 
 /// Detect language from file extension.
 pub fn detect_language(file_path: &Path) -> &'static str {
-    let ext = file_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     match ext {
         "py" => "python",
@@ -523,7 +518,11 @@ fn parse_cppcheck_output(stderr: &str) -> Vec<Diagnostic> {
         let error_end = error_match.get(0).map(|m| m.end()).unwrap_or(0);
         if let Some(loc_match) = CPPCHECK_LOCATION_RE.captures(&stderr[error_end..]) {
             diagnostics.push(Diagnostic {
-                file: loc_match.get(1).map(|m| m.as_str()).unwrap_or("").to_string(),
+                file: loc_match
+                    .get(1)
+                    .map(|m| m.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 line: loc_match
                     .get(2)
                     .and_then(|m| m.as_str().parse().ok())
@@ -569,9 +568,12 @@ pub fn get_diagnostics(
         "python" => {
             // Run pyright for type checking
             if command_exists("pyright") {
-                if let Ok((stdout, _, _)) =
-                    run_command("pyright", &["--outputjson", path.to_str().unwrap_or("")], None, 30)
-                {
+                if let Ok((stdout, _, _)) = run_command(
+                    "pyright",
+                    &["--outputjson", path.to_str().unwrap_or("")],
+                    None,
+                    30,
+                ) {
                     all_diagnostics.extend(parse_pyright_output(&stdout));
                     tools_used.push("pyright".to_string());
                 }
@@ -704,12 +706,16 @@ pub fn get_diagnostics(
     }
 
     // Sort by file, then line number
-    all_diagnostics.sort_by(|a, b| {
-        (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column))
-    });
+    all_diagnostics.sort_by(|a, b| (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column)));
 
-    let error_count = all_diagnostics.iter().filter(|d| d.severity == "error").count();
-    let warning_count = all_diagnostics.iter().filter(|d| d.severity == "warning").count();
+    let error_count = all_diagnostics
+        .iter()
+        .filter(|d| d.severity == "error")
+        .count();
+    let warning_count = all_diagnostics
+        .iter()
+        .filter(|d| d.severity == "warning")
+        .count();
 
     Ok(DiagnosticsResult {
         target: path.display().to_string(),
@@ -754,9 +760,12 @@ pub fn get_project_diagnostics(
 
             // Run ruff on project
             if include_lint && command_exists("ruff") {
-                if let Ok((stdout, _, _)) =
-                    run_command("ruff", &["check", "--output-format=json", "."], Some(&path), 60)
-                {
+                if let Ok((stdout, _, _)) = run_command(
+                    "ruff",
+                    &["check", "--output-format=json", "."],
+                    Some(&path),
+                    60,
+                ) {
                     all_diagnostics.extend(parse_ruff_output(&stdout));
                     tools_used.push("ruff".to_string());
                 }
@@ -778,9 +787,7 @@ pub fn get_project_diagnostics(
         "go" => {
             // Run go vet on project
             if command_exists("go") {
-                if let Ok((_, stderr, _)) =
-                    run_command("go", &["vet", "./..."], Some(&path), 120)
-                {
+                if let Ok((_, stderr, _)) = run_command("go", &["vet", "./..."], Some(&path), 120) {
                     all_diagnostics.extend(parse_go_vet_output(&stderr));
                     tools_used.push("go vet".to_string());
                 }
@@ -803,9 +810,12 @@ pub fn get_project_diagnostics(
         "rust" => {
             // Run cargo check on project
             if command_exists("cargo") {
-                if let Ok((stdout, _, _)) =
-                    run_command("cargo", &["check", "--message-format=json"], Some(&path), 180)
-                {
+                if let Ok((stdout, _, _)) = run_command(
+                    "cargo",
+                    &["check", "--message-format=json"],
+                    Some(&path),
+                    180,
+                ) {
                     all_diagnostics.extend(parse_cargo_output(&stdout, "cargo check"));
                     tools_used.push("cargo check".to_string());
                 }
@@ -813,9 +823,12 @@ pub fn get_project_diagnostics(
 
             // Run clippy on project
             if include_lint && command_exists("cargo") {
-                if let Ok((stdout, _, _)) =
-                    run_command("cargo", &["clippy", "--message-format=json"], Some(&path), 180)
-                {
+                if let Ok((stdout, _, _)) = run_command(
+                    "cargo",
+                    &["clippy", "--message-format=json"],
+                    Some(&path),
+                    180,
+                ) {
                     all_diagnostics.extend(parse_cargo_output(&stdout, "clippy"));
                     tools_used.push("clippy".to_string());
                 }
@@ -837,12 +850,16 @@ pub fn get_project_diagnostics(
     }
 
     // Sort by file, then line number
-    all_diagnostics.sort_by(|a, b| {
-        (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column))
-    });
+    all_diagnostics.sort_by(|a, b| (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column)));
 
-    let error_count = all_diagnostics.iter().filter(|d| d.severity == "error").count();
-    let warning_count = all_diagnostics.iter().filter(|d| d.severity == "warning").count();
+    let error_count = all_diagnostics
+        .iter()
+        .filter(|d| d.severity == "error")
+        .count();
+    let warning_count = all_diagnostics
+        .iter()
+        .filter(|d| d.severity == "warning")
+        .count();
     let file_count = all_diagnostics
         .iter()
         .map(|d| &d.file)
@@ -935,7 +952,8 @@ mod tests {
 
     #[test]
     fn test_parse_tsc_output() {
-        let sample = "src/index.ts(10,5): error TS2322: Type 'string' is not assignable to type 'number'.";
+        let sample =
+            "src/index.ts(10,5): error TS2322: Type 'string' is not assignable to type 'number'.";
         let diagnostics = parse_tsc_output(sample);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].file, "src/index.ts");

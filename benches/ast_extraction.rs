@@ -10,9 +10,7 @@
 //!
 //! Run with: `cargo bench --bench ast_extraction`
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use go_brrr::ast::extractor::AstExtractor;
 use go_brrr::lang::LanguageRegistry;
 
@@ -1342,36 +1340,28 @@ fn bench_python_functions(c: &mut Criterion) {
     let simple = python_generators::simple_function();
     group.throughput(Throughput::Bytes(simple.len() as u64));
     group.bench_function("simple", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(simple, "python").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(simple, "python").unwrap()))
     });
 
     // Decorated function
     let decorated = python_generators::decorated_function();
     group.throughput(Throughput::Bytes(decorated.len() as u64));
     group.bench_function("decorated", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(decorated, "python").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(decorated, "python").unwrap()))
     });
 
     // Async function
     let async_fn = python_generators::async_function();
     group.throughput(Throughput::Bytes(async_fn.len() as u64));
     group.bench_function("async", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(async_fn, "python").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(async_fn, "python").unwrap()))
     });
 
     // Nested function
     let nested = python_generators::nested_function();
     group.throughput(Throughput::Bytes(nested.len() as u64));
     group.bench_function("nested", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(nested, "python").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(nested, "python").unwrap()))
     });
 
     group.finish();
@@ -1384,9 +1374,7 @@ fn bench_python_classes(c: &mut Criterion) {
     let class_code = python_generators::class_with_methods();
     group.throughput(Throughput::Bytes(class_code.len() as u64));
     group.bench_function("class_with_methods", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(class_code, "python").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(class_code, "python").unwrap()))
     });
 
     group.finish();
@@ -1400,27 +1388,21 @@ fn bench_typescript_functions(c: &mut Criterion) {
     let arrow = typescript_generators::arrow_function();
     group.throughput(Throughput::Bytes(arrow.len() as u64));
     group.bench_function("arrow", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(arrow, "typescript").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(arrow, "typescript").unwrap()))
     });
 
     // Async function
     let async_fn = typescript_generators::async_function();
     group.throughput(Throughput::Bytes(async_fn.len() as u64));
     group.bench_function("async", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(async_fn, "typescript").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(async_fn, "typescript").unwrap()))
     });
 
     // Generator function
     let generator = typescript_generators::generator_function();
     group.throughput(Throughput::Bytes(generator.len() as u64));
     group.bench_function("generator", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(generator, "typescript").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(generator, "typescript").unwrap()))
     });
 
     group.finish();
@@ -1449,18 +1431,14 @@ fn bench_rust_functions(c: &mut Criterion) {
     let generic = rust_generators::generic_function();
     group.throughput(Throughput::Bytes(generic.len() as u64));
     group.bench_function("generic_with_lifetimes", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(generic, "rust").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(generic, "rust").unwrap()))
     });
 
     // Async function
     let async_fn = rust_generators::async_function();
     group.throughput(Throughput::Bytes(async_fn.len() as u64));
     group.bench_function("async", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(async_fn, "rust").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(async_fn, "rust").unwrap()))
     });
 
     group.finish();
@@ -1474,27 +1452,21 @@ fn bench_rust_types(c: &mut Criterion) {
     let struct_impl = rust_generators::struct_with_impl();
     group.throughput(Throughput::Bytes(struct_impl.len() as u64));
     group.bench_function("struct_with_impl", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(struct_impl, "rust").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(struct_impl, "rust").unwrap()))
     });
 
     // Enum with methods
     let enum_methods = rust_generators::enum_with_methods();
     group.throughput(Throughput::Bytes(enum_methods.len() as u64));
     group.bench_function("enum_with_methods", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(enum_methods, "rust").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(enum_methods, "rust").unwrap()))
     });
 
     // Trait definition
     let trait_def = rust_generators::trait_definition();
     group.throughput(Throughput::Bytes(trait_def.len() as u64));
     group.bench_function("trait_definition", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(trait_def, "rust").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(trait_def, "rust").unwrap()))
     });
 
     group.finish();
@@ -1508,9 +1480,7 @@ fn bench_go_functions(c: &mut Criterion) {
     let method = go_generators::method_with_receiver();
     group.throughput(Throughput::Bytes(method.len() as u64));
     group.bench_function("method_with_receiver", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(method, "go").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(method, "go").unwrap()))
     });
 
     group.finish();
@@ -1524,18 +1494,14 @@ fn bench_go_types(c: &mut Criterion) {
     let struct_def = go_generators::struct_definition();
     group.throughput(Throughput::Bytes(struct_def.len() as u64));
     group.bench_function("struct_definition", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(struct_def, "go").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(struct_def, "go").unwrap()))
     });
 
     // Interface definition
     let interface_def = go_generators::interface_definition();
     group.throughput(Throughput::Bytes(interface_def.len() as u64));
     group.bench_function("interface_definition", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(interface_def, "go").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(interface_def, "go").unwrap()))
     });
 
     group.finish();
@@ -1549,9 +1515,7 @@ fn bench_java_functions(c: &mut Criterion) {
     let annotated = java_generators::annotated_method();
     group.throughput(Throughput::Bytes(annotated.len() as u64));
     group.bench_function("annotated_method", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(annotated, "java").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(annotated, "java").unwrap()))
     });
 
     group.finish();
@@ -1565,9 +1529,7 @@ fn bench_java_classes(c: &mut Criterion) {
     let generic_class = java_generators::generic_class();
     group.throughput(Throughput::Bytes(generic_class.len() as u64));
     group.bench_function("generic_with_inner_classes", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(generic_class, "java").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(generic_class, "java").unwrap()))
     });
 
     group.finish();
@@ -1581,9 +1543,7 @@ fn bench_c_functions(c: &mut Criterion) {
     let with_macros = c_generators::function_with_macros();
     group.throughput(Throughput::Bytes(with_macros.len() as u64));
     group.bench_function("with_macros", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(with_macros, "c").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(with_macros, "c").unwrap()))
     });
 
     group.finish();
@@ -1597,9 +1557,7 @@ fn bench_c_structs(c: &mut Criterion) {
     let bitfields = c_generators::struct_with_bitfields();
     group.throughput(Throughput::Bytes(bitfields.len() as u64));
     group.bench_function("with_bitfields", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(bitfields, "c").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(bitfields, "c").unwrap()))
     });
 
     group.finish();
@@ -1613,18 +1571,14 @@ fn bench_cpp_classes(c: &mut Criterion) {
     let template = cpp_generators::template_class();
     group.throughput(Throughput::Bytes(template.len() as u64));
     group.bench_function("template_class", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(template, "cpp").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(template, "cpp").unwrap()))
     });
 
     // Class with inheritance
     let inheritance = cpp_generators::class_with_inheritance();
     group.throughput(Throughput::Bytes(inheritance.len() as u64));
     group.bench_function("class_with_inheritance", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(inheritance, "cpp").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(inheritance, "cpp").unwrap()))
     });
 
     group.finish();
@@ -1642,9 +1596,7 @@ fn bench_scaling_python(c: &mut Criterion) {
         BenchmarkId::new("extraction", format!("~{}_lines", small_lines)),
         &small,
         |b, source| {
-            b.iter(|| {
-                black_box(AstExtractor::extract_from_source(source, "python").unwrap())
-            })
+            b.iter(|| black_box(AstExtractor::extract_from_source(source, "python").unwrap()))
         },
     );
 
@@ -1656,9 +1608,7 @@ fn bench_scaling_python(c: &mut Criterion) {
         BenchmarkId::new("extraction", format!("~{}_lines", medium_lines)),
         &medium,
         |b, source| {
-            b.iter(|| {
-                black_box(AstExtractor::extract_from_source(source, "python").unwrap())
-            })
+            b.iter(|| black_box(AstExtractor::extract_from_source(source, "python").unwrap()))
         },
     );
 
@@ -1670,9 +1620,7 @@ fn bench_scaling_python(c: &mut Criterion) {
         BenchmarkId::new("extraction", format!("~{}_lines", large_lines)),
         &large,
         |b, source| {
-            b.iter(|| {
-                black_box(AstExtractor::extract_from_source(source, "python").unwrap())
-            })
+            b.iter(|| black_box(AstExtractor::extract_from_source(source, "python").unwrap()))
         },
     );
 
@@ -1684,9 +1632,7 @@ fn bench_scaling_python(c: &mut Criterion) {
         BenchmarkId::new("extraction", format!("~{}_lines", very_large_lines)),
         &very_large,
         |b, source| {
-            b.iter(|| {
-                black_box(AstExtractor::extract_from_source(source, "python").unwrap())
-            })
+            b.iter(|| black_box(AstExtractor::extract_from_source(source, "python").unwrap()))
         },
     );
 
@@ -1702,12 +1648,13 @@ fn bench_scaling_python_classes(c: &mut Criterion) {
         let lines = code.lines().count();
         group.throughput(Throughput::Bytes(code.len() as u64));
         group.bench_with_input(
-            BenchmarkId::new("extraction", format!("{}_classes_~{}_lines", n_classes, lines)),
+            BenchmarkId::new(
+                "extraction",
+                format!("{}_classes_~{}_lines", n_classes, lines),
+            ),
             &code,
             |b, source| {
-                b.iter(|| {
-                    black_box(AstExtractor::extract_from_source(source, "python").unwrap())
-                })
+                b.iter(|| black_box(AstExtractor::extract_from_source(source, "python").unwrap()))
             },
         );
     }
@@ -1724,7 +1671,10 @@ fn bench_scaling_typescript(c: &mut Criterion) {
         let lines = code.lines().count();
         group.throughput(Throughput::Bytes(code.len() as u64));
         group.bench_with_input(
-            BenchmarkId::new("extraction", format!("{}_functions_~{}_lines", n_functions, lines)),
+            BenchmarkId::new(
+                "extraction",
+                format!("{}_functions_~{}_lines", n_functions, lines),
+            ),
             &code,
             |b, source| {
                 b.iter(|| {
@@ -1746,12 +1696,13 @@ fn bench_scaling_rust(c: &mut Criterion) {
         let lines = code.lines().count();
         group.throughput(Throughput::Bytes(code.len() as u64));
         group.bench_with_input(
-            BenchmarkId::new("extraction", format!("{}_functions_~{}_lines", n_functions, lines)),
+            BenchmarkId::new(
+                "extraction",
+                format!("{}_functions_~{}_lines", n_functions, lines),
+            ),
             &code,
             |b, source| {
-                b.iter(|| {
-                    black_box(AstExtractor::extract_from_source(source, "rust").unwrap())
-                })
+                b.iter(|| black_box(AstExtractor::extract_from_source(source, "rust").unwrap()))
             },
         );
     }
@@ -1768,12 +1719,13 @@ fn bench_scaling_go(c: &mut Criterion) {
         let lines = code.lines().count();
         group.throughput(Throughput::Bytes(code.len() as u64));
         group.bench_with_input(
-            BenchmarkId::new("extraction", format!("{}_functions_~{}_lines", n_functions, lines)),
+            BenchmarkId::new(
+                "extraction",
+                format!("{}_functions_~{}_lines", n_functions, lines),
+            ),
             &code,
             |b, source| {
-                b.iter(|| {
-                    black_box(AstExtractor::extract_from_source(source, "go").unwrap())
-                })
+                b.iter(|| black_box(AstExtractor::extract_from_source(source, "go").unwrap()))
             },
         );
     }
@@ -1790,12 +1742,13 @@ fn bench_scaling_java(c: &mut Criterion) {
         let lines = code.lines().count();
         group.throughput(Throughput::Bytes(code.len() as u64));
         group.bench_with_input(
-            BenchmarkId::new("extraction", format!("{}_methods_~{}_lines", n_methods, lines)),
+            BenchmarkId::new(
+                "extraction",
+                format!("{}_methods_~{}_lines", n_methods, lines),
+            ),
             &code,
             |b, source| {
-                b.iter(|| {
-                    black_box(AstExtractor::extract_from_source(source, "java").unwrap())
-                })
+                b.iter(|| black_box(AstExtractor::extract_from_source(source, "java").unwrap()))
             },
         );
     }
@@ -1825,9 +1778,7 @@ fn bench_parse_vs_extraction(c: &mut Criterion) {
     // Full extraction (parse + extract)
     group.throughput(Throughput::Bytes(bytes));
     group.bench_function("python_25_functions_full_extraction", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(&code, "python").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(&code, "python").unwrap()))
     });
 
     // Repeat for TypeScript
@@ -1846,9 +1797,7 @@ fn bench_parse_vs_extraction(c: &mut Criterion) {
 
     group.throughput(Throughput::Bytes(ts_bytes));
     group.bench_function("typescript_25_functions_full_extraction", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(&ts_code, "typescript").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(&ts_code, "typescript").unwrap()))
     });
 
     group.finish();
@@ -1862,45 +1811,35 @@ fn bench_cross_language_comparison(c: &mut Criterion) {
     let python_code = python_generators::generate_n_functions(50);
     group.throughput(Throughput::Bytes(python_code.len() as u64));
     group.bench_function("python", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(&python_code, "python").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(&python_code, "python").unwrap()))
     });
 
     // TypeScript
     let ts_code = typescript_generators::generate_n_functions(50);
     group.throughput(Throughput::Bytes(ts_code.len() as u64));
     group.bench_function("typescript", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(&ts_code, "typescript").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(&ts_code, "typescript").unwrap()))
     });
 
     // Rust
     let rust_code = rust_generators::generate_n_functions(50);
     group.throughput(Throughput::Bytes(rust_code.len() as u64));
     group.bench_function("rust", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(&rust_code, "rust").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(&rust_code, "rust").unwrap()))
     });
 
     // Go
     let go_code = go_generators::generate_n_functions(50);
     group.throughput(Throughput::Bytes(go_code.len() as u64));
     group.bench_function("go", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(&go_code, "go").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(&go_code, "go").unwrap()))
     });
 
     // Java
     let java_code = java_generators::generate_n_methods(50);
     group.throughput(Throughput::Bytes(java_code.len() as u64));
     group.bench_function("java", |b| {
-        b.iter(|| {
-            black_box(AstExtractor::extract_from_source(&java_code, "java").unwrap())
-        })
+        b.iter(|| black_box(AstExtractor::extract_from_source(&java_code, "java").unwrap()))
     });
 
     group.finish();

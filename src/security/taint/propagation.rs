@@ -48,9 +48,113 @@ use super::types::{
 };
 use crate::callgraph::types::{CallGraph, FunctionRef};
 use crate::cfg::types::{BlockId, CFGInfo, EdgeType};
-use crate::dfg::types::{DataflowEdge, DataflowKind, DFGInfo};
+use crate::dfg::types::{DFGInfo, DataflowEdge, DataflowKind};
+use fixedbitset::FixedBitSet;
+use fxhash::FxHashMap;
+use nohash_hasher::IntMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+
+// =============================================================================
+// Serde Helper Modules for Custom HashMap Types
+// =============================================================================
+
+/// Serde module for FxHashMap serialization (converts to/from std HashMap).
+mod serde_fxhashmap {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+    use std::collections::HashMap;
+
+    pub fn serialize<S, K, V>(map: &FxHashMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        K: Serialize + std::hash::Hash + Eq,
+        V: Serialize,
+    {
+        // Convert to std HashMap for serialization
+        let std_map: HashMap<_, _> = map.iter().collect();
+        std_map.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, K, V>(deserializer: D) -> Result<FxHashMap<K, V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        K: Deserialize<'de> + std::hash::Hash + Eq,
+        V: Deserialize<'de>,
+    {
+        let std_map: HashMap<K, V> = HashMap::deserialize(deserializer)?;
+        Ok(std_map.into_iter().collect())
+    }
+}
+
+/// Serde module for IntMap<usize, Vec<TaintLabel>> serialization.
+mod serde_intmap {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+    use std::collections::HashMap;
+
+    pub fn serialize<S>(map: &IntMap<usize, Vec<TaintLabel>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let std_map: HashMap<_, _> = map.iter().collect();
+        std_map.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<IntMap<usize, Vec<TaintLabel>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let std_map: HashMap<usize, Vec<TaintLabel>> = HashMap::deserialize(deserializer)?;
+        Ok(std_map.into_iter().collect())
+    }
+}
+
+/// Serde module for IntMap<usize, String> serialization.
+mod serde_intmap_string {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+    use std::collections::HashMap;
+
+    pub fn serialize<S>(map: &IntMap<usize, String>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let std_map: HashMap<_, _> = map.iter().collect();
+        std_map.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<IntMap<usize, String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let std_map: HashMap<usize, String> = HashMap::deserialize(deserializer)?;
+        Ok(std_map.into_iter().collect())
+    }
+}
+
+/// Serde module for IntMap<usize, Vec<String>> serialization.
+mod serde_intmap_vec_string {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+    use std::collections::HashMap;
+
+    pub fn serialize<S>(map: &IntMap<usize, Vec<String>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let std_map: HashMap<_, _> = map.iter().collect();
+        std_map.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<IntMap<usize, Vec<String>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let std_map: HashMap<usize, Vec<String>> = HashMap::deserialize(deserializer)?;
+        Ok(std_map.into_iter().collect())
+    }
+}
 
 // =============================================================================
 // Node ID and Core Types
@@ -93,7 +197,11 @@ impl NodeId {
 
     /// Create a NodeId with variable tracking.
     #[inline]
-    pub fn with_variable(file: impl Into<String>, line: usize, variable: impl Into<String>) -> Self {
+    pub fn with_variable(
+        file: impl Into<String>,
+        line: usize,
+        variable: impl Into<String>,
+    ) -> Self {
         Self {
             file: file.into(),
             line,
@@ -104,7 +212,11 @@ impl NodeId {
     /// Convert to a Location for reporting.
     pub fn to_location(&self) -> Location {
         Location::new(
-            if self.file.is_empty() { "<function>" } else { &self.file },
+            if self.file.is_empty() {
+                "<function>"
+            } else {
+                &self.file
+            },
             self.line,
             1,
         )
@@ -193,9 +305,9 @@ impl TaintedEdge {
             | DataflowKind::WaitGroupDone
             | DataflowKind::WaitGroupWait
             | DataflowKind::OnceDo => TaintPropagation::Copy,
-            DataflowKind::ContextDone
-            | DataflowKind::ContextErr
-            | DataflowKind::ContextValue => TaintPropagation::Copy,
+            DataflowKind::ContextDone | DataflowKind::ContextErr | DataflowKind::ContextValue => {
+                TaintPropagation::Copy
+            }
             DataflowKind::PoolGet | DataflowKind::PoolPut => TaintPropagation::Copy,
         }
     }
@@ -233,7 +345,9 @@ pub struct TaintedDFG {
     /// Reference to the underlying DFG
     pub dfg: DFGInfo,
     /// Taint labels at each node: NodeId -> set of TaintLabels
-    pub taint_labels: HashMap<NodeId, HashSet<TaintLabel>>,
+    /// Uses FxHashMap for faster string-keyed lookups
+    #[serde(with = "serde_fxhashmap")]
+    pub taint_labels: FxHashMap<NodeId, HashSet<TaintLabel>>,
     /// Nodes where sanitization occurs (taint stops propagating)
     pub sanitization_points: HashSet<NodeId>,
     /// Function name for context
@@ -241,11 +355,15 @@ pub struct TaintedDFG {
     /// File path for cross-file analysis
     pub file_path: String,
     /// Lines identified as taint sources
-    pub source_lines: HashMap<usize, Vec<TaintLabel>>,
+    /// Uses IntMap for O(1) usize-keyed lookups with zero hashing cost
+    #[serde(with = "serde_intmap")]
+    pub source_lines: IntMap<usize, Vec<TaintLabel>>,
     /// Lines identified as taint sinks
     pub sink_lines: HashSet<usize>,
     /// Sanitization methods at each line
-    pub sanitization_methods: HashMap<usize, String>,
+    /// Uses IntMap for O(1) usize-keyed lookups
+    #[serde(with = "serde_intmap_string")]
+    pub sanitization_methods: IntMap<usize, String>,
     /// Taint-annotated edges
     pub edges: Vec<TaintedEdge>,
 }
@@ -261,29 +379,29 @@ impl TaintedDFG {
 
         Self {
             dfg: dfg.clone(),
-            taint_labels: HashMap::new(),
+            taint_labels: FxHashMap::default(),
             sanitization_points: HashSet::new(),
             function_name: dfg.function_name.clone(),
             file_path: file_path.into(),
-            source_lines: HashMap::new(),
+            source_lines: IntMap::default(),
             sink_lines: HashSet::new(),
-            sanitization_methods: HashMap::new(),
+            sanitization_methods: IntMap::default(),
             edges,
         }
     }
 
     /// Mark a node as tainted with specific labels.
     pub fn mark_tainted(&mut self, node: NodeId, labels: impl IntoIterator<Item = TaintLabel>) {
-        self.taint_labels
-            .entry(node)
-            .or_default()
-            .extend(labels);
+        self.taint_labels.entry(node).or_default().extend(labels);
     }
 
     /// Mark a line as a taint source.
     pub fn mark_source(&mut self, line: usize, label: TaintLabel) {
         let node = NodeId::from_line(line);
-        self.source_lines.entry(line).or_default().push(label.clone());
+        self.source_lines
+            .entry(line)
+            .or_default()
+            .push(label.clone());
         self.mark_tainted(node, std::iter::once(label));
     }
 
@@ -344,7 +462,9 @@ impl TaintedDFG {
     pub fn tainted_nodes(&self) -> Vec<(&NodeId, &HashSet<TaintLabel>)> {
         self.taint_labels
             .iter()
-            .filter(|(node, labels)| !labels.is_empty() && !self.sanitization_points.contains(*node))
+            .filter(|(node, labels)| {
+                !labels.is_empty() && !self.sanitization_points.contains(*node)
+            })
             .collect()
     }
 
@@ -494,7 +614,8 @@ impl ImplicitFlowContext {
     /// Enter a branch controlled by tainted condition.
     pub fn enter_branch(&mut self, condition_taint: HashSet<TaintLabel>) {
         if !condition_taint.is_empty() {
-            self.current_implicit_taint.extend(condition_taint.iter().cloned());
+            self.current_implicit_taint
+                .extend(condition_taint.iter().cloned());
         }
         self.condition_taint_stack.push(condition_taint);
     }
@@ -505,7 +626,8 @@ impl ImplicitFlowContext {
             // Rebuild current implicit taint from remaining stack
             self.current_implicit_taint.clear();
             for taint_set in &self.condition_taint_stack {
-                self.current_implicit_taint.extend(taint_set.iter().cloned());
+                self.current_implicit_taint
+                    .extend(taint_set.iter().cloned());
             }
             // If the exited branch had taint, we should still consider
             // it for merging at the join point
@@ -565,7 +687,8 @@ pub struct PropagationEngine {
     /// All findings (source -> sink flows)
     findings: Vec<TaintFlow>,
     /// Function summaries for inter-procedural analysis
-    summaries: HashMap<String, FunctionTaintSummary>,
+    /// Uses FxHashMap for faster string-keyed lookups
+    summaries: FxHashMap<String, FunctionTaintSummary>,
     /// Implicit flow context
     implicit_context: ImplicitFlowContext,
 }
@@ -577,7 +700,7 @@ impl PropagationEngine {
             config: PropagationConfig::default(),
             state: TaintState::new(),
             findings: Vec::new(),
-            summaries: HashMap::new(),
+            summaries: FxHashMap::default(),
             implicit_context: ImplicitFlowContext::default(),
         }
     }
@@ -588,7 +711,7 @@ impl PropagationEngine {
             config,
             state: TaintState::new(),
             findings: Vec::new(),
-            summaries: HashMap::new(),
+            summaries: FxHashMap::default(),
             implicit_context: ImplicitFlowContext::default(),
         }
     }
@@ -636,35 +759,36 @@ impl PropagationEngine {
         let explicit_taint = self.state.get_variable(source).cloned();
 
         // Combine with implicit taint if tracking enabled
-        let combined_taint = if self.config.track_implicit_flows && self.implicit_context.has_implicit_taint() {
-            let implicit_labels = self.implicit_context.get_implicit_taint().clone();
-            match explicit_taint {
-                Some(mut t) => {
-                    // Merge implicit taint into explicit
-                    t.labels.extend(implicit_labels);
-                    t.add_step(PropagationStep {
-                        location: location.clone(),
-                        propagation: TaintPropagation::ImplicitFlow,
-                        operation: Some("implicit flow from branch condition".to_string()),
-                    });
-                    Some(t)
+        let combined_taint =
+            if self.config.track_implicit_flows && self.implicit_context.has_implicit_taint() {
+                let implicit_labels = self.implicit_context.get_implicit_taint().clone();
+                match explicit_taint {
+                    Some(mut t) => {
+                        // Merge implicit taint into explicit
+                        t.labels.extend(implicit_labels);
+                        t.add_step(PropagationStep {
+                            location: location.clone(),
+                            propagation: TaintPropagation::ImplicitFlow,
+                            operation: Some("implicit flow from branch condition".to_string()),
+                        });
+                        Some(t)
+                    }
+                    None if !implicit_labels.is_empty() => {
+                        // Create new taint from implicit flow only
+                        let mut t = TaintedValue::with_labels(implicit_labels, location.clone());
+                        t.add_step(PropagationStep {
+                            location,
+                            propagation: TaintPropagation::ImplicitFlow,
+                            operation: Some("implicit flow from branch condition".to_string()),
+                        });
+                        t.confidence = 0.7; // Lower confidence for implicit flows
+                        Some(t)
+                    }
+                    None => None,
                 }
-                None if !implicit_labels.is_empty() => {
-                    // Create new taint from implicit flow only
-                    let mut t = TaintedValue::with_labels(implicit_labels, location.clone());
-                    t.add_step(PropagationStep {
-                        location,
-                        propagation: TaintPropagation::ImplicitFlow,
-                        operation: Some("implicit flow from branch condition".to_string()),
-                    });
-                    t.confidence = 0.7; // Lower confidence for implicit flows
-                    Some(t)
-                }
-                None => None,
-            }
-        } else {
-            explicit_taint.map(|t| t.propagate_copy(location))
-        };
+            } else {
+                explicit_taint.map(|t| t.propagate_copy(location))
+            };
 
         if let Some(taint) = combined_taint {
             self.state.set_variable(target, taint);
@@ -684,7 +808,10 @@ impl PropagationEngine {
     ) {
         // Comparison operators do NOT propagate taint
         // The result is a boolean that doesn't contain the tainted data
-        if matches!(operator, "==" | "!=" | "<" | ">" | "<=" | ">=" | "is" | "in" | "not in") {
+        if matches!(
+            operator,
+            "==" | "!=" | "<" | ">" | "<=" | ">=" | "is" | "in" | "not in"
+        ) {
             return;
         }
 
@@ -724,12 +851,7 @@ impl PropagationEngine {
     }
 
     /// Propagate taint through string concatenation (always preserves taint).
-    pub fn propagate_string_concat(
-        &mut self,
-        result: &str,
-        parts: &[&str],
-        location: Location,
-    ) {
+    pub fn propagate_string_concat(&mut self, result: &str, parts: &[&str], location: Location) {
         let mut tainted_parts: Vec<&TaintedValue> = Vec::new();
         for part in parts {
             if let Some(t) = self.state.get_variable(part) {
@@ -755,7 +877,8 @@ impl PropagationEngine {
         location: Location,
     ) {
         if let Some(source_taint) = self.state.get_variable(source) {
-            let converted = source_taint.transform(&format!("convert_to_{}", target_type), location);
+            let converted =
+                source_taint.transform(&format!("convert_to_{}", target_type), location);
             self.state.set_variable(result, converted);
         }
     }
@@ -1018,7 +1141,12 @@ impl PropagationEngine {
             for label in labels {
                 for &idx in &matching_indices {
                     if matches!(kinds[idx], DataflowKind::Definition) {
-                        self.introduce_taint(&variables[idx], label.clone(), location.clone(), None);
+                        self.introduce_taint(
+                            &variables[idx],
+                            label.clone(),
+                            location.clone(),
+                            None,
+                        );
                         let node = NodeId::with_variable(&file_path, *line, &variables[idx]);
                         initial_nodes.push((node, label.clone()));
                     }
@@ -1032,12 +1160,18 @@ impl PropagationEngine {
         }
 
         // Phase 2: Worklist-based propagation
+        // Determine max line number for FixedBitSet sizing
+        let max_line = to_lines.iter().copied().max().unwrap_or(0).max(
+            source_lines.keys().copied().max().unwrap_or(0),
+        );
         let mut worklist: VecDeque<usize> = VecDeque::new();
-        let mut in_worklist: HashSet<usize> = HashSet::new();
+        // FixedBitSet: O(1) insert/contains/remove, 8x less memory than HashSet<usize>
+        let mut in_worklist = FixedBitSet::with_capacity(max_line + 1);
 
         // Initialize worklist with source lines
         for &line in source_lines.keys() {
-            if in_worklist.insert(line) {
+            if !in_worklist.contains(line) {
+                in_worklist.insert(line);
                 worklist.push_back(line);
             }
         }
@@ -1047,7 +1181,7 @@ impl PropagationEngine {
 
         let mut iterations = 0;
         while let Some(current_line) = worklist.pop_front() {
-            in_worklist.remove(&current_line);
+            in_worklist.set(current_line, false);
 
             if iterations >= self.config.max_iterations {
                 break;
@@ -1056,7 +1190,11 @@ impl PropagationEngine {
 
             // SIMD-accelerated edge filtering: find all edges from current_line
             // O(n/8) SIMD comparisons instead of O(n) scalar iterations
-            crate::simd::find_matching_u32_into(&from_lines, current_line as u32, &mut matching_indices);
+            crate::simd::find_matching_u32_into(
+                &from_lines,
+                current_line as u32,
+                &mut matching_indices,
+            );
 
             // Process only matching edges (cache-friendly indexed access)
             for &idx in &matching_indices {
@@ -1085,12 +1223,17 @@ impl PropagationEngine {
                 let is_tainted = self.state.is_variable_tainted(&target_var);
                 if is_tainted && !was_tainted {
                     // Collect node to mark later
-                    if let Some(labels) = self.state.get_variable(&target_var).map(|t| t.labels.clone()) {
+                    if let Some(labels) = self
+                        .state
+                        .get_variable(&target_var)
+                        .map(|t| t.labels.clone())
+                    {
                         let node = NodeId::with_variable(&file_path, target_line, &target_var);
                         nodes_to_mark.push((node, labels));
                     }
 
-                    if in_worklist.insert(target_line) {
+                    if !in_worklist.contains(target_line) {
+                        in_worklist.insert(target_line);
                         worklist.push_back(target_line);
                     }
                 }
@@ -1315,7 +1458,9 @@ impl TaintFlow {
 
     /// Check if this flow involves implicit taint.
     pub fn has_implicit_flow(&self) -> bool {
-        self.path.iter().any(|step| step.propagation == TaintPropagation::ImplicitFlow)
+        self.path
+            .iter()
+            .any(|step| step.propagation == TaintPropagation::ImplicitFlow)
     }
 }
 
@@ -1376,7 +1521,8 @@ impl PropagationRule {
 /// Registry of propagation rules for known functions.
 #[derive(Debug, Default)]
 pub struct PropagationRules {
-    rules: HashMap<String, PropagationRule>,
+    /// Uses FxHashMap for faster string-keyed lookups
+    rules: FxHashMap<String, PropagationRule>,
 }
 
 impl PropagationRules {
@@ -1423,10 +1569,16 @@ impl PropagationRules {
 
         // Sanitizers
         rules.add_rule(PropagationRule::sanitizer("html.escape", "html_escape"));
-        rules.add_rule(PropagationRule::sanitizer("markupsafe.escape", "markup_escape"));
+        rules.add_rule(PropagationRule::sanitizer(
+            "markupsafe.escape",
+            "markup_escape",
+        ));
         rules.add_rule(PropagationRule::sanitizer("bleach.clean", "bleach_clean"));
         rules.add_rule(PropagationRule::sanitizer("shlex.quote", "shell_escape"));
-        rules.add_rule(PropagationRule::sanitizer("urllib.parse.quote", "url_encode"));
+        rules.add_rule(PropagationRule::sanitizer(
+            "urllib.parse.quote",
+            "url_encode",
+        ));
         rules.add_rule(PropagationRule::sanitizer("cgi.escape", "cgi_escape"));
 
         rules
@@ -1437,9 +1589,18 @@ impl PropagationRules {
         let mut rules = Self::new();
 
         // String operations
-        rules.add_rule(PropagationRule::propagate_args("String.prototype.toUpperCase", vec![0]));
-        rules.add_rule(PropagationRule::propagate_args("String.prototype.toLowerCase", vec![0]));
-        rules.add_rule(PropagationRule::propagate_args("String.prototype.trim", vec![0]));
+        rules.add_rule(PropagationRule::propagate_args(
+            "String.prototype.toUpperCase",
+            vec![0],
+        ));
+        rules.add_rule(PropagationRule::propagate_args(
+            "String.prototype.toLowerCase",
+            vec![0],
+        ));
+        rules.add_rule(PropagationRule::propagate_args(
+            "String.prototype.trim",
+            vec![0],
+        ));
         rules.add_rule(PropagationRule::propagate_all("String.prototype.concat"));
         rules.add_rule(PropagationRule::propagate_all("+"));
 
@@ -1453,10 +1614,19 @@ impl PropagationRules {
         rules.add_rule(PropagationRule::propagate_args("toString", vec![0]));
 
         // Sanitizers
-        rules.add_rule(PropagationRule::sanitizer("DOMPurify.sanitize", "dom_purify"));
+        rules.add_rule(PropagationRule::sanitizer(
+            "DOMPurify.sanitize",
+            "dom_purify",
+        ));
         rules.add_rule(PropagationRule::sanitizer("escape", "html_escape"));
-        rules.add_rule(PropagationRule::sanitizer("encodeURIComponent", "url_encode"));
-        rules.add_rule(PropagationRule::sanitizer("validator.escape", "validator_escape"));
+        rules.add_rule(PropagationRule::sanitizer(
+            "encodeURIComponent",
+            "url_encode",
+        ));
+        rules.add_rule(PropagationRule::sanitizer(
+            "validator.escape",
+            "validator_escape",
+        ));
         rules.add_rule(PropagationRule::sanitizer("xss", "xss_filter"));
 
         rules
@@ -1470,8 +1640,14 @@ impl PropagationRules {
         rules.add_rule(PropagationRule::propagate_all("strings.Join"));
         rules.add_rule(PropagationRule::propagate_args("strings.ToUpper", vec![0]));
         rules.add_rule(PropagationRule::propagate_args("strings.ToLower", vec![0]));
-        rules.add_rule(PropagationRule::propagate_args("strings.TrimSpace", vec![0]));
-        rules.add_rule(PropagationRule::propagate_args("fmt.Sprintf", vec![0, 1, 2, 3, 4]));
+        rules.add_rule(PropagationRule::propagate_args(
+            "strings.TrimSpace",
+            vec![0],
+        ));
+        rules.add_rule(PropagationRule::propagate_args(
+            "fmt.Sprintf",
+            vec![0, 1, 2, 3, 4],
+        ));
 
         // JSON
         rules.add_rule(PropagationRule::propagate_args("json.Marshal", vec![0]));
@@ -1482,9 +1658,15 @@ impl PropagationRules {
         rules.add_rule(PropagationRule::propagate_args("strconv.Atoi", vec![0]));
 
         // Sanitizers
-        rules.add_rule(PropagationRule::sanitizer("html.EscapeString", "html_escape"));
+        rules.add_rule(PropagationRule::sanitizer(
+            "html.EscapeString",
+            "html_escape",
+        ));
         rules.add_rule(PropagationRule::sanitizer("url.QueryEscape", "url_encode"));
-        rules.add_rule(PropagationRule::sanitizer("template.HTMLEscapeString", "html_escape"));
+        rules.add_rule(PropagationRule::sanitizer(
+            "template.HTMLEscapeString",
+            "html_escape",
+        ));
 
         rules
     }
@@ -1501,13 +1683,22 @@ impl PropagationRules {
         rules.add_rule(PropagationRule::propagate_args("to_string", vec![0]));
 
         // JSON
-        rules.add_rule(PropagationRule::propagate_args("serde_json::to_string", vec![0]));
-        rules.add_rule(PropagationRule::propagate_args("serde_json::from_str", vec![0]));
+        rules.add_rule(PropagationRule::propagate_args(
+            "serde_json::to_string",
+            vec![0],
+        ));
+        rules.add_rule(PropagationRule::propagate_args(
+            "serde_json::from_str",
+            vec![0],
+        ));
 
         // Sanitizers
         rules.add_rule(PropagationRule::sanitizer("html_escape", "html_escape"));
         rules.add_rule(PropagationRule::sanitizer("encode_minimal", "html_escape"));
-        rules.add_rule(PropagationRule::sanitizer("urlencoding::encode", "url_encode"));
+        rules.add_rule(PropagationRule::sanitizer(
+            "urlencoding::encode",
+            "url_encode",
+        ));
 
         rules
     }
@@ -1553,7 +1744,9 @@ pub struct TaintTraceResult {
     /// Total tainted nodes found
     pub tainted_node_count: usize,
     /// Tainted lines with their labels
-    pub tainted_lines: HashMap<usize, Vec<String>>,
+    /// Uses IntMap for O(1) usize-keyed lookups
+    #[serde(with = "serde_intmap_vec_string")]
+    pub tainted_lines: IntMap<usize, Vec<String>>,
     /// Detected flows to sinks
     pub flows: Vec<TaintFlow>,
     /// Whether implicit flows were tracked
@@ -1569,7 +1762,7 @@ impl TaintTraceResult {
             file: file.into(),
             start_line,
             tainted_node_count: 0,
-            tainted_lines: HashMap::new(),
+            tainted_lines: IntMap::default(),
             flows: Vec::new(),
             implicit_flow_tracking: false,
             sanitization_points: Vec::new(),
@@ -1845,8 +2038,7 @@ mod tests {
 
     #[test]
     fn test_function_summary() {
-        let summary = FunctionTaintSummary::new("html_escape")
-            .as_sanitizer("html_escape");
+        let summary = FunctionTaintSummary::new("html_escape").as_sanitizer("html_escape");
 
         assert!(summary.is_sanitizer);
         assert_eq!(summary.sanitization_method, Some("html_escape".to_string()));
@@ -1891,8 +2083,8 @@ mod tests {
         let dfg = DFGInfo::new(
             "test_func".to_string(),
             vec![],
-            HashMap::new(),
-            HashMap::new(),
+            Default::default(),
+            Default::default(),
         );
 
         let mut tainted = TaintedDFG::from_dfg(&dfg, "test.py");
@@ -1909,8 +2101,12 @@ mod tests {
     fn test_taint_trace_result_json() {
         let mut result = TaintTraceResult::new("test.py", 10);
         result.tainted_node_count = 5;
-        result.tainted_lines.insert(10, vec!["UserInput".to_string()]);
-        result.tainted_lines.insert(11, vec!["UserInput".to_string()]);
+        result
+            .tainted_lines
+            .insert(10, vec!["UserInput".to_string()]);
+        result
+            .tainted_lines
+            .insert(11, vec!["UserInput".to_string()]);
 
         let json = result.to_json();
         assert_eq!(json["file"], "test.py");
@@ -1923,10 +2119,8 @@ mod tests {
         let mut engine = PropagationEngine::new();
 
         // Register html_escape as a sanitizer
-        engine.register_summary(
-            FunctionTaintSummary::new("html_escape")
-                .as_sanitizer("html_escape")
-        );
+        engine
+            .register_summary(FunctionTaintSummary::new("html_escape").as_sanitizer("html_escape"));
 
         let loc1 = Location::new("test.py", 1, 1);
         let loc2 = Location::new("test.py", 2, 1);

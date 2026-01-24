@@ -23,6 +23,8 @@
 
 use std::collections::{HashSet, VecDeque};
 
+use fixedbitset::FixedBitSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::callgraph::types::{CallGraph, FunctionRef};
@@ -143,9 +145,12 @@ pub enum EntryPointKind {
 ///
 /// This function uses comprehensive heuristics to identify entry points
 /// across multiple programming paradigms and frameworks.
-pub fn detect_entry_points_with_config(graph: &CallGraph, config: &DeadCodeConfig) -> Vec<FunctionRef> {
+pub fn detect_entry_points_with_config(
+    graph: &CallGraph,
+    config: &DeadCodeConfig,
+) -> Vec<FunctionRef> {
     let all_funcs = graph.all_functions();
-    let called: HashSet<_> = graph.edges.iter().map(|e| &e.callee).collect();
+    let called: FxHashSet<_> = graph.edges.iter().map(|e| &e.callee).collect();
 
     all_funcs
         .iter()
@@ -356,14 +361,22 @@ fn is_likely_public_api(name: &str) -> bool {
     let is_getter = name.starts_with("get_")
         || (name.starts_with("get")
             && name.len() > 3
-            && name.chars().nth(3).map(|c| c.is_uppercase()).unwrap_or(false));
+            && name
+                .chars()
+                .nth(3)
+                .map(|c| c.is_uppercase())
+                .unwrap_or(false));
 
     // Setter pattern: set_ or setX (camelCase)
     // Avoids false positives: settings, settle, setup, setter
     let is_setter = name.starts_with("set_")
         || (name.starts_with("set")
             && name.len() > 3
-            && name.chars().nth(3).map(|c| c.is_uppercase()).unwrap_or(false));
+            && name
+                .chars()
+                .nth(3)
+                .map(|c| c.is_uppercase())
+                .unwrap_or(false));
 
     // Boolean accessor patterns (always use underscore convention)
     let is_boolean_accessor = name.starts_with("is_")
@@ -409,9 +422,11 @@ pub fn analyze_dead_code_with_config(graph: &CallGraph, config: &DeadCodeConfig)
     stats.reachable_count = reachable.len();
 
     // Find potentially dead functions
+    // NOTE: Using manual iteration instead of .difference() because all_funcs
+    // returns std::collections::HashSet but reachable is FxHashSet (type mismatch).
     let mut potentially_dead: Vec<_> = all_funcs
-        .difference(&reachable)
-        .filter(|f| !entry_points.contains(f))
+        .iter()
+        .filter(|f| !reachable.contains(*f) && !entry_points.contains(*f))
         .cloned()
         .collect();
 
@@ -462,28 +477,27 @@ pub fn analyze_dead_code_with_config(graph: &CallGraph, config: &DeadCodeConfig)
 /// Compute reachability from entry points using BFS.
 ///
 /// Returns the set of all functions reachable from any entry point.
+/// Returns `std::collections::HashSet` for compatibility with `CallGraph::all_functions()`.
 ///
 /// # Performance
 ///
 /// Uses index-based BFS to avoid cloning `FunctionRef` during traversal.
+/// Uses FixedBitSet for O(1) visited tracking with ~8x less memory than Vec<bool>.
+/// Internally uses FxHashMap for fast index lookups.
 /// Only clones once at the end when building the final result set.
 fn compute_reachability(graph: &CallGraph, entry_points: &[FunctionRef]) -> HashSet<FunctionRef> {
-    use std::collections::HashMap;
-
     // Collect all functions once and build index mapping (uses cached result)
     let all_funcs: Vec<FunctionRef> = graph.all_functions().iter().cloned().collect();
     if all_funcs.is_empty() {
         return HashSet::new();
     }
 
-    let func_to_idx: HashMap<&FunctionRef, usize> = all_funcs
-        .iter()
-        .enumerate()
-        .map(|(i, f)| (f, i))
-        .collect();
+    // Use FxHashMap for fast index lookups during traversal
+    let func_to_idx: FxHashMap<&FunctionRef, usize> =
+        all_funcs.iter().enumerate().map(|(i, f)| (f, i)).collect();
 
-    // Use Vec<bool> for O(1) visited tracking instead of HashSet lookups
-    let mut visited = vec![false; all_funcs.len()];
+    // Use FixedBitSet for O(1) visited tracking (~8x less memory than Vec<bool>)
+    let mut visited = FixedBitSet::with_capacity(all_funcs.len());
 
     // Initialize queue with entry point indices
     let mut queue: VecDeque<usize> = entry_points
@@ -493,15 +507,15 @@ fn compute_reachability(graph: &CallGraph, entry_points: &[FunctionRef]) -> Hash
 
     // BFS traversal using indices (no cloning during traversal)
     while let Some(idx) = queue.pop_front() {
-        if !visited[idx] {
-            visited[idx] = true;
+        if !visited.contains(idx) {
+            visited.insert(idx);
             let func = &all_funcs[idx];
 
             // Add all callees to queue
             if let Some(callees) = graph.callees.get(func) {
                 for callee in callees {
                     if let Some(&callee_idx) = func_to_idx.get(callee) {
-                        if !visited[callee_idx] {
+                        if !visited.contains(callee_idx) {
                             queue.push_back(callee_idx);
                         }
                     }
@@ -512,10 +526,8 @@ fn compute_reachability(graph: &CallGraph, entry_points: &[FunctionRef]) -> Hash
 
     // Convert back to FunctionRef set (single clone per reachable function)
     visited
-        .into_iter()
-        .enumerate()
-        .filter(|(_, v)| *v)
-        .map(|(i, _)| all_funcs[i].clone())
+        .ones()
+        .map(|i| all_funcs[i].clone())
         .collect()
 }
 
@@ -692,7 +704,12 @@ fn compute_confidence(
     // === DECREASE confidence (less likely dead) ===
 
     // Public naming convention (PascalCase) - may be called externally
-    if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    if name
+        .chars()
+        .next()
+        .map(|c| c.is_uppercase())
+        .unwrap_or(false)
+    {
         confidence -= 0.15;
     }
 
@@ -907,7 +924,10 @@ mod tests {
         );
 
         // Ensure other patterns are not affected
-        assert_eq!(classify_entry_point("test_pytest_works"), Some(EntryPointKind::Test));
+        assert_eq!(
+            classify_entry_point("test_pytest_works"),
+            Some(EntryPointKind::Test)
+        );
         assert_eq!(classify_entry_point("regular_function"), None);
     }
 
@@ -1126,8 +1146,7 @@ mod tests {
             assert!(
                 !is_fp,
                 "{} should NOT be a false positive, but got reason: {}",
-                name,
-                reason
+                name, reason
             );
         }
 
@@ -1260,7 +1279,10 @@ mod tests {
         // (Note: these don't start with Create/Make/Build/New which would be factories)
         assert!(!is_likely_entry_point("UserManager", Some(&default_config)));
         assert!(!is_likely_entry_point("Config", Some(&default_config)));
-        assert!(!is_likely_entry_point("DatabaseConnection", Some(&default_config)));
+        assert!(!is_likely_entry_point(
+            "DatabaseConnection",
+            Some(&default_config)
+        ));
 
         // camelCase getters/setters should NOT be entry points with default config
         // (Note: get_/set_ with underscore ARE entry points via classify_entry_point
@@ -1280,7 +1302,10 @@ mod tests {
         // (from_, to_, with_, as_ are in is_likely_public_api but NOT classify_entry_point)
         assert!(!is_likely_entry_point("from_bytes", Some(&default_config)));
         assert!(!is_likely_entry_point("to_string", Some(&default_config)));
-        assert!(!is_likely_entry_point("with_timeout", Some(&default_config)));
+        assert!(!is_likely_entry_point(
+            "with_timeout",
+            Some(&default_config)
+        ));
         assert!(!is_likely_entry_point("as_ref", Some(&default_config)));
 
         // But they SHOULD be entry points when include_public_api_patterns is enabled
@@ -1289,15 +1314,24 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(is_likely_entry_point("UserManager", Some(&permissive_config)));
+        assert!(is_likely_entry_point(
+            "UserManager",
+            Some(&permissive_config)
+        ));
         assert!(is_likely_entry_point("getUser", Some(&permissive_config)));
         assert!(is_likely_entry_point("is_valid", Some(&permissive_config)));
-        assert!(is_likely_entry_point("from_bytes", Some(&permissive_config)));
+        assert!(is_likely_entry_point(
+            "from_bytes",
+            Some(&permissive_config)
+        ));
         assert!(is_likely_entry_point("to_string", Some(&permissive_config)));
 
         // Core entry points should ALWAYS work regardless of config
         assert!(is_likely_entry_point("main", Some(&default_config)));
-        assert!(is_likely_entry_point("test_something", Some(&default_config)));
+        assert!(is_likely_entry_point(
+            "test_something",
+            Some(&default_config)
+        ));
         assert!(is_likely_entry_point("onClick", Some(&default_config))); // callback
         assert!(is_likely_entry_point("create_user", Some(&default_config))); // factory (create_ prefix)
         assert!(is_likely_entry_point("get_user", Some(&default_config))); // API endpoint (get_ prefix)
@@ -1319,8 +1353,14 @@ mod tests {
         assert!(is_likely_entry_point("hook_after", Some(&config)));
 
         // Without config, these should NOT match
-        assert!(!is_likely_entry_point("plugin_load", Some(&DeadCodeConfig::default())));
-        assert!(!is_likely_entry_point("hook_before", Some(&DeadCodeConfig::default())));
+        assert!(!is_likely_entry_point(
+            "plugin_load",
+            Some(&DeadCodeConfig::default())
+        ));
+        assert!(!is_likely_entry_point(
+            "hook_before",
+            Some(&DeadCodeConfig::default())
+        ));
 
         // Regular functions should still not match
         assert!(!is_likely_entry_point("process_data", Some(&config)));

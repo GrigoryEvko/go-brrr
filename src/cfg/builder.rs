@@ -10,7 +10,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
 
 use crate::cfg::types::CFGInfo;
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
 use crate::util::format_query_error;
 
@@ -127,9 +127,9 @@ impl CfgBuilder {
 
         // Resolve language: use explicit override or auto-detect from extension
         let lang = match language {
-            Some(lang_name) => registry.get_by_name(lang_name).ok_or_else(|| {
-                BrrrError::UnsupportedLanguage(lang_name.to_string())
-            })?,
+            Some(lang_name) => registry
+                .get_by_name(lang_name)
+                .ok_or_else(|| BrrrError::UnsupportedLanguage(lang_name.to_string()))?,
             None => registry.detect_language(path).ok_or_else(|| {
                 BrrrError::UnsupportedLanguage(
                     path.extension()
@@ -141,8 +141,7 @@ impl CfgBuilder {
         };
 
         // Read and parse the file with extension-aware parser
-        let source = std::fs::read(path)
-            .map_err(|e| BrrrError::io_with_path(e, path))?;
+        let source = std::fs::read(path).map_err(|e| BrrrError::io_with_path(e, path))?;
         let mut parser = lang.parser_for_path(path)?;
         let tree = parser
             .parse(&source, None)
@@ -282,7 +281,12 @@ impl CfgBuilder {
         let ts_lang = tree.language();
 
         let query = Query::new(&ts_lang, class_query_str).map_err(|e| {
-            BrrrError::TreeSitter(format_query_error(lang.name(), "class", class_query_str, &e))
+            BrrrError::TreeSitter(format_query_error(
+                lang.name(),
+                "class",
+                class_query_str,
+                &e,
+            ))
         })?;
 
         let mut cursor = QueryCursor::new();
@@ -401,7 +405,12 @@ impl CfgBuilder {
         let ts_lang = tree.language();
 
         let query = Query::new(&ts_lang, class_query_str).map_err(|e| {
-            BrrrError::TreeSitter(format_query_error(lang.name(), "class", class_query_str, &e))
+            BrrrError::TreeSitter(format_query_error(
+                lang.name(),
+                "class",
+                class_query_str,
+                &e,
+            ))
         })?;
 
         let mut cursor = QueryCursor::new();
@@ -623,8 +632,14 @@ def safe_divide(a, b):
         let cfg = cfg.unwrap();
         assert_eq!(cfg.function_name, "safe_divide");
 
-        // Should have exception edge
-        let has_exception_edge = cfg.edges.iter().any(|e| e.label().contains("exception"));
+        // Should have exception edge (TypedException for typed handlers like ZeroDivisionError)
+        use crate::cfg::types::EdgeType;
+        let has_exception_edge = cfg.edges.iter().any(|e| {
+            matches!(
+                e.edge_type,
+                EdgeType::Exception | EdgeType::TypedException | EdgeType::ExceptionGroup
+            )
+        });
         assert!(has_exception_edge);
     }
 
@@ -712,8 +727,14 @@ def simple():
         let simple_cfg =
             CfgBuilder::extract_from_source(simple_source, "python", "simple").unwrap();
         let simple_complexity = simple_cfg.cyclomatic_complexity();
-        assert_eq!(simple_cfg.decision_points, 0, "Simple function should have 0 decision points");
-        assert_eq!(simple_complexity, 1, "Simple function complexity should be 1");
+        assert_eq!(
+            simple_cfg.decision_points, 0,
+            "Simple function should have 0 decision points"
+        );
+        assert_eq!(
+            simple_complexity, 1,
+            "Simple function complexity should be 1"
+        );
 
         // Function with if: complexity = 2 (1 decision point + 1)
         let if_source = r#"
@@ -724,7 +745,10 @@ def with_if(x):
 "#;
         let if_cfg = CfgBuilder::extract_from_source(if_source, "python", "with_if").unwrap();
         let if_complexity = if_cfg.cyclomatic_complexity();
-        assert_eq!(if_cfg.decision_points, 1, "Function with if should have 1 decision point");
+        assert_eq!(
+            if_cfg.decision_points, 1,
+            "Function with if should have 1 decision point"
+        );
         assert_eq!(if_complexity, 2, "Function with if complexity should be 2");
 
         // Function with if-elif-else: complexity = 3 (2 decision points + 1)
@@ -738,8 +762,15 @@ def with_elif(x):
         return "zero"
 "#;
         let elif_cfg = CfgBuilder::extract_from_source(elif_source, "python", "with_elif").unwrap();
-        assert_eq!(elif_cfg.decision_points, 2, "if-elif should have 2 decision points");
-        assert_eq!(elif_cfg.cyclomatic_complexity(), 3, "if-elif complexity should be 3");
+        assert_eq!(
+            elif_cfg.decision_points, 2,
+            "if-elif should have 2 decision points"
+        );
+        assert_eq!(
+            elif_cfg.cyclomatic_complexity(),
+            3,
+            "if-elif complexity should be 3"
+        );
 
         // Function with for loop: complexity = 2 (1 decision point + 1)
         let for_source = r#"
@@ -748,8 +779,15 @@ def with_for(items):
         print(item)
 "#;
         let for_cfg = CfgBuilder::extract_from_source(for_source, "python", "with_for").unwrap();
-        assert_eq!(for_cfg.decision_points, 1, "for loop should have 1 decision point");
-        assert_eq!(for_cfg.cyclomatic_complexity(), 2, "for loop complexity should be 2");
+        assert_eq!(
+            for_cfg.decision_points, 1,
+            "for loop should have 1 decision point"
+        );
+        assert_eq!(
+            for_cfg.cyclomatic_complexity(),
+            2,
+            "for loop complexity should be 2"
+        );
 
         // Function with while loop: complexity = 2 (1 decision point + 1)
         let while_source = r#"
@@ -757,9 +795,17 @@ def with_while(n):
     while n > 0:
         n -= 1
 "#;
-        let while_cfg = CfgBuilder::extract_from_source(while_source, "python", "with_while").unwrap();
-        assert_eq!(while_cfg.decision_points, 1, "while loop should have 1 decision point");
-        assert_eq!(while_cfg.cyclomatic_complexity(), 2, "while loop complexity should be 2");
+        let while_cfg =
+            CfgBuilder::extract_from_source(while_source, "python", "with_while").unwrap();
+        assert_eq!(
+            while_cfg.decision_points, 1,
+            "while loop should have 1 decision point"
+        );
+        assert_eq!(
+            while_cfg.cyclomatic_complexity(),
+            2,
+            "while loop complexity should be 2"
+        );
 
         assert!(if_complexity >= simple_complexity);
     }
@@ -848,7 +894,10 @@ def find_first(items, target):
         }
 
         // Partial overlap: (10, 20) and (15, 25)
-        assert!(overlaps(10, 20, 15, 25), "Partial overlap should be detected");
+        assert!(
+            overlaps(10, 20, 15, 25),
+            "Partial overlap should be detected"
+        );
 
         // Partial overlap reversed: (15, 25) and (10, 20)
         assert!(
@@ -1174,7 +1223,10 @@ class Calculator:
             BrrrError::PathTraversal { .. } => {}
             BrrrError::Io(_) => {} // Also acceptable - path doesn't exist
             BrrrError::UnsupportedLanguage(_) => {} // File has no recognized extension
-            e => panic!("Expected PathTraversal, Io, or UnsupportedLanguage error, got: {:?}", e),
+            e => panic!(
+                "Expected PathTraversal, Io, or UnsupportedLanguage error, got: {:?}",
+                e
+            ),
         }
     }
 
@@ -1201,6 +1253,9 @@ def test():
     return 42
 "#;
         let result = CfgBuilder::extract_from_source(source, "python", "test");
-        assert!(result.is_ok(), "extract_from_source should work with string input");
+        assert!(
+            result.is_ok(),
+            "extract_from_source should work with string input"
+        );
     }
 }

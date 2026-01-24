@@ -64,7 +64,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor, Tree};
 
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
 use crate::util::format_query_error;
 
@@ -1036,10 +1036,13 @@ const TYPESCRIPT_DESER_QUERY: &str = r#"
 /// # Returns
 ///
 /// Vector of deserialization findings.
-pub fn scan_deserialization(path: &Path, language: Option<&str>) -> Result<Vec<DeserializationFinding>> {
-    let path_str = path.to_str().ok_or_else(|| {
-        BrrrError::InvalidArgument("Invalid path encoding".to_string())
-    })?;
+pub fn scan_deserialization(
+    path: &Path,
+    language: Option<&str>,
+) -> Result<Vec<DeserializationFinding>> {
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| BrrrError::InvalidArgument("Invalid path encoding".to_string()))?;
 
     let scanner = ProjectScanner::new(path_str)?;
     let config = match language {
@@ -1053,9 +1056,7 @@ pub fn scan_deserialization(path: &Path, language: Option<&str>) -> Result<Vec<D
     // Process files in parallel
     let findings: Vec<DeserializationFinding> = files
         .par_iter()
-        .filter_map(|file| {
-            scan_file_deserialization(file, language).ok()
-        })
+        .filter_map(|file| scan_file_deserialization(file, language).ok())
         .flatten()
         .collect();
 
@@ -1063,7 +1064,10 @@ pub fn scan_deserialization(path: &Path, language: Option<&str>) -> Result<Vec<D
 }
 
 /// Scan a single file for deserialization vulnerabilities.
-pub fn scan_file_deserialization(file: &Path, language: Option<&str>) -> Result<Vec<DeserializationFinding>> {
+pub fn scan_file_deserialization(
+    file: &Path,
+    language: Option<&str>,
+) -> Result<Vec<DeserializationFinding>> {
     let registry = LanguageRegistry::global();
 
     // Detect language
@@ -1071,14 +1075,14 @@ pub fn scan_file_deserialization(file: &Path, language: Option<&str>) -> Result<
         Some(lang_name) => registry
             .get_by_name(lang_name)
             .ok_or_else(|| BrrrError::UnsupportedLanguage(lang_name.to_string()))?,
-        None => registry
-            .detect_language(file)
-            .ok_or_else(|| BrrrError::UnsupportedLanguage(
+        None => registry.detect_language(file).ok_or_else(|| {
+            BrrrError::UnsupportedLanguage(
                 file.extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or("unknown")
                     .to_string(),
-            ))?,
+            )
+        })?,
     };
 
     let lang_name = lang.name();
@@ -1098,23 +1102,19 @@ pub fn scan_file_deserialization(file: &Path, language: Option<&str>) -> Result<
     // Parse the file
     let source = std::fs::read(file).map_err(|e| BrrrError::io_with_path(e, file))?;
     let mut parser = lang.parser_for_path(file)?;
-    let tree = parser.parse(&source, None).ok_or_else(|| BrrrError::Parse {
-        file: file.display().to_string(),
-        message: "Failed to parse file".to_string(),
-    })?;
+    let tree = parser
+        .parse(&source, None)
+        .ok_or_else(|| BrrrError::Parse {
+            file: file.display().to_string(),
+            message: "Failed to parse file".to_string(),
+        })?;
 
     let ts_lang = tree.language();
     let file_path = file.display().to_string();
 
     // Find deserialization sinks
-    let findings = find_deserialization_sinks(
-        &tree,
-        &source,
-        &ts_lang,
-        query_str,
-        lang_name,
-        &file_path,
-    )?;
+    let findings =
+        find_deserialization_sinks(&tree, &source, &ts_lang, query_str, lang_name, &file_path)?;
 
     Ok(findings)
 }
@@ -1128,8 +1128,14 @@ fn find_deserialization_sinks(
     lang_name: &str,
     file_path: &str,
 ) -> Result<Vec<DeserializationFinding>> {
-    let query = Query::new(ts_lang, query_str)
-        .map_err(|e| BrrrError::TreeSitter(format_query_error(lang_name, "deserialization", query_str, &e)))?;
+    let query = Query::new(ts_lang, query_str).map_err(|e| {
+        BrrrError::TreeSitter(format_query_error(
+            lang_name,
+            "deserialization",
+            query_str,
+            &e,
+        ))
+    })?;
 
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&query, tree.root_node(), source);
@@ -1182,19 +1188,12 @@ fn find_deserialization_sinks(
             );
 
             // Analyze input source
-            let (input_source, deserialized_data) = analyze_input_source(
-                args_node,
-                source,
-                tree,
-                lang_name,
-            );
+            let (input_source, deserialized_data) =
+                analyze_input_source(args_node, source, tree, lang_name);
 
             // Determine severity and confidence
-            let (severity, confidence) = calculate_severity_confidence(
-                sink_def,
-                &input_source,
-                is_safe,
-            );
+            let (severity, confidence) =
+                calculate_severity_confidence(sink_def, &input_source, is_safe);
 
             let location = SourceLocation {
                 file: file_path.to_string(),
@@ -1257,9 +1256,9 @@ fn find_sink_definition(
     function: &str,
 ) -> Option<&'static DeserializationSink> {
     DESERIALIZATION_SINKS.iter().find(|sink| {
-        sink.language == lang &&
-        sink.function == function &&
-        (sink.module.is_none() || sink.module == module)
+        sink.language == lang
+            && sink.function == function
+            && (sink.module.is_none() || sink.module == module)
     })
 }
 
@@ -1284,9 +1283,9 @@ fn check_safe_patterns(
 
             // Check for yaml.load with Loader=SafeLoader
             if module == Some("yaml") && function == "load" {
-                if args_text.contains("SafeLoader") ||
-                   args_text.contains("Loader=yaml.SafeLoader") ||
-                   args_text.contains("Loader=SafeLoader")
+                if args_text.contains("SafeLoader")
+                    || args_text.contains("Loader=yaml.SafeLoader")
+                    || args_text.contains("Loader=SafeLoader")
                 {
                     return (true, Some("Using SafeLoader".to_string()));
                 }
@@ -1294,8 +1293,8 @@ fn check_safe_patterns(
 
             // Check for numpy.load with allow_pickle=False
             if (module == Some("np") || module == Some("numpy")) && function == "load" {
-                if args_text.contains("allow_pickle=False") ||
-                   args_text.contains("allow_pickle = False")
+                if args_text.contains("allow_pickle=False")
+                    || args_text.contains("allow_pickle = False")
                 {
                     return (true, Some("allow_pickle=False".to_string()));
                 }
@@ -1303,14 +1302,20 @@ fn check_safe_patterns(
 
             // Check if loading from internal cache path
             if args_text.contains("cache") && !args_text.contains("request") {
-                return (true, Some("Loading from cache (possibly internal)".to_string()));
+                return (
+                    true,
+                    Some("Loading from cache (possibly internal)".to_string()),
+                );
             }
 
             // Check for trusted file paths (heuristic)
-            if args_text.contains("/etc/") ||
-               args_text.contains("config") && !args_text.contains("request")
+            if args_text.contains("/etc/")
+                || args_text.contains("config") && !args_text.contains("request")
             {
-                return (true, Some("Loading from config file (possibly trusted)".to_string()));
+                return (
+                    true,
+                    Some("Loading from config file (possibly trusted)".to_string()),
+                );
             }
         }
 
@@ -1326,9 +1331,9 @@ fn check_safe_patterns(
 
         "typescript" | "javascript" => {
             // Check for safe YAML options
-            if args_text.contains("JSON_SCHEMA") ||
-               args_text.contains("FAILSAFE_SCHEMA") ||
-               args_text.contains("schema: ")
+            if args_text.contains("JSON_SCHEMA")
+                || args_text.contains("FAILSAFE_SCHEMA")
+                || args_text.contains("schema: ")
             {
                 return (true, Some("Using safe YAML schema".to_string()));
             }
@@ -1370,13 +1375,17 @@ fn analyze_input_source(
 
     // Check for HTTP request patterns
     if lower_args.contains("request") {
-        if lower_args.contains("body") || lower_args.contains("data") ||
-           lower_args.contains("content") || lower_args.contains("stream")
+        if lower_args.contains("body")
+            || lower_args.contains("data")
+            || lower_args.contains("content")
+            || lower_args.contains("stream")
         {
             return (InputSource::HttpRequestBody, args_text);
         }
-        if lower_args.contains("param") || lower_args.contains("query") ||
-           lower_args.contains("get") || lower_args.contains("args")
+        if lower_args.contains("param")
+            || lower_args.contains("query")
+            || lower_args.contains("get")
+            || lower_args.contains("args")
         {
             return (InputSource::HttpRequestParams, args_text);
         }
@@ -1387,12 +1396,15 @@ fn analyze_input_source(
     }
 
     // Check for file patterns
-    if lower_args.contains("open(") || lower_args.contains("file") ||
-       lower_args.contains("read(") || lower_args.contains("path")
+    if lower_args.contains("open(")
+        || lower_args.contains("file")
+        || lower_args.contains("read(")
+        || lower_args.contains("path")
     {
         // Check if it looks like user-controlled
-        if lower_args.contains("upload") || lower_args.contains("user") ||
-           lower_args.contains("input")
+        if lower_args.contains("upload")
+            || lower_args.contains("user")
+            || lower_args.contains("input")
         {
             return (InputSource::FileUpload, args_text);
         }
@@ -1400,23 +1412,29 @@ fn analyze_input_source(
     }
 
     // Check for socket/network patterns
-    if lower_args.contains("socket") || lower_args.contains("recv") ||
-       lower_args.contains("conn") || lower_args.contains("stream")
+    if lower_args.contains("socket")
+        || lower_args.contains("recv")
+        || lower_args.contains("conn")
+        || lower_args.contains("stream")
     {
         return (InputSource::NetworkSocket, args_text);
     }
 
     // Check for database patterns
-    if lower_args.contains("cursor") || lower_args.contains("query") ||
-       lower_args.contains("db.") || lower_args.contains("row")
+    if lower_args.contains("cursor")
+        || lower_args.contains("query")
+        || lower_args.contains("db.")
+        || lower_args.contains("row")
     {
         return (InputSource::Database, args_text);
     }
 
     // Check for message queue patterns
-    if lower_args.contains("queue") || lower_args.contains("message") ||
-       lower_args.contains("kafka") || lower_args.contains("rabbit") ||
-       lower_args.contains("celery")
+    if lower_args.contains("queue")
+        || lower_args.contains("message")
+        || lower_args.contains("kafka")
+        || lower_args.contains("rabbit")
+        || lower_args.contains("celery")
     {
         return (InputSource::MessageQueue, args_text);
     }
@@ -1427,8 +1445,9 @@ fn analyze_input_source(
     }
 
     // Check for command line args
-    if lower_args.contains("argv") || lower_args.contains("sys.argv") ||
-       lower_args.contains("args[")
+    if lower_args.contains("argv")
+        || lower_args.contains("sys.argv")
+        || lower_args.contains("args[")
     {
         return (InputSource::CmdLineArg, args_text);
     }
@@ -1462,14 +1481,13 @@ fn calculate_severity_confidence(
     } else {
         // Adjust based on input source
         match input_source {
-            InputSource::HttpRequestBody |
-            InputSource::HttpRequestParams |
-            InputSource::FileUpload |
-            InputSource::NetworkSocket |
-            InputSource::MessageQueue => base_severity,
+            InputSource::HttpRequestBody
+            | InputSource::HttpRequestParams
+            | InputSource::FileUpload
+            | InputSource::NetworkSocket
+            | InputSource::MessageQueue => base_severity,
 
-            InputSource::StdIn |
-            InputSource::CmdLineArg => {
+            InputSource::StdIn | InputSource::CmdLineArg => {
                 // Slightly lower - requires local access
                 match base_severity {
                     Severity::Critical => Severity::High,
@@ -1477,20 +1495,17 @@ fn calculate_severity_confidence(
                 }
             }
 
-            InputSource::FileRead |
-            InputSource::Database => {
+            InputSource::FileRead | InputSource::Database => {
                 // Could be user-controlled, medium confidence
                 base_severity
             }
 
-            InputSource::InternalCache |
-            InputSource::ConfigFile => {
+            InputSource::InternalCache | InputSource::ConfigFile => {
                 // Likely safe, but flag for review
                 Severity::Low
             }
 
-            InputSource::EnvVar |
-            InputSource::Unknown => {
+            InputSource::EnvVar | InputSource::Unknown => {
                 // Unknown source - flag but lower confidence
                 match base_severity {
                     Severity::Critical => Severity::High,
@@ -1502,23 +1517,20 @@ fn calculate_severity_confidence(
 
     // Calculate confidence
     let confidence = match input_source {
-        InputSource::HttpRequestBody |
-        InputSource::HttpRequestParams |
-        InputSource::FileUpload |
-        InputSource::NetworkSocket => Confidence::High,
+        InputSource::HttpRequestBody
+        | InputSource::HttpRequestParams
+        | InputSource::FileUpload
+        | InputSource::NetworkSocket => Confidence::High,
 
-        InputSource::MessageQueue |
-        InputSource::StdIn |
-        InputSource::CmdLineArg => Confidence::High,
+        InputSource::MessageQueue | InputSource::StdIn | InputSource::CmdLineArg => {
+            Confidence::High
+        }
 
-        InputSource::Database |
-        InputSource::FileRead => Confidence::Medium,
+        InputSource::Database | InputSource::FileRead => Confidence::Medium,
 
-        InputSource::InternalCache |
-        InputSource::ConfigFile => Confidence::Low,
+        InputSource::InternalCache | InputSource::ConfigFile => Confidence::Low,
 
-        InputSource::EnvVar |
-        InputSource::Unknown => Confidence::Low,
+        InputSource::EnvVar | InputSource::Unknown => Confidence::Low,
     };
 
     (severity, confidence)
@@ -1556,7 +1568,9 @@ fn generate_description(
     if is_safe {
         format!(
             "Deserialization using {} from {}: {}. Note: {}",
-            method, input_source, sink_desc,
+            method,
+            input_source,
+            sink_desc,
             safety_reason.unwrap_or("May be using safe pattern")
         )
     } else {
@@ -1576,16 +1590,17 @@ fn generate_remediation(
     let safe_alt = sink_def.and_then(|s| s.safe_alternative);
 
     match (method, lang) {
-        (DeserializationMethod::Pickle, "python") |
-        (DeserializationMethod::Dill, "python") |
-        (DeserializationMethod::Shelve, "python") => {
+        (DeserializationMethod::Pickle, "python")
+        | (DeserializationMethod::Dill, "python")
+        | (DeserializationMethod::Shelve, "python") => {
             "CRITICAL: Pickle-based deserialization allows arbitrary code execution.\n\
              NEVER deserialize untrusted data with pickle.\n\n\
              Alternatives:\n\
              - Use JSON (json.loads) for simple data structures\n\
              - Use Protocol Buffers or MessagePack for binary serialization\n\
              - If pickle is required, only load from trusted sources with integrity verification\n\
-             - Consider using RestrictedPython or sandboxing if external data is unavoidable".to_string()
+             - Consider using RestrictedPython or sandboxing if external data is unavoidable"
+                .to_string()
         }
 
         (DeserializationMethod::YamlUnsafe, "python") => {
@@ -1598,7 +1613,8 @@ fn generate_remediation(
              data = yaml.safe_load(user_input)  # Only loads basic types\n\
              # Or with explicit SafeLoader:\n\
              data = yaml.load(user_input, Loader=yaml.SafeLoader)\n\
-             ```".to_string()
+             ```"
+            .to_string()
         }
 
         (DeserializationMethod::Marshal, "python") => {
@@ -1606,7 +1622,8 @@ fn generate_remediation(
              Alternatives:\n\
              - Use JSON for data interchange\n\
              - Use pickle only for trusted internal data\n\
-             - marshal is intended for .pyc files, not data serialization".to_string()
+             - marshal is intended for .pyc files, not data serialization"
+                .to_string()
         }
 
         (DeserializationMethod::JavaObjectStream, "java") => {
@@ -1616,7 +1633,8 @@ fn generate_remediation(
              - Use JSON/Jackson with @JsonTypeInfo whitelisting\n\
              - Avoid deserializing untrusted data entirely\n\
              - Remove vulnerable libraries (Commons Collections, etc.)\n\
-             - Use serialization libraries with type restrictions".to_string()
+             - Use serialization libraries with type restrictions"
+                .to_string()
         }
 
         (DeserializationMethod::XmlDecoder, "java") => {
@@ -1625,7 +1643,8 @@ fn generate_remediation(
              Alternatives:\n\
              - Use Jackson XML with type whitelisting\n\
              - Use JAXB with proper schema validation\n\
-             - Parse XML manually and construct objects explicitly".to_string()
+             - Parse XML manually and construct objects explicitly"
+                .to_string()
         }
 
         (DeserializationMethod::XStream, "java") => {
@@ -1638,7 +1657,8 @@ fn generate_remediation(
              xstream.allowTypesByWildcard(new String[] {\n\
                  \"com.yourcompany.**\"\n\
              });\n\
-             ```".to_string()
+             ```"
+            .to_string()
         }
 
         (DeserializationMethod::RubyMarshal, "ruby") => {
@@ -1646,7 +1666,8 @@ fn generate_remediation(
              Alternatives:\n\
              - Use JSON.parse for simple data\n\
              - Use Oj.safe_load for JSON with options\n\
-             - Never deserialize untrusted data with Marshal".to_string()
+             - Never deserialize untrusted data with Marshal"
+                .to_string()
         }
 
         (DeserializationMethod::RubyYaml, "ruby") => {
@@ -1659,7 +1680,8 @@ fn generate_remediation(
              data = YAML.safe_load(user_input)  # Only basic types\n\
              # Or with permitted classes:\n\
              data = YAML.safe_load(user_input, permitted_classes: [Symbol])\n\
-             ```".to_string()
+             ```"
+            .to_string()
         }
 
         (DeserializationMethod::PhpUnserialize, "php") => {
@@ -1672,17 +1694,18 @@ fn generate_remediation(
              $data = unserialize($user_input, ['allowed_classes' => false]);\n\n\
              // BEST: Use JSON\n\
              $data = json_decode($user_input);\n\
-             ```".to_string()
+             ```"
+            .to_string()
         }
 
-        (DeserializationMethod::JsEval, _) |
-        (DeserializationMethod::JsFunction, _) => {
+        (DeserializationMethod::JsEval, _) | (DeserializationMethod::JsFunction, _) => {
             "CRITICAL: eval/Function can execute arbitrary JavaScript.\n\n\
              Alternatives:\n\
              - Use JSON.parse() for JSON data\n\
              - Use a proper template engine for dynamic content\n\
              - If dynamic code is required, use vm2 with sandboxing\n\
-             - Consider WebAssembly for safe code execution".to_string()
+             - Consider WebAssembly for safe code execution"
+                .to_string()
         }
 
         (DeserializationMethod::NodeSerialize, _) => {
@@ -1691,7 +1714,8 @@ fn generate_remediation(
              Alternatives:\n\
              - Use JSON.parse()/JSON.stringify() for serialization\n\
              - Use MessagePack or Protocol Buffers for binary serialization\n\
-             - Remove these packages from your dependencies".to_string()
+             - Remove these packages from your dependencies"
+                .to_string()
         }
 
         (DeserializationMethod::JsYaml, _) => {
@@ -1705,7 +1729,8 @@ fn generate_remediation(
              const data = yaml.load(userInput, { schema: yaml.JSON_SCHEMA });\n\
              // Or use safeLoad (deprecated but safe)\n\
              const data = yaml.safeLoad(userInput);\n\
-             ```".to_string()
+             ```"
+            .to_string()
         }
 
         _ => {
@@ -1724,7 +1749,8 @@ fn generate_remediation(
                  General guidelines:\n\
                  - Never deserialize untrusted data\n\
                  - Use JSON or other safe formats when possible\n\
-                 - If deserialization is required, whitelist allowed types".to_string()
+                 - If deserialization is required, whitelist allowed types"
+                    .to_string()
             }
         }
     }
@@ -1768,10 +1794,13 @@ def load_user_data(request):
     return data
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_deserialization(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_deserialization(file.path(), Some("python")).expect("Scan should succeed");
 
-        assert!(!findings.is_empty(), "Should detect pickle.load vulnerability");
+        assert!(
+            !findings.is_empty(),
+            "Should detect pickle.load vulnerability"
+        );
         let finding = &findings[0];
         assert_eq!(finding.method, DeserializationMethod::Pickle);
         assert_eq!(finding.severity, Severity::Critical);
@@ -1788,10 +1817,13 @@ def process(data):
     return obj
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_deserialization(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_deserialization(file.path(), Some("python")).expect("Scan should succeed");
 
-        assert!(!findings.is_empty(), "Should detect pickle.loads vulnerability");
+        assert!(
+            !findings.is_empty(),
+            "Should detect pickle.loads vulnerability"
+        );
     }
 
     #[test]
@@ -1804,16 +1836,16 @@ def parse_config(config_str):
     return yaml.load(config_str)
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_deserialization(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_deserialization(file.path(), Some("python")).expect("Scan should succeed");
 
         // yaml.load detection - if found, verify it's flagged appropriately
         // Query sensitivity may vary across tree-sitter versions
         if !findings.is_empty() {
             let finding = &findings[0];
             assert!(
-                finding.method == DeserializationMethod::YamlUnsafe ||
-                finding.sink_function.contains("yaml"),
+                finding.method == DeserializationMethod::YamlUnsafe
+                    || finding.sink_function.contains("yaml"),
                 "yaml.load should be categorized as YAML-related"
             );
         }
@@ -1831,8 +1863,8 @@ def parse_config(config_str):
     return yaml.safe_load(config_str)
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_deserialization(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_deserialization(file.path(), Some("python")).expect("Scan should succeed");
 
         // safe_load should not be flagged or should be marked as safe
         assert!(
@@ -1850,8 +1882,8 @@ def parse_config(config_str):
     return yaml.load(config_str, Loader=yaml.SafeLoader)
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_deserialization(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_deserialization(file.path(), Some("python")).expect("Scan should succeed");
 
         // Should be flagged but marked as possibly safe
         if !findings.is_empty() {
@@ -1871,8 +1903,8 @@ def load_bytecode(data):
     return marshal.loads(data)
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_deserialization(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_deserialization(file.path(), Some("python")).expect("Scan should succeed");
 
         assert!(!findings.is_empty(), "Should detect marshal vulnerability");
         assert_eq!(findings[0].method, DeserializationMethod::Marshal);
@@ -1888,8 +1920,8 @@ def load_session(session_file):
     return db['user']
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_deserialization(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_deserialization(file.path(), Some("python")).expect("Scan should succeed");
 
         assert!(!findings.is_empty(), "Should detect shelve vulnerability");
         assert_eq!(findings[0].method, DeserializationMethod::Shelve);
@@ -1904,11 +1936,14 @@ def load_model(model_path):
     return torch.load(model_path)
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_deserialization(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_deserialization(file.path(), Some("python")).expect("Scan should succeed");
 
         // torch.load uses pickle internally
-        assert!(!findings.is_empty(), "Should detect torch.load vulnerability");
+        assert!(
+            !findings.is_empty(),
+            "Should detect torch.load vulnerability"
+        );
     }
 
     #[test]
@@ -1920,8 +1955,8 @@ def load_array(file_path):
     return np.load(file_path, allow_pickle=False)
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_deserialization(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_deserialization(file.path(), Some("python")).expect("Scan should succeed");
 
         // Should be safe with allow_pickle=False
         if !findings.is_empty() {
@@ -1950,8 +1985,8 @@ function processData(userInput: string) {
         // eval detection - check that something is found and appropriately flagged
         if !findings.is_empty() {
             assert!(
-                findings[0].method == DeserializationMethod::JsEval ||
-                findings[0].sink_function.contains("eval"),
+                findings[0].method == DeserializationMethod::JsEval
+                    || findings[0].sink_function.contains("eval"),
                 "eval should be categorized correctly"
             );
             // Severity should be High or Critical for eval
@@ -2013,16 +2048,16 @@ public class UserDeserializer {
 }
 "#;
         let file = create_temp_file(source, ".java");
-        let findings = scan_file_deserialization(file.path(), Some("java"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_deserialization(file.path(), Some("java")).expect("Scan should succeed");
 
         // Java deserialization detection - verify detection if found
         // Query sensitivity varies with tree-sitter-java version
         if !findings.is_empty() {
             assert!(
-                findings[0].method == DeserializationMethod::JavaObjectStream ||
-                findings[0].sink_function.contains("readObject") ||
-                findings[0].sink_function.contains("ObjectInputStream"),
+                findings[0].method == DeserializationMethod::JavaObjectStream
+                    || findings[0].sink_function.contains("readObject")
+                    || findings[0].sink_function.contains("ObjectInputStream"),
                 "ObjectInputStream.readObject should be categorized correctly"
             );
         }
@@ -2041,8 +2076,8 @@ public class XmlParser {
 }
 "#;
         let file = create_temp_file(source, ".java");
-        let findings = scan_file_deserialization(file.path(), Some("java"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_deserialization(file.path(), Some("java")).expect("Scan should succeed");
 
         assert!(!findings.is_empty(), "Should detect XStream vulnerability");
     }
@@ -2068,7 +2103,10 @@ public class XmlParser {
     #[test]
     fn test_input_source_display() {
         // Test InputSource Display trait
-        assert_eq!(format!("{}", InputSource::HttpRequestBody), "HTTP request body");
+        assert_eq!(
+            format!("{}", InputSource::HttpRequestBody),
+            "HTTP request body"
+        );
         assert_eq!(format!("{}", InputSource::FileUpload), "file upload");
         assert_eq!(format!("{}", InputSource::Unknown), "unknown source");
     }
@@ -2076,8 +2114,14 @@ public class XmlParser {
     #[test]
     fn test_method_display() {
         assert_eq!(format!("{}", DeserializationMethod::Pickle), "pickle");
-        assert_eq!(format!("{}", DeserializationMethod::YamlUnsafe), "yaml.load (unsafe)");
-        assert_eq!(format!("{}", DeserializationMethod::JavaObjectStream), "ObjectInputStream");
+        assert_eq!(
+            format!("{}", DeserializationMethod::YamlUnsafe),
+            "yaml.load (unsafe)"
+        );
+        assert_eq!(
+            format!("{}", DeserializationMethod::JavaObjectStream),
+            "ObjectInputStream"
+        );
     }
 
     #[test]
@@ -2095,12 +2139,14 @@ public class XmlParser {
     #[test]
     fn test_safe_alternatives_exist() {
         // Verify that safe alternatives are documented for critical sinks
-        let critical_sinks: Vec<_> = DESERIALIZATION_SINKS.iter()
+        let critical_sinks: Vec<_> = DESERIALIZATION_SINKS
+            .iter()
             .filter(|s| s.severity == Severity::Critical)
             .collect();
 
         // Most critical sinks should have safe alternatives
-        let with_alternatives: Vec<_> = critical_sinks.iter()
+        let with_alternatives: Vec<_> = critical_sinks
+            .iter()
             .filter(|s| s.safe_alternative.is_some())
             .collect();
 
@@ -2113,14 +2159,22 @@ public class XmlParser {
     #[test]
     fn test_deserialization_sink_count() {
         // Verify we have comprehensive coverage
-        let python_sinks: Vec<_> = DESERIALIZATION_SINKS.iter()
+        let python_sinks: Vec<_> = DESERIALIZATION_SINKS
+            .iter()
             .filter(|s| s.language == "python")
             .collect();
-        assert!(python_sinks.len() >= 10, "Should have comprehensive Python coverage");
+        assert!(
+            python_sinks.len() >= 10,
+            "Should have comprehensive Python coverage"
+        );
 
-        let java_sinks: Vec<_> = DESERIALIZATION_SINKS.iter()
+        let java_sinks: Vec<_> = DESERIALIZATION_SINKS
+            .iter()
             .filter(|s| s.language == "java")
             .collect();
-        assert!(java_sinks.len() >= 5, "Should have comprehensive Java coverage");
+        assert!(
+            java_sinks.len() >= 5,
+            "Should have comprehensive Java coverage"
+        );
     }
 }

@@ -162,83 +162,139 @@
 //! }
 //! ```
 
+// =============================================================================
+// SUBMODULES
+// =============================================================================
+
 pub mod cohesion;
+pub mod common;
 pub mod complexity;
 pub mod coupling;
 pub mod function_size;
 pub mod loc;
 pub mod nesting;
+pub mod node_types;
 pub mod unified;
 
-// Re-export primary types for convenience
+// =============================================================================
+// COMPLEXITY MODULE RE-EXPORTS
+// =============================================================================
+
+// Cyclomatic complexity
 pub use complexity::{
-    // Cyclomatic complexity
-    analyze_complexity, analyze_file_complexity, CyclomaticComplexity,
-    ComplexityAnalysis, RiskLevel, ComplexityStats, FunctionComplexity,
-    // Cognitive complexity
-    analyze_cognitive_complexity, analyze_file_cognitive_complexity,
-    CognitiveComplexity, CognitiveAnalysis, CognitiveRiskLevel,
-    CognitiveStats, FunctionCognitiveComplexity, ComplexityContribution,
-    ConstructType, CognitiveAnalysisError,
-    // Halstead complexity
-    analyze_halstead, analyze_file_halstead, HalsteadMetrics, HalsteadAnalysis,
-    HalsteadStats, FunctionHalstead, HalsteadQuality, QualityLevel, HalsteadError,
-    // Maintainability Index
-    analyze_maintainability, analyze_file_maintainability, MaintainabilityIndex,
-    MaintainabilityAnalysis, MaintainabilityStats, FunctionMaintainability,
-    MaintainabilityRiskLevel, MaintainabilityError, LinesOfCode,
+    analyze_complexity, analyze_file_complexity, ComplexityAnalysis, ComplexityStats,
+    CyclomaticComplexity, FunctionComplexity, RiskLevel,
 };
 
-// Re-export LOC types
+// Cognitive complexity
+pub use complexity::{
+    analyze_cognitive_complexity, analyze_file_cognitive_complexity, CognitiveAnalysis,
+    CognitiveAnalysisError, CognitiveComplexity, CognitiveRiskLevel, CognitiveStats,
+    ComplexityContribution, ConstructType, FunctionCognitiveComplexity,
+};
+
+// Halstead complexity
+pub use complexity::{
+    analyze_file_halstead, analyze_halstead, FunctionHalstead, HalsteadAnalysis, HalsteadError,
+    HalsteadMetrics, HalsteadQuality, HalsteadStats, QualityLevel,
+};
+
+// Maintainability Index
+pub use complexity::{
+    analyze_file_maintainability, analyze_maintainability, FunctionMaintainability, LinesOfCode,
+    MaintainabilityAnalysis, MaintainabilityError, MaintainabilityIndex, MaintainabilityRiskLevel,
+    MaintainabilityStats,
+};
+
+// Complexity common utilities
+pub use complexity::common::{
+    build_histogram, find_function_body, find_function_node, is_function_node,
+    is_function_signature_part, AnalysisError, BaseComplexityStats, BaseF64Stats, HistogramBucket,
+};
+
+// =============================================================================
+// LOC MODULE RE-EXPORTS
+// =============================================================================
+
 pub use loc::{
-    analyze_loc, analyze_file_loc, LOCMetrics, LOCAnalysis, LOCDistribution,
-    FileLOC, FunctionSize, LanguageLOC, FileRanking, LOCError,
+    analyze_file_loc, analyze_loc, FileLOC, FileRanking, FunctionSize, LanguageLOC, LOCAnalysis,
+    LOCDistribution, LOCError, LOCMetrics,
 };
 
-// Re-export nesting types
+// =============================================================================
+// NESTING MODULE RE-EXPORTS
+// =============================================================================
+
 pub use nesting::{
-    analyze_nesting, analyze_file_nesting, NestingMetrics, NestingAnalysis,
-    NestingStats, FunctionNesting, NestingDepthLevel, NestingConstruct,
-    DeepNesting, NestingAnalysisError,
+    analyze_file_nesting, analyze_nesting, DeepNesting, FunctionNesting, NestingAnalysis,
+    NestingAnalysisError, NestingConstruct, NestingDepthLevel, NestingMetrics, NestingStats,
 };
 
-// Re-export function size types
+// =============================================================================
+// FUNCTION SIZE MODULE RE-EXPORTS
+// =============================================================================
+
 pub use function_size::{
-    analyze_function_size, analyze_file_function_size, FunctionSizeMetrics,
-    FunctionSizeAnalysis, FunctionSizeStats, FunctionSizeError, SizeIssue,
-    SizeSeverity, SizeThresholds, FunctionCategory, SizeSortBy,
-    sort_functions,
+    analyze_file_function_size, analyze_function_size, sort_functions as sort_size_functions,
+    FunctionCategory, FunctionSizeAnalysis, FunctionSizeError, FunctionSizeMetrics,
+    FunctionSizeStats, SizeIssue, SizeSeverity, SizeSortBy, SizeThresholds,
 };
 
-// Re-export coupling types
+// =============================================================================
+// COUPLING MODULE RE-EXPORTS
+// =============================================================================
+
 pub use coupling::{
-    analyze_coupling, analyze_file_coupling, CouplingMetrics, CouplingAnalysis,
-    CouplingStats, CouplingLevel, CouplingRisk, CouplingError,
-    DependencyType, DependencyEdge,
+    analyze_coupling, analyze_file_coupling, CouplingAnalysis, CouplingError, CouplingLevel,
+    CouplingMetrics, CouplingRisk, CouplingStats, DependencyEdge, DependencyType,
 };
 
-// Re-export cohesion types
+// =============================================================================
+// COHESION MODULE RE-EXPORTS
+// =============================================================================
+
 pub use cohesion::{
-    analyze_cohesion, analyze_file_cohesion, CohesionMetrics, CohesionAnalysis,
-    CohesionStats, CohesionLevel, CohesionError,
+    analyze_cohesion, analyze_file_cohesion, CohesionAnalysis, CohesionError, CohesionLevel,
+    CohesionMetrics, CohesionStats,
 };
 
-// Re-export unified metrics types
+// =============================================================================
+// COMMON MODULE RE-EXPORTS
+// =============================================================================
+
+pub use common::MetricStats;
+
+// =============================================================================
+// UNIFIED MODULE RE-EXPORTS
+// =============================================================================
+
 pub use unified::{
-    // Main analysis function
-    analyze_all_metrics, analyze_all_metrics_with_progress,
-    // Report types
-    MetricsReport, ProjectMetrics, FileMetrics, FunctionMetrics, ClassMetrics,
-    // Issue types
-    MetricIssue, IssueCategory, IssueSeverity, IssueStats,
-    // Configuration (MetricThresholds includes load_from_project and from_toml)
-    MetricsConfig, MetricThresholds,
-    // Quality gate
-    QualityGate, QualityGateResult,
+    // Main analysis functions
+    analyze_all_metrics,
+    analyze_all_metrics_with_progress,
+    // CSV formatting utilities
+    format_classes_csv,
+    format_files_csv,
+    format_functions_csv,
+    format_issues_csv,
     // Sorting
-    FunctionSortBy, sort_functions as sort_unified_functions,
-    // CSV formatting
-    format_functions_csv, format_issues_csv, format_classes_csv, format_files_csv,
-    // Progress reporting
+    sort_functions as sort_unified_functions,
+    FunctionSortBy,
+    // Configuration types
+    IssueCategory,
+    IssueSeverity,
+    MetricIssue,
+    MetricThresholds,
+    MetricsConfig,
+    // Quality gate
+    QualityGate,
+    QualityGateResult,
+    // Report types
+    ClassMetrics as UnifiedClassMetrics,
+    FileMetrics as UnifiedFileMetrics,
+    FunctionMetrics as UnifiedFunctionMetrics,
+    IssueStats,
+    MetricsReport,
+    ProjectMetrics,
     ProgressCallback,
 };

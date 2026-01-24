@@ -64,9 +64,10 @@ use tree_sitter::Node;
 
 use crate::ast::AstExtractor;
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
 
+use super::common;
 use super::halstead::HalsteadMetrics;
 
 // =============================================================================
@@ -217,20 +218,13 @@ impl MaintainabilityIndex {
     /// * `cyclomatic_complexity` - Cyclomatic Complexity (CC)
     /// * `loc` - Lines of Code metrics
     #[must_use]
-    pub fn calculate(
-        halstead_volume: f64,
-        cyclomatic_complexity: u32,
-        loc: LinesOfCode,
-    ) -> Self {
+    pub fn calculate(halstead_volume: f64, cyclomatic_complexity: u32, loc: LinesOfCode) -> Self {
         let effective_loc = loc.effective.max(1); // Avoid log(0)
         let volume = halstead_volume.max(1.0); // Avoid log(0)
         let cc = f64::from(cyclomatic_complexity);
 
         // Standard MI formula (Visual Studio)
-        let raw_mi = 171.0
-            - 5.2 * volume.ln()
-            - 0.23 * cc
-            - 16.2 * f64::from(effective_loc).ln();
+        let raw_mi = 171.0 - 5.2 * volume.ln() - 0.23 * cc - 16.2 * f64::from(effective_loc).ln();
 
         let score = (raw_mi * 100.0 / 171.0).max(0.0).min(100.0);
         let comment_percentage = loc.comment_percentage();
@@ -275,10 +269,7 @@ impl MaintainabilityIndex {
         // sin(15.49) oscillates, so we clamp CM contribution
         let comment_factor = 50.0 * (2.4 * cm).sqrt().sin();
 
-        let raw_mi = 171.0
-            - 5.2 * volume.ln()
-            - 0.23 * cc
-            - 16.2 * f64::from(effective_loc).ln()
+        let raw_mi = 171.0 - 5.2 * volume.ln() - 0.23 * cc - 16.2 * f64::from(effective_loc).ln()
             + comment_factor;
 
         let score = (raw_mi * 100.0 / 171.0).max(0.0).min(100.0);
@@ -359,7 +350,10 @@ impl MaintainabilityStats {
         let total = functions.len();
         let scores: Vec<f64> = functions.iter().map(|f| f.index.score).collect();
         let volumes: Vec<f64> = functions.iter().map(|f| f.index.halstead_volume).collect();
-        let ccs: Vec<u32> = functions.iter().map(|f| f.index.cyclomatic_complexity).collect();
+        let ccs: Vec<u32> = functions
+            .iter()
+            .map(|f| f.index.cyclomatic_complexity)
+            .collect();
 
         let sum_mi: f64 = scores.iter().sum();
         let average_mi = sum_mi / total as f64;
@@ -384,10 +378,7 @@ impl MaintainabilityStats {
         }
 
         // Aggregate LOC metrics
-        let total_sloc: u32 = functions
-            .iter()
-            .map(|f| f.index.lines_of_code.source)
-            .sum();
+        let total_sloc: u32 = functions.iter().map(|f| f.index.lines_of_code.source).sum();
         let total_comment_lines: u32 = functions
             .iter()
             .map(|f| f.index.lines_of_code.comment_lines)
@@ -619,12 +610,17 @@ fn calculate_loc(source: &str, language: &str) -> LinesOfCode {
 /// Get comment markers for a language.
 ///
 /// Returns (line_comment, block_start, block_end).
-fn get_comment_markers(language: &str) -> (Option<&'static str>, Option<&'static str>, Option<&'static str>) {
+fn get_comment_markers(
+    language: &str,
+) -> (
+    Option<&'static str>,
+    Option<&'static str>,
+    Option<&'static str>,
+) {
     match language.to_lowercase().as_str() {
         "python" => (Some("#"), None, None),
-        "typescript" | "javascript" | "tsx" | "jsx" | "rust" | "go" | "java" | "c" | "cpp" | "c++" => {
-            (Some("//"), Some("/*"), Some("*/"))
-        }
+        "typescript" | "javascript" | "tsx" | "jsx" | "rust" | "go" | "java" | "c" | "cpp"
+        | "c++" => (Some("//"), Some("/*"), Some("*/")),
         _ => (Some("#"), None, None), // Default to Python-style
     }
 }
@@ -646,7 +642,12 @@ fn estimate_logical_loc(source_lines: u32, language: &str) -> u32 {
 }
 
 /// Calculate LOC for a specific function range in source code.
-fn calculate_function_loc(source: &str, start_line: usize, end_line: usize, language: &str) -> LinesOfCode {
+fn calculate_function_loc(
+    source: &str,
+    start_line: usize,
+    end_line: usize,
+    language: &str,
+) -> LinesOfCode {
     let lines: Vec<&str> = source.lines().collect();
 
     // Extract function lines (1-indexed to 0-indexed)
@@ -718,9 +719,9 @@ pub fn analyze_maintainability(
     }
 
     // Directory analysis
-    let path_str = path.to_str().ok_or_else(|| {
-        BrrrError::InvalidArgument("Invalid path encoding".to_string())
-    })?;
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| BrrrError::InvalidArgument("Invalid path encoding".to_string()))?;
 
     let scanner = ProjectScanner::new(path_str)?;
 
@@ -811,9 +812,7 @@ pub fn analyze_file_maintainability(
 
     // Detect language
     let registry = LanguageRegistry::global();
-    let language = registry
-        .detect_language(file)
-        .map(|l| l.name().to_string());
+    let language = registry.detect_language(file).map(|l| l.name().to_string());
 
     let violations = threshold.map(|t| {
         functions
@@ -977,8 +976,8 @@ fn analyze_function_maintainability(
     // Calculate LOC for the function
     let loc = calculate_function_loc(source, start_line, end_line, language);
 
-    // Find the function node for Halstead analysis
-    let function_node = find_function_node(tree, start_line, end_line);
+    // Find the function node for Halstead analysis (using common utility)
+    let function_node = common::find_function_node(tree, start_line, end_line);
     let node_to_analyze = function_node.unwrap_or_else(|| tree.root_node());
 
     // Calculate Halstead metrics
@@ -1003,50 +1002,7 @@ fn analyze_function_maintainability(
     })
 }
 
-/// Find a function node by line range.
-fn find_function_node(tree: &tree_sitter::Tree, start_line: usize, end_line: usize) -> Option<Node<'_>> {
-    let root = tree.root_node();
-    find_function_node_recursive(root, start_line, end_line)
-}
-
-/// Recursively search for a function node matching the line range.
-fn find_function_node_recursive(
-    node: Node<'_>,
-    start_line: usize,
-    end_line: usize,
-) -> Option<Node<'_>> {
-    let node_start = node.start_position().row + 1;
-    let node_end = node.end_position().row + 1;
-
-    if is_function_node(&node) && node_start == start_line && node_end >= end_line {
-        return Some(node);
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if let Some(found) = find_function_node_recursive(child, start_line, end_line) {
-            return Some(found);
-        }
-    }
-
-    None
-}
-
-/// Check if a node represents a function definition.
-fn is_function_node(node: &Node) -> bool {
-    matches!(
-        node.kind(),
-        "function_definition"
-            | "function_declaration"
-            | "method_definition"
-            | "function_item"
-            | "function"
-            | "method"
-            | "arrow_function"
-            | "function_expression"
-            | "method_declaration"
-    )
-}
+// Note: find_function_node and is_function_node are now in common.rs
 
 // =============================================================================
 // HALSTEAD CALCULATION (LOCAL)
@@ -1167,10 +1123,9 @@ fn is_operator_kind(kind: &str) -> bool {
 /// Check if text represents an operator.
 fn is_operator_text(text: &str, language: &str) -> bool {
     let common_ops = [
-        "+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=",
-        "=", "+=", "-=", "*=", "/=", "&", "|", "^", "~", "<<", ">>",
-        "&&", "||", "!", ".", ",", ";", "(", ")", "[", "]", "{", "}",
-        "?", ":",
+        "+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=", "=", "+=", "-=", "*=", "/=",
+        "&", "|", "^", "~", "<<", ">>", "&&", "||", "!", ".", ",", ";", "(", ")", "[", "]", "{",
+        "}", "?", ":",
     ];
 
     if common_ops.contains(&text) {
@@ -1181,37 +1136,86 @@ fn is_operator_text(text: &str, language: &str) -> bool {
         "python" => {
             matches!(
                 text,
-                "and" | "or" | "not" | "in" | "is" | "**" | "//"
-                    | "if" | "else" | "elif" | "while" | "for"
-                    | "try" | "except" | "finally" | "raise"
-                    | "def" | "class" | "return" | "yield"
-                    | "lambda" | "with" | "as"
+                "and"
+                    | "or"
+                    | "not"
+                    | "in"
+                    | "is"
+                    | "**"
+                    | "//"
+                    | "if"
+                    | "else"
+                    | "elif"
+                    | "while"
+                    | "for"
+                    | "try"
+                    | "except"
+                    | "finally"
+                    | "raise"
+                    | "def"
+                    | "class"
+                    | "return"
+                    | "yield"
+                    | "lambda"
+                    | "with"
+                    | "as"
             )
         }
         "typescript" | "javascript" | "tsx" | "jsx" => {
             matches!(
                 text,
-                "=>" | "?." | "??" | "..." | "++" | "--"
-                    | "if" | "else" | "while" | "for"
-                    | "switch" | "case" | "default"
-                    | "function" | "return" | "new"
-                    | "typeof" | "instanceof"
+                "=>" | "?."
+                    | "??"
+                    | "..."
+                    | "++"
+                    | "--"
+                    | "if"
+                    | "else"
+                    | "while"
+                    | "for"
+                    | "switch"
+                    | "case"
+                    | "default"
+                    | "function"
+                    | "return"
+                    | "new"
+                    | "typeof"
+                    | "instanceof"
             )
         }
         "rust" => {
             matches!(
                 text,
-                "::" | "->" | "=>" | ".." | "..="
-                    | "if" | "else" | "while" | "for" | "loop"
-                    | "match" | "return" | "fn" | "let" | "mut"
+                "::" | "->"
+                    | "=>"
+                    | ".."
+                    | "..="
+                    | "if"
+                    | "else"
+                    | "while"
+                    | "for"
+                    | "loop"
+                    | "match"
+                    | "return"
+                    | "fn"
+                    | "let"
+                    | "mut"
             )
         }
         "go" => {
             matches!(
                 text,
-                ":=" | "<-" | "..."
-                    | "if" | "else" | "for" | "switch" | "case"
-                    | "func" | "return" | "go" | "defer"
+                ":=" | "<-"
+                    | "..."
+                    | "if"
+                    | "else"
+                    | "for"
+                    | "switch"
+                    | "case"
+                    | "func"
+                    | "return"
+                    | "go"
+                    | "defer"
             )
         }
         _ => false,
@@ -1313,9 +1317,7 @@ fn is_decision_point(kind: &str, language: &str) -> bool {
         "rust" => {
             matches!(
                 kind,
-                "if_let_expression"
-                    | "while_let_expression"
-                    | "match_expression"
+                "if_let_expression" | "while_let_expression" | "match_expression"
             )
         }
         "go" => {
@@ -1438,7 +1440,11 @@ function greet(name: string): string {
         let mi = MaintainabilityIndex::calculate(50.0, 1, loc);
 
         // Simple functions should have high MI
-        assert!(mi.score > 50.0, "Simple function should have MI > 50, got {}", mi.score);
+        assert!(
+            mi.score > 50.0,
+            "Simple function should have MI > 50, got {}",
+            mi.score
+        );
         assert_eq!(mi.risk_level, MaintainabilityRiskLevel::Low);
     }
 
@@ -1458,7 +1464,11 @@ function greet(name: string): string {
         let mi = MaintainabilityIndex::calculate(5000.0, 30, loc);
 
         // Complex functions should have low MI
-        assert!(mi.score < 50.0, "Complex function should have MI < 50, got {}", mi.score);
+        assert!(
+            mi.score < 50.0,
+            "Complex function should have MI < 50, got {}",
+            mi.score
+        );
         assert!(matches!(
             mi.risk_level,
             MaintainabilityRiskLevel::Medium
@@ -1707,7 +1717,10 @@ class Calculator:
 
         assert_eq!(analysis.functions.len(), 2);
 
-        let add = analysis.functions.iter().find(|f| f.function_name == "Calculator.add");
+        let add = analysis
+            .functions
+            .iter()
+            .find(|f| f.function_name == "Calculator.add");
         let complex = analysis
             .functions
             .iter()
@@ -1782,6 +1795,9 @@ function test() {
 "#;
         let loc = calculate_loc(source, "typescript");
 
-        assert!(loc.comment_lines >= 3, "Should count all multi-line comment lines");
+        assert!(
+            loc.comment_lines >= 3,
+            "Should count all multi-line comment lines"
+        );
     }
 }

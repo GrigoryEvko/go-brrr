@@ -63,8 +63,11 @@ use tree_sitter::{Node, Tree};
 
 use crate::ast::AstExtractor;
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
+use crate::metrics::node_types::{
+    FUNCTION_NODE_TYPES, STATEMENT_NODE_TYPES, VARIABLE_DECL_TYPES,
+};
 
 // =============================================================================
 // CONFIGURATION
@@ -158,9 +161,9 @@ impl LongMethodConfig {
     /// Adjust thresholds for test methods.
     fn adjust_for_tests(&self) -> Self {
         Self {
-            max_lines: self.max_lines + 30,     // Tests often have long setup
+            max_lines: self.max_lines + 30, // Tests often have long setup
             max_statements: self.max_statements + 20,
-            max_variables: self.max_variables + 10,  // Many fixtures
+            max_variables: self.max_variables + 10, // Many fixtures
             max_complexity: self.max_complexity + 5,
             max_nesting: self.max_nesting + 1,
             max_parameters: self.max_parameters + 3,
@@ -586,10 +589,15 @@ impl LongMethodSeverity {
         nesting_exceeded: bool,
         variables_exceeded: bool,
     ) -> Self {
-        let count = [lines_exceeded, complexity_exceeded, nesting_exceeded, variables_exceeded]
-            .iter()
-            .filter(|&&x| x)
-            .count();
+        let count = [
+            lines_exceeded,
+            complexity_exceeded,
+            nesting_exceeded,
+            variables_exceeded,
+        ]
+        .iter()
+        .filter(|&&x| x)
+        .count();
 
         match count {
             0 => Self::Minor,
@@ -662,15 +670,30 @@ impl std::fmt::Display for Violation {
                 write!(f, "Too long: {} lines (threshold: {})", lines, threshold)
             }
             Self::TooManyStatements { count, threshold } => {
-                write!(f, "Too many statements: {} (threshold: {})", count, threshold)
+                write!(
+                    f,
+                    "Too many statements: {} (threshold: {})",
+                    count, threshold
+                )
             }
             Self::TooManyVariables { count, threshold } => {
-                write!(f, "Too many variables: {} (threshold: {})", count, threshold)
+                write!(
+                    f,
+                    "Too many variables: {} (threshold: {})",
+                    count, threshold
+                )
             }
             Self::TooManyParameters { count, threshold } => {
-                write!(f, "Too many parameters: {} (threshold: {})", count, threshold)
+                write!(
+                    f,
+                    "Too many parameters: {} (threshold: {})",
+                    count, threshold
+                )
             }
-            Self::TooComplex { complexity, threshold } => {
+            Self::TooComplex {
+                complexity,
+                threshold,
+            } => {
                 write!(f, "Too complex: {} (threshold: {})", complexity, threshold)
             }
             Self::TooDeep { depth, threshold } => {
@@ -876,84 +899,80 @@ pub struct LongMethodError {
 // AST ANALYSIS
 // =============================================================================
 
-/// Node types representing statements in various languages.
-const STATEMENT_NODES: &[&str] = &[
-    // Python
-    "expression_statement", "return_statement", "if_statement", "for_statement",
-    "while_statement", "try_statement", "with_statement", "assert_statement",
-    "raise_statement", "pass_statement", "break_statement", "continue_statement",
-    "import_statement", "import_from_statement", "global_statement",
-    "nonlocal_statement", "delete_statement", "match_statement",
-    // TypeScript/JavaScript
-    "return_statement", "switch_statement", "for_in_statement", "do_statement",
-    "throw_statement", "variable_declaration", "lexical_declaration",
-    // Rust
-    "let_declaration", "return_expression", "if_expression", "match_expression",
-    "for_expression", "while_expression", "loop_expression", "break_expression",
-    "continue_expression", "macro_invocation",
-    // Go
-    "go_statement", "select_statement", "defer_statement", "var_declaration",
-    "short_var_declaration", "assignment_statement",
-    // Java
-    "switch_expression", "enhanced_for_statement", "local_variable_declaration",
-    // C/C++
-    "goto_statement", "declaration", "compound_statement",
-];
-
 /// Node types for decision points (cyclomatic complexity).
 const DECISION_NODES: &[&str] = &[
-    "if_statement", "if_expression", "elif_clause", "else_if_clause",
-    "for_statement", "for_expression", "for_in_statement", "enhanced_for_statement",
-    "while_statement", "while_expression",
-    "switch_statement", "switch_expression", "match_expression", "match_statement",
-    "case_clause", "match_arm",
-    "try_statement", "except_clause", "catch_clause",
-    "conditional_expression", "ternary_expression",
-    "do_statement", "loop_expression",
+    "if_statement",
+    "if_expression",
+    "elif_clause",
+    "else_if_clause",
+    "for_statement",
+    "for_expression",
+    "for_in_statement",
+    "enhanced_for_statement",
+    "while_statement",
+    "while_expression",
+    "switch_statement",
+    "switch_expression",
+    "match_expression",
+    "match_statement",
+    "case_clause",
+    "match_arm",
+    "try_statement",
+    "except_clause",
+    "catch_clause",
+    "conditional_expression",
+    "ternary_expression",
+    "do_statement",
+    "loop_expression",
 ];
 
 /// Node types for nesting constructs.
 const NESTING_NODES: &[&str] = &[
-    "if_statement", "if_expression", "elif_clause",
-    "for_statement", "for_expression", "for_in_statement",
-    "while_statement", "while_expression",
-    "try_statement", "except_clause", "catch_clause",
+    "if_statement",
+    "if_expression",
+    "elif_clause",
+    "for_statement",
+    "for_expression",
+    "for_in_statement",
+    "while_statement",
+    "while_expression",
+    "try_statement",
+    "except_clause",
+    "catch_clause",
     "with_statement",
-    "switch_statement", "switch_expression", "match_expression",
-    "do_statement", "loop_expression",
-    "lambda", "arrow_function", "closure_expression",
-    "list_comprehension", "dictionary_comprehension", "generator_expression",
+    "switch_statement",
+    "switch_expression",
+    "match_expression",
+    "do_statement",
+    "loop_expression",
+    "lambda",
+    "arrow_function",
+    "closure_expression",
+    "list_comprehension",
+    "dictionary_comprehension",
+    "generator_expression",
 ];
 
 /// Node types for return/exit points.
 const EXIT_NODES: &[&str] = &[
-    "return_statement", "return_expression",
-    "throw_statement", "raise_statement",
-    "break_statement", "break_expression",
+    "return_statement",
+    "return_expression",
+    "throw_statement",
+    "raise_statement",
+    "break_statement",
+    "break_expression",
 ];
 
 /// Node types for loops.
 const LOOP_NODES: &[&str] = &[
-    "for_statement", "for_expression", "for_in_statement", "enhanced_for_statement",
-    "while_statement", "while_expression",
-    "do_statement", "loop_expression",
-];
-
-/// Node types for variable declarations.
-const VARIABLE_NODES: &[&str] = &[
-    "assignment", "augmented_assignment",
-    "variable_declaration", "lexical_declaration", "variable_declarator",
-    "let_declaration",
-    "var_declaration", "short_var_declaration", "var_spec",
-    "local_variable_declaration",
-    "declaration", "init_declarator",
-];
-
-/// Node types for function definitions.
-const FUNCTION_NODES: &[&str] = &[
-    "function_definition", "function_declaration", "method_definition",
-    "arrow_function", "function_item", "method_declaration",
-    "constructor_declaration",
+    "for_statement",
+    "for_expression",
+    "for_in_statement",
+    "enhanced_for_statement",
+    "while_statement",
+    "while_expression",
+    "do_statement",
+    "loop_expression",
 ];
 
 /// Method analyzer using AST.
@@ -967,7 +986,11 @@ impl<'a> MethodAnalyzer<'a> {
     fn new(source: &'a [u8], language: &'a str) -> Self {
         let source_str = std::str::from_utf8(source).unwrap_or("");
         let lines: Vec<&str> = source_str.lines().collect();
-        Self { source, lines, language }
+        Self {
+            source,
+            lines,
+            language,
+        }
     }
 
     /// Count SLOC within a line range.
@@ -1078,12 +1101,12 @@ impl<'a> MethodAnalyzer<'a> {
         let line = node.start_position().row + 1;
 
         // Count statements
-        if STATEMENT_NODES.contains(&kind) {
+        if STATEMENT_NODE_TYPES.contains(&kind) {
             *statements += 1;
         }
 
         // Count variables
-        if VARIABLE_NODES.contains(&kind) && !FUNCTION_NODES.contains(&kind) {
+        if VARIABLE_DECL_TYPES.contains(&kind) && !FUNCTION_NODE_TYPES.contains(&kind) {
             *variables += count_declarators(node);
         }
 
@@ -1112,7 +1135,10 @@ impl<'a> MethodAnalyzer<'a> {
         }
 
         // Count branches
-        if matches!(kind, "if_statement" | "if_expression" | "elif_clause" | "else_clause") {
+        if matches!(
+            kind,
+            "if_statement" | "if_expression" | "elif_clause" | "else_clause"
+        ) {
             *branches += 1;
         }
 
@@ -1184,7 +1210,7 @@ impl<'a> MethodAnalyzer<'a> {
         }
 
         // Don't recurse into nested functions
-        if FUNCTION_NODES.contains(&kind) && depth > 0 {
+        if FUNCTION_NODE_TYPES.contains(&kind) && depth > 0 {
             return;
         }
 
@@ -1280,12 +1306,12 @@ impl<'a> MethodAnalyzer<'a> {
             return;
         }
 
-        if STATEMENT_NODES.contains(&node.kind()) {
+        if STATEMENT_NODE_TYPES.contains(&node.kind()) {
             *count += 1;
         }
 
         // Don't recurse into nested functions
-        if FUNCTION_NODES.contains(&node.kind()) && depth > 0 {
+        if FUNCTION_NODE_TYPES.contains(&node.kind()) && depth > 0 {
             return;
         }
 
@@ -1300,7 +1326,10 @@ impl<'a> MethodAnalyzer<'a> {
         let mut count = 1u32; // The main if
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            if matches!(child.kind(), "elif_clause" | "else_if_clause" | "else_clause") {
+            if matches!(
+                child.kind(),
+                "elif_clause" | "else_if_clause" | "else_clause"
+            ) {
                 count += 1;
             }
         }
@@ -1366,7 +1395,10 @@ fn count_param_children(params_node: Node, source: &[u8]) -> u32 {
             }
             _ if child.kind().contains("parameter") => {
                 let text = child.utf8_text(source).unwrap_or("");
-                if !text.starts_with("self") && !text.starts_with("cls") && !text.starts_with("this") {
+                if !text.starts_with("self")
+                    && !text.starts_with("cls")
+                    && !text.starts_with("this")
+                {
                     count += 1;
                 }
             }
@@ -1486,7 +1518,10 @@ fn generate_suggestions(
                     "Extract loop body (lines {}-{}) into {}",
                     candidate.start_line,
                     candidate.end_line,
-                    candidate.suggested_name.as_deref().unwrap_or("a helper method")
+                    candidate
+                        .suggested_name
+                        .as_deref()
+                        .unwrap_or("a helper method")
                 ),
                 BlockType::ConditionalBranch => format!(
                     "Extract conditional logic (lines {}-{}) into a dedicated method",
@@ -1597,12 +1632,16 @@ pub fn detect_long_methods(
     );
 
     // Analyze files in parallel
-    let results: Vec<(Vec<LongMethodFinding>, Vec<LongMethodError>, Vec<u32>, Vec<u32>)> =
-        scan_result
-            .files
-            .par_iter()
-            .map(|file| analyze_file_methods(file, &config))
-            .collect();
+    let results: Vec<(
+        Vec<LongMethodFinding>,
+        Vec<LongMethodError>,
+        Vec<u32>,
+        Vec<u32>,
+    )> = scan_result
+        .files
+        .par_iter()
+        .map(|file| analyze_file_methods(file, &config))
+        .collect();
 
     // Aggregate results
     let mut all_findings = Vec::new();
@@ -1620,10 +1659,15 @@ pub fn detect_long_methods(
     }
 
     // Calculate statistics
-    let stats = LongMethodStats::from_findings(total_methods, &all_findings, &all_lines, &all_complexity);
+    let stats =
+        LongMethodStats::from_findings(total_methods, &all_findings, &all_lines, &all_complexity);
 
     // Sort findings by score (worst first)
-    all_findings.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    all_findings.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     Ok(LongMethodAnalysis {
         path: path.to_path_buf(),
@@ -1652,12 +1696,11 @@ pub fn detect_long_methods_in_file(
     let (findings, errors, all_lines, all_complexity) = analyze_file_methods(path, config);
 
     let total_methods = all_lines.len();
-    let stats = LongMethodStats::from_findings(total_methods, &findings, &all_lines, &all_complexity);
+    let stats =
+        LongMethodStats::from_findings(total_methods, &findings, &all_lines, &all_complexity);
 
     let registry = LanguageRegistry::global();
-    let language = registry
-        .detect_language(path)
-        .map(|l| l.name().to_string());
+    let language = registry.detect_language(path).map(|l| l.name().to_string());
 
     Ok(LongMethodAnalysis {
         path: path.to_path_buf(),
@@ -1673,7 +1716,12 @@ pub fn detect_long_methods_in_file(
 fn analyze_file_methods(
     file: &Path,
     config: &LongMethodConfig,
-) -> (Vec<LongMethodFinding>, Vec<LongMethodError>, Vec<u32>, Vec<u32>) {
+) -> (
+    Vec<LongMethodFinding>,
+    Vec<LongMethodError>,
+    Vec<u32>,
+    Vec<u32>,
+) {
     let mut findings = Vec::new();
     let mut errors = Vec::new();
     let mut all_lines = Vec::new();
@@ -1804,7 +1852,8 @@ fn analyze_single_method(
     let func_node = find_function_node(tree.root_node(), start_line)?;
 
     // Analyze metrics
-    let (length, complexity, candidates) = analyzer.analyze_function(func_node, start_line, end_line);
+    let (length, complexity, candidates) =
+        analyzer.analyze_function(func_node, start_line, end_line);
 
     // Skip trivial methods
     if length.lines < base_config.min_lines_for_analysis {
@@ -1907,7 +1956,7 @@ fn find_function_node(node: Node, target_line: usize) -> Option<Node> {
     let node_start = node.start_position().row + 1;
     let node_end = node.end_position().row + 1;
 
-    if FUNCTION_NODES.contains(&node.kind()) && node_start == target_line {
+    if FUNCTION_NODE_TYPES.contains(&node.kind()) && node_start == target_line {
         return Some(node);
     }
 
@@ -1991,10 +2040,7 @@ pub fn format_long_method_summary(analysis: &LongMethodAnalysis) -> String {
                 finding.line,
                 finding.end_line
             ));
-            output.push_str(&format!(
-                "  Category: {}\n",
-                finding.category.description()
-            ));
+            output.push_str(&format!("  Category: {}\n", finding.category.description()));
             output.push_str(&format!(
                 "  Severity: {} - {}\n",
                 finding.severity,
@@ -2022,7 +2068,10 @@ pub fn format_long_method_summary(analysis: &LongMethodAnalysis) -> String {
             if !top_suggestions.is_empty() {
                 output.push_str("  Suggestions:\n");
                 for s in top_suggestions {
-                    output.push_str(&format!("    - [{}] {}\n", s.refactoring_type, s.description));
+                    output.push_str(&format!(
+                        "    - [{}] {}\n",
+                        s.refactoring_type, s.description
+                    ));
                 }
             }
 
@@ -2055,14 +2104,35 @@ mod tests {
 
     #[test]
     fn test_method_category_detection() {
-        assert_eq!(MethodCategory::from_name("test_something"), MethodCategory::Test);
+        assert_eq!(
+            MethodCategory::from_name("test_something"),
+            MethodCategory::Test
+        );
         assert_eq!(MethodCategory::from_name("TestCase"), MethodCategory::Test);
-        assert_eq!(MethodCategory::from_name("__init__"), MethodCategory::Constructor);
-        assert_eq!(MethodCategory::from_name("new"), MethodCategory::Constructor);
-        assert_eq!(MethodCategory::from_name("setup_database"), MethodCategory::Configuration);
-        assert_eq!(MethodCategory::from_name("create_user"), MethodCategory::Factory);
-        assert_eq!(MethodCategory::from_name("on_click"), MethodCategory::Handler);
-        assert_eq!(MethodCategory::from_name("process_data"), MethodCategory::Normal);
+        assert_eq!(
+            MethodCategory::from_name("__init__"),
+            MethodCategory::Constructor
+        );
+        assert_eq!(
+            MethodCategory::from_name("new"),
+            MethodCategory::Constructor
+        );
+        assert_eq!(
+            MethodCategory::from_name("setup_database"),
+            MethodCategory::Configuration
+        );
+        assert_eq!(
+            MethodCategory::from_name("create_user"),
+            MethodCategory::Factory
+        );
+        assert_eq!(
+            MethodCategory::from_name("on_click"),
+            MethodCategory::Handler
+        );
+        assert_eq!(
+            MethodCategory::from_name("process_data"),
+            MethodCategory::Normal
+        );
     }
 
     #[test]

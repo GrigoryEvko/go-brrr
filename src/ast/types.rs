@@ -2,9 +2,9 @@
 //!
 //! Core data structures for representing extracted code elements.
 
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::path::Path;
 
 /// Default language for AST types (matches Python implementation).
@@ -292,7 +292,7 @@ pub struct ImportInfo {
     pub names: Vec<String>,
     /// Aliases (original_name -> alias)
     #[serde(default)]
-    pub aliases: HashMap<String, String>,
+    pub aliases: FxHashMap<String, String>,
     /// Whether this is a `from X import Y` style
     #[serde(default)]
     pub is_from: bool,
@@ -320,7 +320,7 @@ impl ImportInfo {
     /// # Examples
     ///
     /// ```
-    /// use std::collections::HashMap;
+    /// use rustc_hash::FxHashMap;
     /// use go_brrr::ast::types::ImportInfo;
     ///
     /// // from os.path import join, dirname as d
@@ -339,7 +339,7 @@ impl ImportInfo {
     /// let relative = ImportInfo {
     ///     module: "".to_string(),
     ///     names: vec!["utils".to_string()],
-    ///     aliases: HashMap::new(),
+    ///     aliases: FxHashMap::default(),
     ///     is_from: true,
     ///     level: 2,
     ///     line_number: 2,
@@ -375,7 +375,11 @@ impl ImportInfo {
                 .collect();
 
             if self.module.is_empty() {
-                format!("from {} import {}", level_dots, names_with_aliases.join(", "))
+                format!(
+                    "from {} import {}",
+                    level_dots,
+                    names_with_aliases.join(", ")
+                )
             } else {
                 format!(
                     "from {}{} import {}",
@@ -405,13 +409,13 @@ pub struct CallGraphInfo {
     /// Map of caller function name to list of called function names.
     /// Key is the caller (e.g., "process_data" or "MyClass.method"),
     /// value is a list of callees (function names being called).
-    pub calls: HashMap<String, Vec<String>>,
+    pub calls: FxHashMap<String, Vec<String>>,
 
     /// Reverse mapping: function name to list of functions that call it.
     /// Key is the callee, value is list of callers.
     /// This enables efficient reverse lookups for impact analysis.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub called_by: HashMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
+    pub called_by: FxHashMap<String, Vec<String>>,
 }
 
 impl CallGraphInfo {
@@ -433,15 +437,27 @@ impl CallGraphInfo {
     #[allow(dead_code)]
     pub fn add_call(&mut self, caller: &str, callee: &str) {
         // Update forward mapping: caller -> callees
-        let callees = self.calls.entry(caller.to_string()).or_default();
-        if !callees.contains(&callee.to_string()) {
-            callees.push(callee.to_string());
+        // Optimization: check if key exists first to avoid allocating key string
+        // when entry already exists (common case in call graph building)
+        if let Some(callees) = self.calls.get_mut(caller) {
+            // Key exists - only allocate callee string if not already present
+            if !callees.iter().any(|s| s == callee) {
+                callees.push(callee.to_owned());
+            }
+        } else {
+            // Key doesn't exist - need to allocate both
+            self.calls
+                .insert(caller.to_owned(), vec![callee.to_owned()]);
         }
 
         // Update reverse mapping: callee -> callers
-        let callers = self.called_by.entry(callee.to_string()).or_default();
-        if !callers.contains(&caller.to_string()) {
-            callers.push(caller.to_string());
+        if let Some(callers) = self.called_by.get_mut(callee) {
+            if !callers.iter().any(|s| s == caller) {
+                callers.push(caller.to_owned());
+            }
+        } else {
+            self.called_by
+                .insert(callee.to_owned(), vec![caller.to_owned()]);
         }
     }
 
@@ -873,7 +889,7 @@ mod tests {
         let import = ImportInfo {
             module: "os.path".to_string(),
             names: vec!["join".to_string(), "dirname".to_string()],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 0,
             line_number: 1,
@@ -885,7 +901,7 @@ mod tests {
     #[test]
     fn test_import_info_statement_from_import_with_alias() {
         // from os.path import join, dirname as d
-        let mut aliases = HashMap::new();
+        let mut aliases = FxHashMap::default();
         aliases.insert("dirname".to_string(), "d".to_string());
 
         let import = ImportInfo {
@@ -906,7 +922,7 @@ mod tests {
         let import = ImportInfo {
             module: "".to_string(),
             names: vec!["utils".to_string()],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 2,
             line_number: 1,
@@ -921,7 +937,7 @@ mod tests {
         let import = ImportInfo {
             module: "package".to_string(),
             names: vec!["module".to_string()],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 3,
             line_number: 1,
@@ -936,7 +952,7 @@ mod tests {
         let import = ImportInfo {
             module: "os".to_string(),
             names: vec![],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: false,
             level: 0,
             line_number: 1,
@@ -948,7 +964,7 @@ mod tests {
     #[test]
     fn test_import_info_statement_import_with_alias() {
         // import numpy as np
-        let mut aliases = HashMap::new();
+        let mut aliases = FxHashMap::default();
         aliases.insert("numpy".to_string(), "np".to_string());
 
         let import = ImportInfo {
@@ -969,7 +985,7 @@ mod tests {
         let import = ImportInfo {
             module: "".to_string(),
             names: vec!["config".to_string()],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 1,
             line_number: 1,
@@ -1292,12 +1308,10 @@ mod tests {
         // With default limits (200, 100), nothing truncated
         let compact = module.to_compact();
         assert!(!compact["doc"].as_str().unwrap().ends_with("..."));
-        assert!(
-            !compact["classes"]["TestClass"]["doc"]
-                .as_str()
-                .unwrap()
-                .ends_with("...")
-        );
+        assert!(!compact["classes"]["TestClass"]["doc"]
+            .as_str()
+            .unwrap()
+            .ends_with("..."));
 
         // With custom limits (50, 25), both truncated
         let compact_short = module.to_compact_with_limits(50, 25);

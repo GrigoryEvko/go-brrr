@@ -10,7 +10,7 @@ use ignore::WalkBuilder;
 use tracing::warn;
 
 use crate::ast::types::FileTreeEntry;
-use crate::error::{validate_path_containment, Result, BrrrError};
+use crate::error::{validate_path_containment, BrrrError, Result};
 
 /// Default maximum directory depth to prevent stack overflow.
 /// This is a safety limit for deeply nested directory structures.
@@ -284,8 +284,8 @@ pub fn file_tree(
         &mut children_map,
         &is_dir_set,
         !ext_filter.is_empty(),
-        0,                      // current_depth starts at 0 for root
-        effective_max_depth,    // max_depth to limit recursion
+        0,                   // current_depth starts at 0 for root
+        effective_max_depth, // max_depth to limit recursion
     );
 
     match tree {
@@ -376,7 +376,7 @@ fn build_tree_from_map(
             children_map,
             is_dir_set,
             has_filter,
-            current_depth + 1,  // Increment depth for children
+            current_depth + 1, // Increment depth for children
             max_depth,
         ) {
             children.push(child_entry);
@@ -643,10 +643,7 @@ mod tests {
         // Note: The symlink might not appear at all due to walker behavior,
         // OR it should be filtered out by our security validation.
         // Either way, we verify the tree only contains expected safe entries.
-        assert!(
-            child_names.contains(&"src"),
-            "src should be present"
-        );
+        assert!(child_names.contains(&"src"), "src should be present");
 
         // If escape_link IS present, it would be a security vulnerability
         // (though the walker might not yield it at all)
@@ -719,7 +716,10 @@ mod tests {
         let result = file_tree(root.to_str().unwrap(), &[], false, false, None);
 
         // The function should complete successfully (no stack overflow)
-        assert!(result.is_ok(), "file_tree should handle symlink cycles gracefully");
+        assert!(
+            result.is_ok(),
+            "file_tree should handle symlink cycles gracefully"
+        );
 
         let tree = result.unwrap();
 
@@ -752,11 +752,17 @@ mod tests {
 
         // This should NOT cause infinite recursion
         let result = file_tree(root.to_str().unwrap(), &[], false, false, None);
-        assert!(result.is_ok(), "file_tree should handle self-referential symlinks");
+        assert!(
+            result.is_ok(),
+            "file_tree should handle self-referential symlinks"
+        );
 
         let tree = result.unwrap();
         let child_names: Vec<&str> = tree.children.iter().map(|c| c.name.as_str()).collect();
-        assert!(child_names.contains(&"data"), "data directory should be present");
+        assert!(
+            child_names.contains(&"data"),
+            "data directory should be present"
+        );
     }
 
     #[cfg(unix)]
@@ -782,11 +788,17 @@ mod tests {
 
         // This should NOT cause infinite recursion
         let result = file_tree(root.to_str().unwrap(), &[], false, false, None);
-        assert!(result.is_ok(), "file_tree should handle symlinks pointing to root");
+        assert!(
+            result.is_ok(),
+            "file_tree should handle symlinks pointing to root"
+        );
 
         let tree = result.unwrap();
         let child_names: Vec<&str> = tree.children.iter().map(|c| c.name.as_str()).collect();
-        assert!(child_names.contains(&"src"), "src directory should be present");
+        assert!(
+            child_names.contains(&"src"),
+            "src directory should be present"
+        );
     }
 
     #[cfg(unix)]
@@ -829,7 +841,10 @@ mod tests {
 
         // This should NOT cause infinite recursion or stack overflow
         let result = file_tree(root.to_str().unwrap(), &[], false, false, None);
-        assert!(result.is_ok(), "file_tree should handle 3-way symlink cycles");
+        assert!(
+            result.is_ok(),
+            "file_tree should handle 3-way symlink cycles"
+        );
 
         let tree = result.unwrap();
         let child_names: Vec<&str> = tree.children.iter().map(|c| c.name.as_str()).collect();
@@ -860,12 +875,18 @@ mod tests {
         assert!(tree.is_dir());
         // Root (depth 0) should have 'a' (depth 1)
         let a_dir = tree.children.iter().find(|c| c.name == "a");
-        assert!(a_dir.is_some(), "Directory 'a' should be present at depth 1");
+        assert!(
+            a_dir.is_some(),
+            "Directory 'a' should be present at depth 1"
+        );
 
         let a_dir = a_dir.unwrap();
         // 'a' (depth 1) should have 'b' (depth 2)
         let b_dir = a_dir.children.iter().find(|c| c.name == "b");
-        assert!(b_dir.is_some(), "Directory 'b' should be present at depth 2");
+        assert!(
+            b_dir.is_some(),
+            "Directory 'b' should be present at depth 2"
+        );
 
         let b_dir = b_dir.unwrap();
         // 'b' at depth 2 should be depth_limited (can't recurse further)
@@ -929,7 +950,10 @@ mod tests {
         let tree = file_tree(root.to_str().unwrap(), &[], false, false, Some(0)).unwrap();
 
         assert!(tree.is_dir());
-        assert!(tree.depth_limited, "Root should be depth_limited when max_depth=0");
+        assert!(
+            tree.depth_limited,
+            "Root should be depth_limited when max_depth=0"
+        );
         assert!(
             tree.children.is_empty(),
             "Root should have no children when max_depth=0"
@@ -946,7 +970,10 @@ mod tests {
         let entry = FileTreeEntry::new_dir(
             "test".to_string(),
             "test".to_string(),
-            vec![FileTreeEntry::new_file("file.py".to_string(), "test/file.py".to_string())],
+            vec![FileTreeEntry::new_file(
+                "file.py".to_string(),
+                "test/file.py".to_string(),
+            )],
         );
 
         let json = serde_json::to_string(&entry).unwrap();
@@ -992,11 +1019,19 @@ mod tests {
         assert_eq!(deserialized.children.len(), 2);
 
         // Verify children
-        let src = deserialized.children.iter().find(|c| c.name == "src").unwrap();
+        let src = deserialized
+            .children
+            .iter()
+            .find(|c| c.name == "src")
+            .unwrap();
         assert!(src.is_dir());
         assert_eq!(src.entry_type, "dir");
 
-        let main = deserialized.children.iter().find(|c| c.name == "main.py").unwrap();
+        let main = deserialized
+            .children
+            .iter()
+            .find(|c| c.name == "main.py")
+            .unwrap();
         assert!(!main.is_dir());
         assert_eq!(main.entry_type, "file");
     }
@@ -1014,6 +1049,8 @@ mod tests {
         assert_eq!(parsed["type"], "file");
         assert_eq!(parsed["path"], "src/test.py");
         // Files should not have children in output (skip_serializing_if = Vec::is_empty)
-        assert!(parsed.get("children").is_none() || parsed["children"].as_array().unwrap().is_empty());
+        assert!(
+            parsed.get("children").is_none() || parsed["children"].as_array().unwrap().is_empty()
+        );
     }
 }

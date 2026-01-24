@@ -36,8 +36,9 @@
 //! }
 //! ```
 
+use fixedbitset::FixedBitSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -225,7 +226,10 @@ impl DependencyCycle {
 
     /// Update test involvement flag.
     pub fn update_test_involvement(&mut self) {
-        self.involves_tests = self.participants.iter().any(|s| Self::is_test_participant(s))
+        self.involves_tests = self
+            .participants
+            .iter()
+            .any(|s| Self::is_test_participant(s))
             || self.files.iter().any(|s| Self::is_test_participant(s));
     }
 }
@@ -440,24 +444,25 @@ struct TarjanState {
     index: u32,
     /// Stack of nodes in current DFS path.
     stack: Vec<usize>,
-    /// Set of nodes currently on stack (for O(1) lookup).
-    on_stack: HashSet<usize>,
+    /// Set of nodes currently on stack (for O(1) lookup). Uses FixedBitSet for cache efficiency.
+    on_stack: FixedBitSet,
     /// DFS index for each node.
-    indices: HashMap<usize, u32>,
+    indices: FxHashMap<usize, u32>,
     /// Lowlink value for each node.
-    lowlinks: HashMap<usize, u32>,
+    lowlinks: FxHashMap<usize, u32>,
     /// Resulting SCCs.
     sccs: Vec<Vec<usize>>,
 }
 
 impl TarjanState {
-    fn new() -> Self {
+    /// Create new Tarjan state with capacity for `node_count` nodes.
+    fn new(node_count: usize) -> Self {
         Self {
             index: 0,
-            stack: Vec::new(),
-            on_stack: HashSet::new(),
-            indices: HashMap::new(),
-            lowlinks: HashMap::new(),
+            stack: Vec::with_capacity(node_count),
+            on_stack: FixedBitSet::with_capacity(node_count),
+            indices: FxHashMap::default(),
+            lowlinks: FxHashMap::default(),
             sccs: Vec::new(),
         }
     }
@@ -468,20 +473,20 @@ struct DependencyGraph {
     /// Node names (index -> name).
     nodes: Vec<String>,
     /// Node name to index mapping.
-    node_indices: HashMap<String, usize>,
+    node_indices: FxHashMap<String, usize>,
     /// Adjacency list: node index -> set of neighbor indices.
-    edges: HashMap<usize, HashSet<usize>>,
+    edges: FxHashMap<usize, FxHashSet<usize>>,
     /// File associations for each node.
-    node_files: HashMap<usize, HashSet<String>>,
+    node_files: FxHashMap<usize, FxHashSet<String>>,
 }
 
 impl DependencyGraph {
     fn new() -> Self {
         Self {
             nodes: Vec::new(),
-            node_indices: HashMap::new(),
-            edges: HashMap::new(),
-            node_files: HashMap::new(),
+            node_indices: FxHashMap::default(),
+            edges: FxHashMap::default(),
+            node_files: FxHashMap::default(),
         }
     }
 
@@ -493,7 +498,7 @@ impl DependencyGraph {
         let idx = self.nodes.len();
         self.nodes.push(name.to_string());
         self.node_indices.insert(name.to_string(), idx);
-        self.edges.insert(idx, HashSet::new());
+        self.edges.insert(idx, FxHashSet::default());
         idx
     }
 
@@ -540,10 +545,11 @@ impl DependencyGraph {
     ///
     /// This is an iterative implementation to avoid stack overflow on large graphs.
     fn find_sccs(&self) -> Vec<Vec<usize>> {
-        let mut state = TarjanState::new();
+        let node_count = self.nodes.len();
+        let mut state = TarjanState::new(node_count);
 
         // Process all nodes (handles disconnected components)
-        for start in 0..self.nodes.len() {
+        for start in 0..node_count {
             if !state.indices.contains_key(&start) {
                 self.tarjan_iterative(start, &mut state);
             }
@@ -592,7 +598,7 @@ impl DependencyGraph {
                         if !state.indices.contains_key(&w) {
                             // Neighbor not yet visited - recurse
                             work_stack.push((w, 0, 0));
-                        } else if state.on_stack.contains(&w) {
+                        } else if state.on_stack.contains(w) {
                             // Neighbor on stack - update lowlink
                             let w_index = state.indices[&w];
                             let v_lowlink = state.lowlinks.get_mut(&v).unwrap();
@@ -628,7 +634,7 @@ impl DependencyGraph {
                         let mut scc = Vec::new();
                         loop {
                             let w = state.stack.pop().unwrap();
-                            state.on_stack.remove(&w);
+                            state.on_stack.set(w, false);
                             scc.push(w);
                             if w == v {
                                 break;
@@ -648,10 +654,7 @@ impl DependencyGraph {
 // =============================================================================
 
 /// Build module-level dependency graph from imports.
-fn build_module_graph(
-    project_path: &Path,
-    config: &CircularConfig,
-) -> Result<DependencyGraph> {
+fn build_module_graph(project_path: &Path, config: &CircularConfig) -> Result<DependencyGraph> {
     let scanner = ProjectScanner::new(project_path.to_str().unwrap_or("."))
         .map_err(|e| CircularError::ScanError(e.to_string()))?;
 
@@ -665,7 +668,9 @@ fn build_module_graph(
         .map_err(|e| CircularError::ScanError(e.to_string()))?;
 
     let mut graph = DependencyGraph::new();
-    let project_root = project_path.canonicalize().unwrap_or_else(|_| project_path.to_path_buf());
+    let project_root = project_path
+        .canonicalize()
+        .unwrap_or_else(|_| project_path.to_path_buf());
 
     for file_path in scan_result.files.iter().take(config.max_files) {
         // Skip test files if not including tests
@@ -701,16 +706,13 @@ fn build_module_graph(
 }
 
 /// Build package-level dependency graph (aggregated by directory).
-fn build_package_graph(
-    project_path: &Path,
-    config: &CircularConfig,
-) -> Result<DependencyGraph> {
+fn build_package_graph(project_path: &Path, config: &CircularConfig) -> Result<DependencyGraph> {
     // First build module graph
     let module_graph = build_module_graph(project_path, config)?;
 
     // Aggregate by package (directory)
     let mut package_graph = DependencyGraph::new();
-    let mut module_to_package: HashMap<String, String> = HashMap::new();
+    let mut module_to_package: FxHashMap<String, String> = FxHashMap::default();
 
     // Map modules to packages
     for node_name in &module_graph.nodes {
@@ -745,10 +747,7 @@ fn build_package_graph(
 }
 
 /// Build class-level dependency graph.
-fn build_class_graph(
-    project_path: &Path,
-    config: &CircularConfig,
-) -> Result<DependencyGraph> {
+fn build_class_graph(project_path: &Path, config: &CircularConfig) -> Result<DependencyGraph> {
     let scanner = ProjectScanner::new(project_path.to_str().unwrap_or("."))
         .map_err(|e| CircularError::ScanError(e.to_string()))?;
 
@@ -762,11 +761,13 @@ fn build_class_graph(
         .map_err(|e| CircularError::ScanError(e.to_string()))?;
 
     let mut graph = DependencyGraph::new();
-    let project_root = project_path.canonicalize().unwrap_or_else(|_| project_path.to_path_buf());
+    let project_root = project_path
+        .canonicalize()
+        .unwrap_or_else(|_| project_path.to_path_buf());
 
     // First pass: collect all class definitions
-    let mut class_to_file: HashMap<String, String> = HashMap::new();
-    let mut file_classes: HashMap<String, Vec<ClassInfo>> = HashMap::new();
+    let mut class_to_file: FxHashMap<String, String> = FxHashMap::default();
+    let mut file_classes: FxHashMap<String, Vec<ClassInfo>> = FxHashMap::default();
 
     for file_path in scan_result.files.iter().take(config.max_files) {
         if !config.include_tests && is_test_file(file_path) {
@@ -845,10 +846,7 @@ fn extract_class_name(type_str: &str) -> String {
 }
 
 /// Build function-level dependency graph from call graph.
-fn build_function_graph(
-    project_path: &Path,
-    config: &CircularConfig,
-) -> Result<DependencyGraph> {
+fn build_function_graph(project_path: &Path, config: &CircularConfig) -> Result<DependencyGraph> {
     let scanner = ProjectScanner::new(project_path.to_str().unwrap_or("."))
         .map_err(|e| CircularError::ScanError(e.to_string()))?;
 
@@ -933,9 +931,7 @@ fn is_test_file(path: &Path) -> bool {
 
 /// Convert file path to module name.
 fn path_to_module_name(path: &Path, project_root: &Path) -> String {
-    let relative = path
-        .strip_prefix(project_root)
-        .unwrap_or(path);
+    let relative = path.strip_prefix(project_root).unwrap_or(path);
 
     let module_path = relative
         .with_extension("")
@@ -992,11 +988,35 @@ fn resolve_import_to_module(
 fn is_internal_module(module: &str, _project_root: &Path) -> bool {
     // Common standard library and third-party prefixes to exclude
     const EXTERNAL_PREFIXES: &[&str] = &[
-        "std", "core", "alloc", // Rust
-        "os", "sys", "io", "re", "json", "time", "datetime", "collections", "typing", // Python
-        "fmt", "net", "http", "context", "sync", "encoding", // Go
-        "java.", "javax.", "sun.", "com.google", "org.apache", // Java
-        "react", "vue", "angular", "express", "lodash", "axios", // JS/TS
+        "std",
+        "core",
+        "alloc", // Rust
+        "os",
+        "sys",
+        "io",
+        "re",
+        "json",
+        "time",
+        "datetime",
+        "collections",
+        "typing", // Python
+        "fmt",
+        "net",
+        "http",
+        "context",
+        "sync",
+        "encoding", // Go
+        "java.",
+        "javax.",
+        "sun.",
+        "com.google",
+        "org.apache", // Java
+        "react",
+        "vue",
+        "angular",
+        "express",
+        "lodash",
+        "axios", // JS/TS
     ];
 
     let lower = module.to_lowercase();
@@ -1036,7 +1056,7 @@ fn sccs_to_cycles(
             let mut cycle = DependencyCycle::new(level, participants);
 
             // Collect files
-            let mut all_files = HashSet::new();
+            let mut all_files = FxHashSet::default();
             for &idx in &scc {
                 for file in graph.node_files_list(idx) {
                     all_files.insert(file);
@@ -1047,7 +1067,7 @@ fn sccs_to_cycles(
 
             // Check if likely intentional (same package/directory)
             if level == DependencyLevel::Module || level == DependencyLevel::Class {
-                let packages: HashSet<String> = cycle
+                let packages: FxHashSet<String> = cycle
                     .participants
                     .iter()
                     .map(|p| module_to_package_name(p))
@@ -1072,13 +1092,13 @@ fn sccs_to_cycles(
 /// Detect nested/overlapping cycles and mark them as critical.
 fn detect_nested_cycles(cycles: &mut [DependencyCycle]) {
     // Build participant sets for each cycle
-    let participant_sets: Vec<HashSet<String>> = cycles
+    let participant_sets: Vec<FxHashSet<String>> = cycles
         .iter()
         .map(|c| c.participants.iter().cloned().collect())
         .collect();
 
     // Collect indices of cycles that need to be marked as nested
-    let mut nested_indices: HashSet<usize> = HashSet::new();
+    let mut nested_indices = FixedBitSet::with_capacity(cycles.len());
 
     // Check for overlaps
     for i in 0..participant_sets.len() {
@@ -1097,7 +1117,7 @@ fn detect_nested_cycles(cycles: &mut [DependencyCycle]) {
     }
 
     // Mark nested cycles
-    for idx in nested_indices {
+    for idx in nested_indices.ones() {
         cycles[idx].mark_as_nested();
     }
 }
@@ -1108,7 +1128,7 @@ fn generate_suggestions(
     _graph: &DependencyGraph,
     max_suggestions: usize,
 ) -> Vec<BreakingSuggestion> {
-    let mut edge_impact: HashMap<(String, String), u32> = HashMap::new();
+    let mut edge_impact: FxHashMap<(String, String), u32> = FxHashMap::default();
 
     // Count how many cycles each edge participates in
     for cycle in cycles {
@@ -1128,12 +1148,7 @@ fn generate_suggestions(
         let technique = determine_breaking_technique(&from, &to);
         let description = generate_suggestion_description(&from, &to, &technique);
 
-        let mut suggestion = BreakingSuggestion::new(
-            (from, to),
-            &technique,
-            &description,
-            impact,
-        );
+        let mut suggestion = BreakingSuggestion::new((from, to), &technique, &description, impact);
 
         // Estimate effort based on technique
         suggestion.effort = match technique.as_str() {
@@ -1270,8 +1285,8 @@ pub fn detect_circular_dependencies(
     let suggestions = generate_suggestions(&cycles, &graph, config.max_suggestions);
 
     // Compute statistics (collect owned values to avoid borrow issues)
-    let mut participants_set: HashSet<String> = HashSet::new();
-    let mut files_set: HashSet<String> = HashSet::new();
+    let mut participants_set: FxHashSet<String> = FxHashSet::default();
+    let mut files_set: FxHashSet<String> = FxHashSet::default();
 
     for cycle in &cycles {
         for p in &cycle.participants {
@@ -1297,10 +1312,22 @@ pub fn detect_circular_dependencies(
         total_nodes: graph.node_count(),
         total_edges: graph.edge_count(),
         cycle_count: cycles.len(),
-        critical_count: cycles.iter().filter(|c| c.severity == Severity::Critical).count(),
-        high_count: cycles.iter().filter(|c| c.severity == Severity::High).count(),
-        medium_count: cycles.iter().filter(|c| c.severity == Severity::Medium).count(),
-        low_count: cycles.iter().filter(|c| c.severity == Severity::Low).count(),
+        critical_count: cycles
+            .iter()
+            .filter(|c| c.severity == Severity::Critical)
+            .count(),
+        high_count: cycles
+            .iter()
+            .filter(|c| c.severity == Severity::High)
+            .count(),
+        medium_count: cycles
+            .iter()
+            .filter(|c| c.severity == Severity::Medium)
+            .count(),
+        low_count: cycles
+            .iter()
+            .filter(|c| c.severity == Severity::Low)
+            .count(),
         test_cycles: cycles.iter().filter(|c| c.involves_tests).count(),
         max_cycle_size,
         avg_cycle_size,
@@ -1326,9 +1353,7 @@ pub fn format_circular_report(report: &CircularDependencyReport) -> String {
         "Circular Dependency Analysis ({} level)\n",
         report.config.level
     ));
-    output.push_str(&format!(
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    ));
+    output.push_str(&format!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"));
 
     // Summary
     output.push_str("Summary:\n");

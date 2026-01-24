@@ -76,7 +76,12 @@ pub fn format_query_error(
     let start_line = error_line.saturating_sub(2);
     let end_line = (error_line + 3).min(lines.len());
 
-    for (idx, line) in lines.iter().enumerate().skip(start_line).take(end_line - start_line) {
+    for (idx, line) in lines
+        .iter()
+        .enumerate()
+        .skip(start_line)
+        .take(end_line - start_line)
+    {
         let line_num = idx + 1;
         let marker = if idx == error_line { ">>>" } else { "   " };
         msg.push_str(&format!("  {} {:3} | {}\n", marker, line_num, line));
@@ -185,23 +190,50 @@ mod tests {
     #[test]
     fn test_format_error_kind() {
         assert_eq!(format_error_kind(&QueryErrorKind::Syntax), "syntax error");
-        assert_eq!(format_error_kind(&QueryErrorKind::NodeType), "invalid node type");
-        assert_eq!(format_error_kind(&QueryErrorKind::Field), "invalid field name");
-        assert_eq!(format_error_kind(&QueryErrorKind::Capture), "invalid capture");
-        assert_eq!(format_error_kind(&QueryErrorKind::Predicate), "invalid predicate");
-        assert_eq!(format_error_kind(&QueryErrorKind::Structure), "structure error");
-        assert_eq!(format_error_kind(&QueryErrorKind::Language), "language mismatch");
+        assert_eq!(
+            format_error_kind(&QueryErrorKind::NodeType),
+            "invalid node type"
+        );
+        assert_eq!(
+            format_error_kind(&QueryErrorKind::Field),
+            "invalid field name"
+        );
+        assert_eq!(
+            format_error_kind(&QueryErrorKind::Capture),
+            "invalid capture"
+        );
+        assert_eq!(
+            format_error_kind(&QueryErrorKind::Predicate),
+            "invalid predicate"
+        );
+        assert_eq!(
+            format_error_kind(&QueryErrorKind::Structure),
+            "structure error"
+        );
+        assert_eq!(
+            format_error_kind(&QueryErrorKind::Language),
+            "language mismatch"
+        );
     }
 
     #[test]
     fn test_extract_identifier_quoted() {
-        assert_eq!(extract_identifier("Invalid type 'foo_bar'"), Some("foo_bar"));
-        assert_eq!(extract_identifier("Error: 'my_type' not found"), Some("my_type"));
+        assert_eq!(
+            extract_identifier("Invalid type 'foo_bar'"),
+            Some("foo_bar")
+        );
+        assert_eq!(
+            extract_identifier("Error: 'my_type' not found"),
+            Some("my_type")
+        );
     }
 
     #[test]
     fn test_extract_identifier_last_word() {
-        assert_eq!(extract_identifier("Invalid node type invalid_node"), Some("invalid_node"));
+        assert_eq!(
+            extract_identifier("Invalid node type invalid_node"),
+            Some("invalid_node")
+        );
         assert_eq!(extract_identifier("Unknown field name"), Some("name"));
     }
 

@@ -1,0 +1,1243 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% PART XIII: Implementation Roadmap and Engineering Specification
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\part{Implementation Roadmap and Engineering Specification}
+\label{part:implementation-roadmap}
+
+%--------------------------------------------------
+\chapter{Executive Summary}
+\label{ch:implementation-executive-summary}
+%--------------------------------------------------
+
+This part provides a comprehensive implementation roadmap for the brrr-machine
+framework, translating the theoretical foundations established in Parts I--XII
+into concrete engineering deliverables. The implementation follows a phased
+approach with explicit dependencies, risk mitigations, and quality gates.
+
+\begin{pillarbox}[title={Implementation Scope}]
+\begin{description}
+    \item[Primary Languages] Rust (implementation), F* (verification)
+    \item[Target Duration] 6 phases, modular and parallelizable
+    \item[Key Constraint] Interleaved CG/PTS for OOP languages (Section~\ref{sec:qilin-interleaving})
+    \item[Verification Target] Mechanized proofs for core soundness theorems
+\end{description}
+\end{pillarbox}
+
+
+%--------------------------------------------------
+\chapter{Phase Architecture and Critical Dependencies}
+\label{ch:phase-architecture}
+%--------------------------------------------------
+
+\begin{artifactbox}
+\textbf{ARCHITECTURAL CONSTRAINT: INTERLEAVED CALL GRAPH + POINTER ANALYSIS}
+
+For object-oriented languages with virtual dispatch (Java, Python, JS, C++),
+call graph construction and points-to analysis exhibit \textbf{MUTUAL DEPENDENCY}:
+
+\begin{itemize}
+    \item Call graph resolution requires points-to information for receivers
+    \item Points-to propagation requires call graph edges for interprocedural flow
+\end{itemize}
+
+\textbf{SOLUTION:} Qilin-style on-the-fly algorithm (Section~\ref{sec:qilin-interleaving}) computes both
+simultaneously via worklist iteration until mutual fixpoint.
+
+For procedural languages (C, Fortran), sequential phasing is acceptable.
+\end{artifactbox}
+
+\section{Implementation Phase Overview}
+
+The six phases of implementation proceed as follows, with dependencies indicated by vertical arrows:
+
+\begin{center}
+\begin{tabular}{p{0.45\textwidth}p{0.45\textwidth}}
+\toprule
+\textbf{Phase 1: Foundation} & \textbf{Phase 2: CPG + Pointer Analysis} \\
+\midrule
+\begin{itemize}[nosep,leftmargin=*]
+    \item Abstract domain typeclass hierarchy
+    \item Complete lattice with verified laws
+    \item Galois connection interface
+    \item IR type specification
+    \item Tree-sitter parser integration
+    \item AST + CFG construction
+\end{itemize}
+&
+\begin{itemize}[nosep,leftmargin=*]
+    \item On-the-fly CG + PTS (Qilin)
+    \item Virtual call resolution
+    \item PDG construction (post-CG)
+    \item Effect edge computation
+    \item Complete CPG with all edge types
+\end{itemize}
+\\
+\midrule
+\textbf{Phase 3: Core Dataflow} & \textbf{Phase 4: Precision \& Ownership} \\
+\midrule
+\begin{itemize}[nosep,leftmargin=*]
+    \item IFDS tabulation algorithm
+    \item Reaching definitions analysis
+    \item Live variable analysis
+    \item Taint propagation (source$\rightarrow$sink)
+    \item Nullability analysis
+\end{itemize}
+&
+\begin{itemize}[nosep,leftmargin=*]
+    \item $k$-CFA context sensitivity
+    \item Thin slicing (TAJ-style)
+    \item Ownership state machine
+    \item Resource lifecycle tracking
+    \item Bi-abduction for specs
+\end{itemize}
+\\
+\midrule
+\textbf{Phase 5: Multi-Lang + Security + Concurrency} & \textbf{Phase 6: Production Hardening} \\
+\midrule
+\begin{itemize}[nosep,leftmargin=*]
+    \item Cross-language boundary analysis
+    \item Matthews-Findler boundary semantics
+    \item DLM information flow control
+    \item Implicit flow tracking (PC labels)
+    \item Data race detection (happens-before)
+    \item Linearizability verification
+    \item Outcome Logic bug classification
+    \item Concolic witness generation
+\end{itemize}
+&
+\begin{itemize}[nosep,leftmargin=*]
+    \item Incremental re-analysis (DRedL)
+    \item Adaptive precision budgets
+    \item SARIF output generation
+    \item IDE/CI integration
+    \item Runtime debugger hooks
+    \item Performance optimization
+\end{itemize}
+\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
+%--------------------------------------------------
+\chapter{Phase 1: Foundation}
+\label{ch:phase1-foundation}
+%--------------------------------------------------
+
+\section{Objective}
+
+Establish the core infrastructure upon which all subsequent analysis phases
+depend. This phase produces verified abstract domain implementations, the
+intermediate representation type system, and basic program graph construction.
+
+\section{Deliverables and Acceptance Criteria}
+
+\subsection{Milestone 1.1: Abstract Domain Infrastructure}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] \texttt{PartialOrder} typeclass with reflexivity, antisymmetry, transitivity proofs
+    \item[$\square$] \texttt{CompleteLattice} typeclass with join/meet/top/bottom verified laws
+    \item[$\square$] \texttt{GaloisConnection} type with soundness lemma ($\gamma \circ \alpha \sqsupseteq \mathrm{id}$)
+    \item[$\square$] \texttt{AbstractDomain} typeclass with widening operator
+    \item[$\square$] Chaotic iteration algorithm with Bourdoncle WTO
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] All algebraic laws verified in F* (no admits)
+    \item[$\checkmark$] Interval domain passes reference test suite
+    \item[$\checkmark$] Fixpoint computation terminates on all test cases
+\end{itemize}
+\end{artifactbox}
+
+\subsection{Milestone 1.2: Concrete Abstract Domains}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] Interval domain with widening thresholds $\{-\infty, -1, 0, 1, +\infty\}$
+    \item[$\square$] Taint lattice: $\bot \sqsubset \mathsf{Untainted} \sqsubset \mathsf{Unknown} \sqsubset \mathsf{Tainted} \sqsubset \top$
+    \item[$\square$] Nullability lattice: $\bot \sqsubset \{\mathsf{NonNull}, \mathsf{Null}\} \sqsubset \top$
+    \item[$\square$] Ownership state machine: $\mathsf{Uninit} \rightarrow \mathsf{Owned} \rightarrow \{\mathsf{Moved}, \mathsf{Borrowed}\} \rightarrow \mathsf{Freed}$
+    \item[$\square$] Effect row with row polymorphism support
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] Each domain implements \texttt{AbstractDomain} typeclass
+    \item[$\checkmark$] Galois connection soundness verified per domain
+    \item[$\checkmark$] Transfer functions monotone (verified)
+\end{itemize}
+\end{artifactbox}
+
+\subsection{Milestone 1.3: Code Property Graph Infrastructure}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] Node type hierarchy (Statement, Expression, Declaration, \ldots)
+    \item[$\square$] Edge type hierarchy (AST, CFG, PDG\_Data, PDG\_Control, Call, Effect)
+    \item[$\square$] CPG data structure with $O(1)$ node lookup, $O(\mathrm{degree})$ edge traversal
+    \item[$\square$] Traversal primitives: \texttt{successors}, \texttt{predecessors}, \texttt{reachable}, \texttt{filtered}
+    \item[$\square$] Pattern matching DSL for node/edge queries
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] CPG construction from reference programs produces expected structure
+    \item[$\checkmark$] Traversal primitives pass property-based tests
+    \item[$\checkmark$] Memory usage $< 10\times$ source file size
+\end{itemize}
+\end{artifactbox}
+
+\subsection{Milestone 1.4: IR and Parser Integration}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] Complete Brrr-IR type specification (Section~\ref{sec:brrr-ir})
+    \item[$\square$] Tree-sitter grammar bindings (Python, Rust, Go as initial targets)
+    \item[$\square$] AST $\rightarrow$ IR lowering transformations per language
+    \item[$\square$] CFG construction with proper exception/return edge handling
+    \item[$\square$] Basic CPG construction (AST nodes + CFG edges)
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] Round-trip: parse $\rightarrow$ IR $\rightarrow$ pretty-print preserves semantics
+    \item[$\checkmark$] CFG dominance frontier computation matches reference implementation
+    \item[$\checkmark$] All control flow constructs correctly modeled (loops, exceptions, etc.)
+\end{itemize}
+\end{artifactbox}
+
+\section{Risk Analysis and Mitigations}
+
+\begin{longtable}{p{0.28\textwidth}ccp{0.32\textwidth}}
+\toprule
+\textbf{Risk} & \textbf{Likelihood} & \textbf{Impact} & \textbf{Mitigation} \\
+\midrule
+\endhead
+F* proof complexity exceeds estimates & Medium & High & Start with key lemmas; defer non-critical proofs \\
+\midrule
+Tree-sitter grammar edge cases & High & Medium & Comprehensive test suite; fallback to partial parse \\
+\midrule
+IR design inadequate for later phases & Medium & High & Design review with Phase 3--5 requirements \\
+\midrule
+Performance bottleneck in CPG construction & Low & Medium & Profile early; use arena allocation \\
+\bottomrule
+\end{longtable}
+
+
+%--------------------------------------------------
+\chapter{Phase 2: CPG + Pointer Analysis}
+\label{ch:phase2-cpg-pointer}
+%--------------------------------------------------
+
+\section{Objective}
+
+Construct complete Code Property Graphs with resolved call edges via
+interleaved call graph and points-to analysis. This phase addresses
+the mutual dependency between virtual dispatch resolution and pointer
+analysis through on-the-fly computation.
+
+\section{Deliverables and Acceptance Criteria}
+
+\subsection{Milestone 2.1: On-the-fly Call Graph + Points-to (Qilin)}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] Worklist-based interleaved CG/PTS algorithm
+    \item[$\square$] Points-to set representation (BDD or explicit set based on size)
+    \item[$\square$] Virtual call resolution for each target language
+    \item[$\square$] Heap abstraction via allocation-site or recency abstraction
+    \item[$\square$] Context-insensitive baseline with selective refinement hooks
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] Virtual call resolution precision $\geq$ CHA baseline
+    \item[$\checkmark$] Terminates on 100KLOC codebases within configurable timeout
+    \item[$\checkmark$] Points-to set queries complete in $O(1)$ amortized
+\end{itemize}
+\end{artifactbox}
+
+\subsection{Milestone 2.2: Language-Specific Dispatch Resolution}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] Java: vtable + interface dispatch resolution
+    \item[$\square$] Python: MRO (C3 linearization) + \texttt{\_\_getattr\_\_} handling
+    \item[$\square$] JavaScript: prototype chain traversal + Proxy handling
+    \item[$\square$] C++: virtual table + multiple inheritance disambiguation
+    \item[$\square$] Rust: trait object dispatch + monomorphization tracking
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] Dispatch resolution matches language specification semantics
+    \item[$\checkmark$] Dynamic dispatch edge marked with uncertainty when imprecise
+\end{itemize}
+\end{artifactbox}
+
+\subsection{Milestone 2.3: PDG Construction}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] Data dependence edges (def-use chains)
+    \item[$\square$] Control dependence edges (via dominance frontier)
+    \item[$\square$] Interprocedural summary edges for call sites
+    \item[$\square$] Effect edges linking operations to their side effects
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] PDG slicing produces minimal relevant code for test queries
+    \item[$\checkmark$] Control dependence correctly handles structured exception handling
+\end{itemize}
+\end{artifactbox}
+
+
+%--------------------------------------------------
+\chapter{Phase 3: Core Dataflow}
+\label{ch:phase3-core-dataflow}
+%--------------------------------------------------
+
+\section{Objective}
+
+Implement the IFDS/IDE algorithmic framework for interprocedural dataflow
+analysis, along with foundational client analyses (reaching definitions,
+taint tracking, nullability).
+
+\section{Deliverables and Acceptance Criteria}
+
+\subsection{Milestone 3.1: IFDS Tabulation Algorithm}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] Exploded supergraph construction from CPG + call graph
+    \item[$\square$] Path edge computation via tabulation
+    \item[$\square$] Summary edge caching for interprocedural reuse
+    \item[$\square$] Demand-driven variant for interactive queries
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] Complexity $O(E \cdot D^3)$ verified on benchmark suite
+    \item[$\checkmark$] Summary edge reuse achieves $\geq 2\times$ speedup on repeated queries
+\end{itemize}
+\end{artifactbox}
+
+\subsection{Milestone 3.2: Taint Analysis}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] Source/sink/sanitizer specification language
+    \item[$\square$] Taint propagation rules (assignment, call, return, field access)
+    \item[$\square$] Context-sensitive taint tracking via IFDS
+    \item[$\square$] Path reconstruction for vulnerability reports
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] Detects OWASP Top 10 injection vulnerabilities on test suite
+    \item[$\checkmark$] False positive rate $< 30\%$ on labeled benchmark
+\end{itemize}
+\end{artifactbox}
+
+\subsection{Milestone 3.3: Nullability Analysis}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] Null state lattice: $\mathsf{NonNull} \mid \mathsf{Null} \mid \mathsf{MaybeNull} \mid \mathsf{Unknown}$
+    \item[$\square$] Null check recognition (\texttt{if x != null}, \texttt{x?.method}, etc.)
+    \item[$\square$] Nullability inference for unannotated code
+    \item[$\square$] Integration with type system annotations (\texttt{@Nullable}, \texttt{Option<T>})
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] Correctly handles language-specific null semantics
+    \item[$\checkmark$] No false positives after explicit null checks
+\end{itemize}
+\end{artifactbox}
+
+
+%--------------------------------------------------
+\chapter{Phase 4: Precision and Ownership}
+\label{ch:phase4-precision-ownership}
+%--------------------------------------------------
+
+\section{Objective}
+
+Enhance analysis precision through context sensitivity, thin slicing,
+and ownership/resource lifecycle tracking. This phase bridges the gap
+between basic dataflow and production-quality bug detection.
+
+\section{Deliverables and Acceptance Criteria}
+
+\subsection{Milestone 4.1: Context-Sensitive Analysis}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] $k$-CFA call-string context sensitivity (configurable $k$)
+    \item[$\square$] Object sensitivity for OOP languages (1-object, 2-object)
+    \item[$\square$] ZIPPER-guided selective context sensitivity
+    \item[$\square$] Context abstraction for recursive call chains
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] Precision improvement $\geq 20\%$ over context-insensitive baseline
+    \item[$\checkmark$] Performance overhead $< 3\times$ for $k \leq 2$
+\end{itemize}
+\end{artifactbox}
+
+\subsection{Milestone 4.2: Thin Slicing (TAJ-Style)}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] Relevant dependency identification (producer statements only)
+    \item[$\square$] Seed-based backward slicing from sinks
+    \item[$\square$] Slice prioritization by security relevance
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] Slice size reduction $\geq 50\%$ vs traditional slicing
+    \item[$\checkmark$] No loss of true positives from slice reduction
+\end{itemize}
+\end{artifactbox}
+
+\subsection{Milestone 4.3: Ownership and Resource Tracking}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] Ownership state machine per abstract location
+    \item[$\square$] Borrow tracking (shared/mutable, lifetime scope)
+    \item[$\square$] Resource lifecycle analysis (file handles, connections, locks)
+    \item[$\square$] Use-after-free, double-free, leak detection
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] Detects Rust-style ownership violations in non-Rust languages
+    \item[$\checkmark$] Resource leak detection with $< 20\%$ false positive rate
+\end{itemize}
+\end{artifactbox}
+
+
+%--------------------------------------------------
+\chapter{Phase 5: Multi-Language, Security, and Concurrency}
+\label{ch:phase5-multilang-security-concurrency}
+%--------------------------------------------------
+
+\section{Objective}
+
+Extend the analysis framework to handle cross-language boundaries, advanced
+security properties (information flow, implicit flows), and concurrent
+program verification (data races, linearizability).
+
+\section{Deliverables and Acceptance Criteria}
+
+\subsection{Milestone 5.1: Cross-Language Boundary Analysis}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] Matthews-Findler boundary term representation
+    \item[$\square$] Property preservation analysis at FFI boundaries
+    \item[$\square$] Type compatibility verification (ABI layout matching)
+    \item[$\square$] Risk scoring for cross-language calls
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] Detects type/layout mismatches at FFI boundaries
+    \item[$\checkmark$] Correctly propagates taint across language boundaries
+\end{itemize}
+\end{artifactbox}
+
+\subsection{Milestone 5.2: Advanced Information Flow Control}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] DLM (Decentralized Label Model) security labels
+    \item[$\square$] PC (Program Counter) label tracking for implicit flows
+    \item[$\square$] Declassification policy specification and verification
+    \item[$\square$] 4-point security lattice (confidentiality $\times$ integrity)
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] Detects implicit flows through control dependencies
+    \item[$\checkmark$] Supports principal-based access control policies
+\end{itemize}
+\end{artifactbox}
+
+\subsection{Milestone 5.3: Data Race Detection}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] Happens-before relation construction (fork/join, sync primitives)
+    \item[$\square$] Lock set analysis for mutex-protected accesses
+    \item[$\square$] Atomic operation modeling
+    \item[$\square$] Race condition reporting with witness traces
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] Detects races on standard concurrency benchmarks
+    \item[$\checkmark$] Correctly handles language-specific synchronization primitives
+\end{itemize}
+\end{artifactbox}
+
+\subsection{Milestone 5.4: Outcome Logic Bug Classification}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] Manifest vs Latent bug classification \textbf{[Le22]}
+    \item[$\square$] ISL triple representation for under-approximation
+    \item[$\square$] Concolic witness generation for manifest bugs
+    \item[$\square$] Context extraction for latent bugs
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] Manifest bugs have $0\%$ false positive rate (by construction)
+    \item[$\checkmark$] Witness generation succeeds for $\geq 80\%$ of manifest classifications
+\end{itemize}
+\end{artifactbox}
+
+
+%--------------------------------------------------
+\chapter{Phase 6: Production Hardening}
+\label{ch:phase6-production-hardening}
+%--------------------------------------------------
+
+\section{Objective}
+
+Prepare the framework for production deployment with incremental analysis,
+adaptive precision, standard output formats, and integration hooks for
+IDEs and CI/CD pipelines.
+
+\section{Deliverables and Acceptance Criteria}
+
+\subsection{Milestone 6.1: Incremental Analysis (DRedL)}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] Dependency tracking at function/file/statement granularity
+    \item[$\square$] Dirty-marking propagation on code changes
+    \item[$\square$] DRedL-style lattice-based incremental Datalog evaluation
+    \item[$\square$] Summary invalidation and re-computation
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] Re-analysis time $< 10\%$ of full analysis for single-file changes
+    \item[$\checkmark$] Incremental results equivalent to full re-analysis
+\end{itemize}
+\end{artifactbox}
+
+\subsection{Milestone 6.2: Adaptive Precision and Time Budgets}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] Per-function/file/project time budget configuration
+    \item[$\square$] Graceful degradation levels (Full $\rightarrow$ Standard $\rightarrow$ Fast $\rightarrow$ Syntactic)
+    \item[$\square$] Precision escalation for high-uncertainty findings
+    \item[$\square$] Complexity estimation for budget allocation
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] Analysis completes within configured time budget
+    \item[$\checkmark$] Degradation preserves high-confidence findings
+\end{itemize}
+\end{artifactbox}
+
+\subsection{Milestone 6.3: Output and Integration}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] SARIF 2.1 output for IDE/CI integration
+    \item[$\square$] LSP (Language Server Protocol) integration
+    \item[$\square$] CLI with configurable verbosity and filtering
+    \item[$\square$] Structured output for LLM consumption
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] SARIF output validates against schema
+    \item[$\checkmark$] IDE integration provides real-time feedback on file save
+\end{itemize}
+\end{artifactbox}
+
+\subsection{Milestone 6.4: Runtime Debugger Integration}
+
+\begin{artifactbox}
+\textbf{Deliverables:}
+\begin{itemize}
+    \item[$\square$] Trace collection hooks for Python/Node/Rust/Go
+    \item[$\square$] Static$\leftrightarrow$dynamic reconciliation engine
+    \item[$\square$] Confidence boost/reduction based on runtime evidence
+    \item[$\square$] Coverage-guided analysis prioritization
+\end{itemize}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+    \item[$\checkmark$] Runtime confirmation elevates finding confidence to $\geq 0.95$
+    \item[$\checkmark$] Runtime contradiction marks finding as false positive
+\end{itemize}
+\end{artifactbox}
+
+
+%--------------------------------------------------
+\chapter{Dependency Graph}
+\label{ch:dependency-graph}
+%--------------------------------------------------
+
+The following diagram illustrates the dependencies between major components.
+Note that the interleaved CG + Pointer Analysis (Qilin-style) receives input
+from both the parser infrastructure and the static AST/CFG construction.
+
+\begin{center}
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.2cm and 2cm,
+    box/.style={rectangle, draw, minimum width=2.2cm, minimum height=0.8cm, align=center},
+    wbox/.style={rectangle, draw, minimum width=6cm, minimum height=1cm, align=center, fill=gray!10},
+    arrow/.style={->, >=stealth, thick}
+]
+
+% Top level
+\node[box] (absdom) {Abstract\\Domain};
+
+% Second level
+\node[box, below left=of absdom, xshift=-1cm] (domains) {Domains};
+\node[box, below=of absdom] (ir) {IR};
+\node[box, below right=of absdom, xshift=1cm] (parser) {Parser};
+
+% Third level
+\node[box, below=of ir, yshift=-0.5cm] (astcfg) {AST + CFG\\(static)};
+
+% Fourth level - wide box
+\node[wbox, below=of astcfg, yshift=-0.5cm] (interleaved) {INTERLEAVED: CG + Pointer Analysis\\(Qilin-style, Section~\ref{sec:qilin-interleaving})\\Output: Complete CPG with resolved call edges};
+
+% Fifth level
+\node[box, below left=of interleaved, xshift=-1cm, yshift=-0.3cm] (ifds) {IFDS};
+\node[box, below=of interleaved, yshift=-0.3cm] (effects) {Effects};
+\node[box, below right=of interleaved, xshift=1cm, yshift=-0.3cm] (pdg) {PDG};
+
+% Sixth level
+\node[box, below=of effects, yshift=-0.3cm] (specific) {Specific Analyses\\(Taint, Null, Ownership)};
+
+% Seventh level
+\node[box, below left=of specific, xshift=-1cm, yshift=-0.3cm] (boundary) {Boundary};
+\node[box, below=of specific, yshift=-0.3cm] (incremental) {Incremental};
+\node[box, below right=of specific, xshift=1cm, yshift=-0.3cm] (verif) {Verification\\(OL/LCL\_A)};
+
+% Arrows from top
+\draw[arrow] (absdom) -- (domains);
+\draw[arrow] (absdom) -- (ir);
+\draw[arrow] (absdom) -- (parser);
+
+% Arrows to AST+CFG
+\draw[arrow] (ir) -- (astcfg);
+\draw[arrow] (parser) -- (astcfg);
+
+% Arrows to interleaved
+\draw[arrow] (domains) |- (interleaved);
+\draw[arrow] (astcfg) -- (interleaved);
+
+% Arrows from interleaved
+\draw[arrow] (interleaved) -- (ifds);
+\draw[arrow] (interleaved) -- (effects);
+\draw[arrow] (interleaved) -- (pdg);
+
+% Arrows to specific
+\draw[arrow] (ifds) -- (specific);
+\draw[arrow] (effects) -- (specific);
+\draw[arrow] (pdg) -- (specific);
+
+% Arrows from specific
+\draw[arrow] (specific) -- (boundary);
+\draw[arrow] (specific) -- (incremental);
+\draw[arrow] (specific) -- (verif);
+
+\end{tikzpicture}%
+}% end resizebox
+\end{center}
+
+
+%--------------------------------------------------
+\chapter{Complete System Architecture}
+\label{ch:complete-system-architecture}
+%--------------------------------------------------
+
+\begin{contributionbox}[title={BRRR-MACHINE: Layered Architecture}]
+A universal multi-language program analyzer with adaptive precision,
+parallelizable design, and best-effort F1 optimization.
+\end{contributionbox}
+
+\section{Layer 0: Input Sources}
+
+The system accepts multiple input types:
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{Source Code} & \textbf{Build Config} & \textbf{Test Suites} & \textbf{Runtime Traces} \\
+\midrule
+Python, Rust, Go, & \texttt{Cargo.toml} & pytest, & Debugger hooks \\
+C, JS, TS, Java, \ldots & \texttt{tsconfig} & go test, & \\
+& \texttt{compile\_cmds} & \texttt{\#[test]}, \ldots & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Layer 1: Parsing and IR}
+
+\begin{itemize}
+    \item \textbf{Tree-sitter parsers} (per language)
+    \item \textbf{Brrr-Machine IR}: Unified SSA-like representation with:
+    \begin{itemize}
+        \item Language-agnostic operations
+        \item Explicit effects (Part~\ref{part:effects})
+        \item Type/ownership annotations
+    \end{itemize}
+\end{itemize}
+
+\section{Layer 2: CPG Construction (Interleaved)}
+
+\begin{pillarbox}[title={Critical Design Decision}]
+For OOP languages, CG and PTS are computed \textbf{TOGETHER} (Qilin-style).
+\end{pillarbox}
+
+The interleaved worklist algorithm operates as follows:
+
+\begin{fstarcode}[title={Interleaved Worklist Algorithm (Pseudocode)}]
+while worklist not empty:
+  point <- pop(worklist)
+  if is_virtual_call(point):
+    for type T in PTS(receiver):           (* MUTUAL    *)
+      resolved <- resolve_method(T, method)  (* DEPENDENCY *)
+      add_cg_edge(point, resolved)
+  update_pts(point)
+  if pts_changed: add_dependents(worklist)
+\end{fstarcode}
+
+\noindent\textbf{Algorithm Explanation:} This pseudocode captures the core mutual dependency between
+call graph construction and points-to analysis. When encountering a virtual call site, the algorithm
+queries the current points-to set for the receiver to determine potential target methods. Each resolved
+method creates a new call graph edge, which in turn may introduce new points-to constraints. The
+algorithm iterates until reaching a fixpoint where neither the call graph nor points-to sets change.
+The mutual dependency (marked in comments) is the fundamental reason why these analyses cannot be
+performed sequentially for object-oriented languages with dynamic dispatch.
+
+The output is a \textbf{Complete Code Property Graph} containing:
+\begin{itemize}
+    \item AST nodes
+    \item CFG edges
+    \item CG edges (call graph)
+    \item PDG edges (program dependence graph)
+    \item Effect edges
+    \item Points-To Solution (PTS)
+\end{itemize}
+
+\section{Layer 3: Abstract Domains}
+
+\begin{center}
+\begin{tabular}{p{0.22\textwidth}p{0.22\textwidth}p{0.22\textwidth}p{0.22\textwidth}}
+\toprule
+\textbf{Taint} & \textbf{Nullability} & \textbf{Ownership} & \textbf{Effects} \\
+\midrule
+$\bot_T$ & $\bot_N$ & $\mathsf{Uninit}$ & $\{\mathsf{Read}$, \\
+$\uparrow$ & $\uparrow \quad \uparrow$ & $\downarrow$ & $\mathsf{Write}$, \\
+$\mathsf{Untainted}$ & $\mathsf{NonNull} \; \mathsf{Null}$ & $\mathsf{Owned}$ & $\mathsf{Alloc}$, \\
+$\uparrow \quad \uparrow$ & $\uparrow \quad \uparrow$ & $\downarrow \quad \downarrow$ & $\mathsf{Free}$, \\
+$\mathsf{Maybe}$ (!) & $\top_N$ & $\mathsf{Moved} \; \mathsf{Borrowed}$ & $\mathsf{IO}$, \\
+$\uparrow$ & & $\downarrow$ & $\mathsf{Throw}, \ldots\}$ \\
+$\mathsf{Tainted}$ & & $\mathsf{Freed}$ & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Note:} The $\mathsf{Maybe}$ element in the taint domain breaks Galois insertion, meaning this domain proves \emph{incorrectness} only.
+
+Additional domains include:
+\begin{itemize}
+    \item \textbf{Security Labels}: DLM multi-principal + PC label for implicit flow
+    \item \textbf{Access Permissions} (Bierhoff): unique/full/share/imm/pure
+    \item \textbf{Shape (TVLA)}: 3-valued logic for heap shapes
+\end{itemize}
+
+\section{Layer 4: Analysis Algorithms}
+
+\begin{center}
+\begin{tabular}{p{0.45\textwidth}p{0.45\textwidth}}
+\toprule
+\textbf{IFDS} & \textbf{CFL-Reachability} \\
+\midrule
+$O(E \cdot D^3)$ interprocedural & Context sensitivity via matched parentheses (Dyck) \\
+\begin{itemize}[nosep,leftmargin=*]
+    \item Exploded supergraph
+    \item Path edges
+    \item Summary edges
+    \item Tabulation algorithm
+\end{itemize}
+&
+\begin{itemize}[nosep,leftmargin=*]
+    \item Demand-driven variant
+    \item On-the-fly computation
+\end{itemize}
+\\
+\midrule
+\textbf{Thin Slicing} & \textbf{Fixpoint Iteration} \\
+\midrule
+Relevant dependencies only (not all reaching defs) & With widening/narrowing for infinite domains \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Layer 5: Specific Analyses}
+
+\begin{center}
+\begin{tabular}{p{0.22\textwidth}p{0.22\textwidth}p{0.22\textwidth}p{0.22\textwidth}}
+\toprule
+\textbf{Taint Analysis} & \textbf{Nullability Analysis} & \textbf{Ownership Tracking} & \textbf{Resource Leaks} \\
+\midrule
+source $\rightarrow$ sink with sanitizers & may-be-null dereference & use-after-move/free & unclosed handles \\
+\midrule
+\textbf{Implicit Flow} & \textbf{Boundary Risk} & \textbf{Data Races} & \\
+\midrule
+PC label tracking \textbf{[Sabelfeld]} & FFI/IPC type/memory mismatch & concurrent access detection & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Layer 5.5: ML-Augmented Pattern Detection (Optional)}
+
+\begin{pillarbox}[title={ML Integration Philosophy}]
+Sources: \textbf{[Pradel18]} (DeepBugs), \textbf{[Si18]} (Code2Inv)
+
+ML provides \emph{STATISTICAL EVIDENCE}, not soundness guarantees.
+Use for prioritization and pattern detection, not proofs.
+\end{pillarbox}
+
+ML-based detectors include:
+\begin{itemize}
+    \item \textbf{Swapped Arguments Detector}: e.g., \texttt{setTimeout(delay, fn)}
+    \item \textbf{Wrong Operator Detector}: e.g., \texttt{x == y} vs \texttt{x != y}
+    \item \textbf{Wrong Operand Detector}: e.g., \texttt{height + width} bug
+    \item \textbf{Name Anomaly Detector}: unusual naming patterns
+\end{itemize}
+
+These feed into a \textbf{Semantic Embedding Service} (word2vec/code2vec).
+
+\textbf{Name-Based Security Role Classification:}
+\begin{itemize}
+    \item ``sanitize'', ``escape'' $\rightarrow$ \texttt{LikelySanitizer}
+    \item ``input'', ``request'' $\rightarrow$ \texttt{LikelySource}
+    \item ``query'', ``exec'' $\rightarrow$ \texttt{LikelySink}
+\end{itemize}
+
+This augments taint configuration with discovered sanitizers/sources/sinks.
+
+\section{Layer 6: Verification and Confidence}
+
+\subsection{Confidence Inputs}
+
+All of the following feed into confidence computation:
+
+\begin{center}
+\small
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{ccccc}
+\toprule
+\textbf{Static} & \textbf{Local Completeness} & \textbf{Test/Code} & \textbf{Runtime} & \textbf{ML} \\
+\textbf{Results} & \textbf{(LCL)} & \textbf{Discrepancy} & \textbf{Traces} & \textbf{Confidence} \\
+\midrule
+violations & $\alpha(f(c)) = f^\#(\alpha(c))$? & test vs code & ground truth & DeepBugs \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{center}
+
+\begin{pillarbox}[title={Confidence Combination (\textbf{[Pradel18]}, \textbf{[QSYM18]})}]
+\begin{itemize}
+    \item Static + ML agree: \textbf{BOOST} confidence (ensemble effect)
+    \item Static only: Use static confidence
+    \item ML only: Report with ML confidence (no soundness)
+    \item ML provides prioritization, static provides soundness
+\end{itemize}
+\end{pillarbox}
+
+\subsection{Outcome Logic Classification}
+
+For each violation:
+
+\begin{center}
+\begin{tabular}{p{0.45\textwidth}p{0.45\textwidth}}
+\toprule
+\textbf{Manifest Error} \textbf{[Le22]} & \textbf{Latent Error} \\
+\midrule
+ISL proof has presumption $(\mathsf{emp} \land \mathsf{true})$ --- no caller constraints needed & Requires specific precondition from caller \\
+Bug happens regardless of calling context & Bug happens only in specific contexts \\
+$\rightarrow$ HIGH confidence & $\rightarrow$ Report with context \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Falsification (OL Theorem 5.1):} If spec violated, we can prove it.
+
+\subsection{Final Confidence Levels}
+
+\begin{longtable}{lp{0.45\textwidth}l}
+\toprule
+\textbf{Classification} & \textbf{Description} & \textbf{Action} \\
+\midrule
+\endhead
+\texttt{ConfirmedBug} & Manifest + concolic witness & Report: HIGH \\
+\texttt{HighConfBug} & Manifest, no witness yet & Report: HIGH \\
+\texttt{TrueAlarm} & Violation + locally complete & Report: MEDIUM \\
+\texttt{ConditionalBug} & Latent with plausible context & Report: MEDIUM \\
+\texttt{PossibleFP} & Violation but LC failed & Investigate \\
+\texttt{ConfirmedSafe} & No violation + locally complete & Skip \\
+\texttt{LikelySafe} & No violation, LC unknown & Skip \\
+\bottomrule
+\end{longtable}
+
+\section{Layer 7: Output}
+
+\begin{center}
+\begin{tabular}{p{0.3\textwidth}p{0.3\textwidth}p{0.3\textwidth}}
+\toprule
+\textbf{SARIF} (tooling) & \textbf{CLI} (human) & \textbf{LLM} (consumable) \\
+\midrule
+Standard format for IDE/CI & Prioritized findings with traces & Structured for agent consumption \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Cross-Cutting Concerns}
+
+\begin{center}
+\begin{tabular}{p{0.45\textwidth}p{0.45\textwidth}}
+\toprule
+\textbf{Incrementality} (Part~\ref{part:incremental}) & \textbf{Multi-Language} (Part~\ref{part:multi-language}) \\
+\midrule
+\begin{itemize}[nosep,leftmargin=*]
+    \item Adapton-style dirty marking
+    \item File/function/statement level
+    \item Dependency tracking
+\end{itemize}
+&
+\begin{itemize}[nosep,leftmargin=*]
+    \item Matthews boundary semantics
+    \item Risk analysis at FFI/IPC
+    \item Type consistency checking
+\end{itemize}
+\\
+\midrule
+\textbf{Time Budgets} (D.9) & \textbf{Parallelization} \\
+\midrule
+\begin{itemize}[nosep,leftmargin=*]
+    \item Per-function/file/total
+    \item Graceful degradation levels
+    \item Adaptive precision
+\end{itemize}
+&
+\begin{itemize}[nosep,leftmargin=*]
+    \item Laptop $\rightarrow$ datacenter scalable
+    \item Independent analyses parallel
+    \item Worklist can be parallelized
+\end{itemize}
+\\
+\midrule
+\textbf{Configurability} & \textbf{Uncertainty Propagation} \\
+\midrule
+\begin{itemize}[nosep,leftmargin=*]
+    \item Everything is a spectrum
+    \item User can tune all parameters
+    \item Fork-friendly extensibility
+\end{itemize}
+&
+\begin{itemize}[nosep,leftmargin=*]
+    \item Each block outputs confidence
+    \item Propagates through pipeline
+    \item Guides adaptive precision
+\end{itemize}
+\\
+\midrule
+\textbf{ML Integration} (Layer 5.5) & \textbf{Hybrid Testing} (Section~\ref{sec:hybrid-testing}) \\
+\midrule
+\begin{itemize}[nosep,leftmargin=*]
+    \item DeepBugs name-based detection
+    \item Semantic identifier embeddings
+    \item Augments static with ML conf
+    \item Section~\ref{sec:ml-augmentation} for details
+\end{itemize}
+&
+\begin{itemize}[nosep,leftmargin=*]
+    \item QSYM: concolic + fuzzer cooperation
+    \item Validation-based soundness
+    \item 10--100$\times$ faster than pure concolic
+    \item Native execution + selective instr
+\end{itemize}
+\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
+%--------------------------------------------------
+\chapter{Mutually Exclusive Analysis Paths}
+\label{ch:mutually-exclusive-paths}
+%--------------------------------------------------
+
+\begin{pillarbox}[title={Valid Parallel Options}]
+Multiple implementations producing compatible output.
+
+The brrr-machine design allows \textbf{SWAPPABLE} components at key decision points.
+Each path trades precision for speed. Output types remain compatible.
+\end{pillarbox}
+
+\section{Pointer Analysis (Layer 2)}
+
+\textbf{Note:} Choice is LANGUAGE-DEPENDENT (Part~\ref{part:pointer-analysis}).
+
+\begin{longtable}{p{0.18\textwidth}p{0.18\textwidth}p{0.18\textwidth}p{0.18\textwidth}p{0.18\textwidth}}
+\toprule
+\textbf{Option A} & \textbf{Option B} & \textbf{Option C} & \textbf{Option D} & \textbf{Option E} \\
+\textbf{Andersen} & \textbf{Steensgaard} & \textbf{Rupta} & \textbf{DSA} & \textbf{Qilin+ZIPPER} \\
+\midrule
+$O(n^3)$ subset-based & $O(n \cdot \alpha)$ unification & 1-callsite + stack filter & $O(n \cdot \alpha)$ + heap cloning & On-the-fly CG + PTS \\
+Flow-sensitive possible & Flow-insensitive & For Rust: FASTER + precise & Large C/C++ ($>$100K LOC) & OOP with virtual dispatch \\
+Higher precision ($<$50K) & Fastest, least precise & Section~\ref{sec:rupta} & Section~\ref{sec:dsa} & Section~\ref{sec:qilin} \\
+\bottomrule
+\end{longtable}
+
+\textbf{Language Guide:}
+\begin{itemize}
+    \item C/C++ $<$50K: Andersen
+    \item C/C++ $>$100K: DSA
+    \item Rust: Rupta
+    \item OOP: Qilin
+\end{itemize}
+
+\textbf{Unified Output:} $\mathtt{pts} : \mathtt{var\_id} \rightarrow \mathsf{set}\ \mathtt{abstract\_loc}$
+
+\section{Dataflow Algorithm (Layer 4)}
+
+\textbf{Note:} IFDS requires DISTRIBUTIVE functions.
+
+\begin{longtable}{p{0.3\textwidth}p{0.3\textwidth}p{0.3\textwidth}}
+\toprule
+\textbf{Option A: IFDS} & \textbf{Option B: Symbolic Exec} & \textbf{Option C: Set Constraints} \\
+\midrule
+$O(ED^3)$ path-insensitive & Path-sensitive & Section~\ref{sec:set-constraints} \textbf{[Aiken]} \\
+DISTRIBUTIVE only! & Input-specific & Handles NON-distributive \\
+Taint, reaching defs & Precise witnesses & Pointer, type inference \\
+\bottomrule
+\end{longtable}
+
+\textbf{Unified Output:} $\mathtt{finding} : \{ \mathtt{location}, \mathtt{kind}, \mathtt{confidence} \}$
+
+\section{Heap Abstraction (Layer 3)}
+
+\begin{longtable}{p{0.3\textwidth}p{0.3\textwidth}p{0.3\textwidth}}
+\toprule
+\textbf{Option A: TVLA/Shape} & \textbf{Option B: Allocation-Site} & \textbf{Unified Output} \\
+\midrule
+3-valued logic & Simple abstraction & \\
+Precise shapes & Fast, imprecise & $\mathtt{heap\_shape} : \mathtt{abstract\_heap}$ \\
+Very expensive & Good enough for most & \\
+\bottomrule
+\end{longtable}
+
+\section{Precision Mode (Cross-cutting)}
+
+\begin{longtable}{p{0.3\textwidth}p{0.3\textwidth}p{0.3\textwidth}}
+\toprule
+\textbf{Option A: Full Precision} & \textbf{Option B: Degraded/Fast} & \textbf{Unified Output} \\
+\midrule
+Andersen + IFDS + shapes & Steensgaard + patterns & \\
+High confidence & Lower confidence & Same output types, \\
+Slow, thorough & Fast, approximate & different confidence \\
+\bottomrule
+\end{longtable}
+
+\section{Bug Verification (Layer 6)}
+
+\begin{longtable}{p{0.3\textwidth}p{0.3\textwidth}p{0.3\textwidth}}
+\toprule
+\textbf{Option A: OL Proofs} & \textbf{Option B: Concolic Exec} & \textbf{Unified Output} \\
+\midrule
+Symbolic bug classif. & Concrete witnesses & \\
+Manifest/Latent & Actual inputs & $\mathtt{bug\_classification}$ \\
+Sound (when succeeds) & Complete (when finds) & + optional witness \\
+\bottomrule
+\end{longtable}
+
+\section{Adaptive Selection Strategy}
+
+The brrr-machine framework uses a configurable analysis pipeline where different algorithms
+can be selected based on language characteristics, codebase size, and time constraints.
+The following F*-style type definitions formalize the configuration space:
+
+\begin{fstarcode}[title={Analysis Configuration Types}]
+(* Pointer algorithm selection based on language and size *)
+type PointerAlgorithm =
+  | Andersen        (* C/C++ < 50K LOC, most precise *)
+  | Steensgaard     (* Quick pre-analysis, least precise *)
+  | DSA             (* C/C++ > 100K LOC, heap cloning *)
+  | Qilin           (* OOP with virtual dispatch *)
+  | Rupta           (* Rust with stack filtering *)
+
+type DataflowAlgorithm = | IFDS | Symbolic | Hybrid
+type HeapAbstraction = | TVLA | AllocationSite | Recency
+type PrecisionMode = | Full | Standard | Fast | Syntactic
+type VerificationMode = | OLOnly | ConcolicOnly | Both
+
+(* Main configuration record combining all choices *)
+type analysis_config = {
+  pointer_analysis : PointerAlgorithm;
+  dataflow_algo : DataflowAlgorithm;
+  heap_abstraction : HeapAbstraction;
+  precision_mode : PrecisionMode;
+  verification : VerificationMode;
+}
+\end{fstarcode}
+
+\noindent\textbf{Type Signature Explanation:} The \texttt{analysis\_config} record bundles
+five orthogonal configuration choices. The \texttt{PointerAlgorithm} type captures the
+trade-off between precision (Andersen) and scalability (Steensgaard, DSA), with
+language-specific options (Qilin for OOP, Rupta for Rust). The \texttt{VerificationMode}
+determines whether bugs are classified using Outcome Logic proofs, concolic witness
+generation, or both approaches in combination.
+
+The following function demonstrates how the framework automatically selects an appropriate
+configuration based on the input code property graph and available time budget:
+
+\begin{fstarcode}[title={Adaptive Configuration Selection}]
+(* Type signature: takes a CPG and time budget, returns configuration *)
+(* This enables adaptive precision based on code characteristics *)
+val select_config : cpg -> time_budget -> analysis_config
+let select_config cpg budget =
+  let complexity = estimate_complexity cpg in
+  let loc_count = count_loc cpg in
+  let lang = primary_language cpg in
+  let has_concurrency = uses_threads cpg in
+  match budget, complexity, lang with
+  | _, _, Rust ->
+      (* Rust: always use Rupta for stack filtering *)
+      { pointer_analysis = Rupta;
+        dataflow_algo = IFDS;
+        heap_abstraction = AllocationSite;
+        precision_mode = Standard;
+        verification = Both }
+  | Unlimited, _, C | Unlimited, _, Cpp when loc_count < 50000 ->
+      (* Small C/C++: Andersen for max precision *)
+      { pointer_analysis = Andersen;
+        dataflow_algo = IFDS;
+        heap_abstraction = TVLA;
+        precision_mode = Full;
+        verification = Both }
+  | _, _, C | _, _, Cpp when loc_count > 100000 ->
+      (* Large C/C++: DSA for scalability with heap cloning *)
+      { pointer_analysis = DSA;
+        dataflow_algo = IFDS;
+        heap_abstraction = AllocationSite;
+        precision_mode = Standard;
+        verification = OLOnly }
+  | _, _, Java | _, _, Python ->
+      (* OOP: Qilin for virtual dispatch *)
+      { pointer_analysis = Qilin;
+        dataflow_algo = IFDS;
+        heap_abstraction = AllocationSite;
+        precision_mode = Standard;
+        verification = Both }
+  | Limited t, High, _ when t < minutes 5 ->
+      { pointer_analysis = Steensgaard;
+        dataflow_algo = IFDS;
+        heap_abstraction = AllocationSite;
+        precision_mode = Fast;
+        verification = OLOnly }
+  | _ ->
+      { pointer_analysis = Andersen;
+        dataflow_algo = Hybrid;
+        heap_abstraction = AllocationSite;
+        precision_mode = Standard;
+        verification = Both }
+\end{fstarcode}
+
+\noindent\textbf{Selection Logic:} The function uses pattern matching on language type,
+codebase size, and time budget to select the most appropriate algorithm combination.
+Key heuristics include: (1) Rust always uses Rupta for stack filtering benefits;
+(2) small C/C++ codebases ($<$50K LOC) use Andersen for maximum precision;
+(3) large C/C++ codebases ($>$100K LOC) use DSA for scalability;
+(4) OOP languages (Java, Python) use Qilin for on-the-fly virtual dispatch resolution;
+(5) tight time budgets trigger graceful degradation to faster, less precise algorithms.
+
+\section{Output Compatibility Guarantee}
+
+All paths produce compatible output types. This enables:
+
+\begin{enumerate}
+    \item \textbf{Progressive refinement} --- Start fast, refine suspicious findings
+    \item \textbf{Parallel execution} --- Run multiple paths, merge results
+    \item \textbf{User choice} --- Configure based on needs (CI vs IDE vs audit)
+    \item \textbf{Fallback} --- Degrade gracefully when precise analysis times out
+\end{enumerate}
+
+The unified finding type ensures that different analysis paths produce compatible
+outputs that can be merged and compared:
+
+\begin{fstarcode}[title={Unified Finding Type and Merging}]
+(* Core finding type: all analysis paths produce this structure *)
+(* Key fields: location, kind identify the finding; confidence enables ranking *)
+type unified_finding = {
+  location : node_id;             (* Where in the CPG *)
+  kind : vulnerability_type;      (* SQL injection, XSS, null deref, etc. *)
+  confidence : confidence_level;  (* Certainty from 0.0 to 1.0 *)
+  path_used : analysis_path;      (* Which algorithm produced this *)
+  witness : option concrete_trace; (* Concrete input triggering the bug *)
+  can_refine : bool;              (* Is higher-precision analysis available? *)
+}
+
+(* Merge findings from multiple analysis paths *)
+(* Groups by (location, kind), keeps highest-confidence finding per group *)
+val merge_findings : list unified_finding -> list unified_finding
+let merge_findings findings =
+  let grouped = group_by (fun f -> (f.location, f.kind)) findings in
+  List.map (fun fs ->
+    let best = max_by (fun f -> confidence_to_nat f.confidence) fs in
+    { best with can_refine = List.length fs > 1 }
+  ) grouped
+\end{fstarcode}
+
+\noindent\textbf{Merging Strategy:} When multiple analysis paths report findings at the same
+location with the same vulnerability kind, the \texttt{merge\_findings} function retains the
+finding with the highest confidence score. The \texttt{can\_refine} flag is set to \texttt{true}
+when multiple paths contributed findings, indicating that the location was flagged by
+independent analyses---increasing overall confidence in the result. This enables the
+ensemble effect described in Layer 6 (Verification and Confidence).

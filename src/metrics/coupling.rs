@@ -57,9 +57,9 @@ use tracing::debug;
 
 use crate::ast::extractor::AstExtractor;
 use crate::ast::types::{ClassInfo, ImportInfo};
+use crate::callgraph;
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
 use crate::callgraph::types::CallGraph;
-use crate::callgraph;
 use crate::lang::LanguageRegistry;
 
 // =============================================================================
@@ -121,7 +121,10 @@ impl std::str::FromStr for CouplingLevel {
             "file" => Ok(Self::File),
             "module" | "package" | "directory" => Ok(Self::Module),
             "class" => Ok(Self::Class),
-            _ => Err(format!("Unknown coupling level: '{}'. Valid values: file, module, class", s)),
+            _ => Err(format!(
+                "Unknown coupling level: '{}'. Valid values: file, module, class",
+                s
+            )),
         }
     }
 }
@@ -400,53 +403,248 @@ pub struct CouplingAnalysis {
 fn get_stdlib_prefixes(lang: &str) -> &'static [&'static str] {
     match lang {
         "python" => &[
-            "os", "sys", "io", "re", "json", "csv", "math", "random", "datetime",
-            "time", "collections", "itertools", "functools", "operator", "string",
-            "typing", "abc", "enum", "dataclasses", "pathlib", "shutil", "tempfile",
-            "subprocess", "threading", "multiprocessing", "asyncio", "concurrent",
-            "socket", "http", "urllib", "email", "html", "xml", "logging", "unittest",
-            "pytest", "doctest", "pdb", "traceback", "warnings", "contextlib",
-            "copy", "pickle", "shelve", "sqlite3", "hashlib", "hmac", "secrets",
-            "struct", "codecs", "unicodedata", "locale", "gettext", "argparse",
-            "configparser", "statistics", "fractions", "decimal", "numbers",
-            "cmath", "array", "bisect", "heapq", "queue", "types", "weakref",
-            "gc", "inspect", "dis", "ast", "builtins", "__future__", "importlib",
+            "os",
+            "sys",
+            "io",
+            "re",
+            "json",
+            "csv",
+            "math",
+            "random",
+            "datetime",
+            "time",
+            "collections",
+            "itertools",
+            "functools",
+            "operator",
+            "string",
+            "typing",
+            "abc",
+            "enum",
+            "dataclasses",
+            "pathlib",
+            "shutil",
+            "tempfile",
+            "subprocess",
+            "threading",
+            "multiprocessing",
+            "asyncio",
+            "concurrent",
+            "socket",
+            "http",
+            "urllib",
+            "email",
+            "html",
+            "xml",
+            "logging",
+            "unittest",
+            "pytest",
+            "doctest",
+            "pdb",
+            "traceback",
+            "warnings",
+            "contextlib",
+            "copy",
+            "pickle",
+            "shelve",
+            "sqlite3",
+            "hashlib",
+            "hmac",
+            "secrets",
+            "struct",
+            "codecs",
+            "unicodedata",
+            "locale",
+            "gettext",
+            "argparse",
+            "configparser",
+            "statistics",
+            "fractions",
+            "decimal",
+            "numbers",
+            "cmath",
+            "array",
+            "bisect",
+            "heapq",
+            "queue",
+            "types",
+            "weakref",
+            "gc",
+            "inspect",
+            "dis",
+            "ast",
+            "builtins",
+            "__future__",
+            "importlib",
         ],
-        "rust" => &[
-            "std", "core", "alloc", "proc_macro", "test",
-        ],
+        "rust" => &["std", "core", "alloc", "proc_macro", "test"],
         "go" => &[
-            "fmt", "os", "io", "bufio", "bytes", "strings", "strconv", "unicode",
-            "regexp", "path", "filepath", "sort", "container", "encoding", "json",
-            "xml", "csv", "html", "template", "text", "net", "http", "url", "mime",
-            "crypto", "hash", "math", "rand", "time", "log", "flag", "testing",
-            "sync", "atomic", "context", "errors", "runtime", "reflect", "unsafe",
-            "syscall", "os/exec", "os/signal", "io/ioutil", "io/fs", "embed",
-            "database/sql", "archive", "compress", "image", "debug",
+            "fmt",
+            "os",
+            "io",
+            "bufio",
+            "bytes",
+            "strings",
+            "strconv",
+            "unicode",
+            "regexp",
+            "path",
+            "filepath",
+            "sort",
+            "container",
+            "encoding",
+            "json",
+            "xml",
+            "csv",
+            "html",
+            "template",
+            "text",
+            "net",
+            "http",
+            "url",
+            "mime",
+            "crypto",
+            "hash",
+            "math",
+            "rand",
+            "time",
+            "log",
+            "flag",
+            "testing",
+            "sync",
+            "atomic",
+            "context",
+            "errors",
+            "runtime",
+            "reflect",
+            "unsafe",
+            "syscall",
+            "os/exec",
+            "os/signal",
+            "io/ioutil",
+            "io/fs",
+            "embed",
+            "database/sql",
+            "archive",
+            "compress",
+            "image",
+            "debug",
         ],
         "typescript" | "javascript" => &[
-            "fs", "path", "os", "util", "events", "stream", "http", "https", "url",
-            "querystring", "crypto", "zlib", "buffer", "process", "child_process",
-            "cluster", "dns", "net", "tls", "dgram", "readline", "repl", "vm",
-            "assert", "console", "timers", "perf_hooks", "async_hooks", "worker_threads",
+            "fs",
+            "path",
+            "os",
+            "util",
+            "events",
+            "stream",
+            "http",
+            "https",
+            "url",
+            "querystring",
+            "crypto",
+            "zlib",
+            "buffer",
+            "process",
+            "child_process",
+            "cluster",
+            "dns",
+            "net",
+            "tls",
+            "dgram",
+            "readline",
+            "repl",
+            "vm",
+            "assert",
+            "console",
+            "timers",
+            "perf_hooks",
+            "async_hooks",
+            "worker_threads",
         ],
         "java" => &[
-            "java.lang", "java.util", "java.io", "java.nio", "java.net", "java.sql",
-            "java.text", "java.time", "java.math", "java.security", "java.awt",
-            "javax.swing", "javax.servlet", "org.w3c", "org.xml",
+            "java.lang",
+            "java.util",
+            "java.io",
+            "java.nio",
+            "java.net",
+            "java.sql",
+            "java.text",
+            "java.time",
+            "java.math",
+            "java.security",
+            "java.awt",
+            "javax.swing",
+            "javax.servlet",
+            "org.w3c",
+            "org.xml",
         ],
         "c" | "cpp" => &[
-            "stdio", "stdlib", "string", "math", "time", "ctype", "errno", "assert",
-            "stddef", "stdint", "stdbool", "limits", "float", "stdarg", "setjmp",
-            "signal", "locale", "wchar", "wctype", "complex", "fenv", "inttypes",
-            "iso646", "tgmath", "stdalign", "stdatomic", "stdnoreturn", "threads",
+            "stdio",
+            "stdlib",
+            "string",
+            "math",
+            "time",
+            "ctype",
+            "errno",
+            "assert",
+            "stddef",
+            "stdint",
+            "stdbool",
+            "limits",
+            "float",
+            "stdarg",
+            "setjmp",
+            "signal",
+            "locale",
+            "wchar",
+            "wctype",
+            "complex",
+            "fenv",
+            "inttypes",
+            "iso646",
+            "tgmath",
+            "stdalign",
+            "stdatomic",
+            "stdnoreturn",
+            "threads",
             // C++ standard library
-            "iostream", "fstream", "sstream", "iomanip", "vector", "list", "deque",
-            "array", "forward_list", "set", "map", "unordered_set", "unordered_map",
-            "stack", "queue", "priority_queue", "algorithm", "iterator", "memory",
-            "functional", "numeric", "random", "chrono", "thread", "mutex", "atomic",
-            "condition_variable", "future", "regex", "filesystem", "optional",
-            "variant", "any", "string_view", "charconv", "execution", "ranges",
+            "iostream",
+            "fstream",
+            "sstream",
+            "iomanip",
+            "vector",
+            "list",
+            "deque",
+            "array",
+            "forward_list",
+            "set",
+            "map",
+            "unordered_set",
+            "unordered_map",
+            "stack",
+            "queue",
+            "priority_queue",
+            "algorithm",
+            "iterator",
+            "memory",
+            "functional",
+            "numeric",
+            "random",
+            "chrono",
+            "thread",
+            "mutex",
+            "atomic",
+            "condition_variable",
+            "future",
+            "regex",
+            "filesystem",
+            "optional",
+            "variant",
+            "any",
+            "string_view",
+            "charconv",
+            "execution",
+            "ranges",
         ],
         _ => &[],
     }
@@ -479,9 +677,12 @@ fn is_stdlib_module(module: &str, lang: &str) -> bool {
         }
         "rust" => {
             // Rust standard library crates
-            module == "std" || module.starts_with("std::") ||
-            module == "core" || module.starts_with("core::") ||
-            module == "alloc" || module.starts_with("alloc::")
+            module == "std"
+                || module.starts_with("std::")
+                || module == "core"
+                || module.starts_with("core::")
+                || module == "alloc"
+                || module.starts_with("alloc::")
         }
         "go" => {
             // Go stdlib doesn't use external domain prefixes
@@ -580,10 +781,12 @@ fn extract_file_info(
         message: format!("{}", e),
     })?;
 
-    let tree = parser.parse(&source, None).ok_or_else(|| CouplingError::ParseError {
-        file: path.display().to_string(),
-        message: "Failed to parse file".to_string(),
-    })?;
+    let tree = parser
+        .parse(&source, None)
+        .ok_or_else(|| CouplingError::ParseError {
+            file: path.display().to_string(),
+            message: "Failed to parse file".to_string(),
+        })?;
 
     // Extract imports
     info.imports = language.extract_imports(&tree, &source);
@@ -598,27 +801,48 @@ fn extract_file_info(
             let is_abstract = match lang {
                 "python" => {
                     // ABC base class or has abstractmethod decorators
-                    class.bases.iter().any(|b: &String| b.contains("ABC") || b.contains("Abstract")) ||
-                    class.docstring.as_ref().map(|d| d.contains("abstract")).unwrap_or(false)
+                    class
+                        .bases
+                        .iter()
+                        .any(|b: &String| b.contains("ABC") || b.contains("Abstract"))
+                        || class
+                            .docstring
+                            .as_ref()
+                            .map(|d| d.contains("abstract"))
+                            .unwrap_or(false)
                 }
                 "rust" => {
                     // Traits are abstract
-                    class.name.starts_with("trait ") ||
-                    class.docstring.as_ref().map(|d| d.contains("trait")).unwrap_or(false)
+                    class.name.starts_with("trait ")
+                        || class
+                            .docstring
+                            .as_ref()
+                            .map(|d| d.contains("trait"))
+                            .unwrap_or(false)
                 }
                 "typescript" | "javascript" => {
                     // Interfaces are abstract
-                    class.docstring.as_ref().map(|d| d.contains("interface")).unwrap_or(false)
+                    class
+                        .docstring
+                        .as_ref()
+                        .map(|d| d.contains("interface"))
+                        .unwrap_or(false)
                 }
                 "java" => {
                     // Interface or abstract class
-                    class.docstring.as_ref().map(|d|
-                        d.contains("interface") || d.contains("abstract class")
-                    ).unwrap_or(false)
+                    class
+                        .docstring
+                        .as_ref()
+                        .map(|d| d.contains("interface") || d.contains("abstract class"))
+                        .unwrap_or(false)
                 }
                 "go" => {
                     // Interfaces in Go
-                    class.docstring.as_ref().map(|d| d.contains("interface")).unwrap_or(false)
+                    class
+                        .docstring
+                        .as_ref()
+                        .map(|d| d.contains("interface"))
+                        .unwrap_or(false)
                 }
                 _ => false,
             };
@@ -636,7 +860,8 @@ fn extract_file_info(
         }
         for class in &module.classes {
             for method in &class.methods {
-                info.functions.push(format!("{}.{}", class.name, method.name));
+                info.functions
+                    .push(format!("{}.{}", class.name, method.name));
             }
         }
     }
@@ -669,9 +894,9 @@ impl DependencyGraph {
 
     /// Add or get a module.
     fn get_or_insert_module(&mut self, name: &str, path: &str) -> &mut CouplingMetrics {
-        self.modules.entry(name.to_string()).or_insert_with(|| {
-            CouplingMetrics::new(name.to_string(), path.to_string())
-        })
+        self.modules
+            .entry(name.to_string())
+            .or_insert_with(|| CouplingMetrics::new(name.to_string(), path.to_string()))
     }
 
     /// Add a dependency edge.
@@ -747,7 +972,13 @@ impl DependencyGraph {
 
         for module in self.modules.keys() {
             if !visited.contains(module) {
-                self.dfs_cycle(module, &mut visited, &mut rec_stack, &mut on_stack, &mut cycles);
+                self.dfs_cycle(
+                    module,
+                    &mut visited,
+                    &mut rec_stack,
+                    &mut on_stack,
+                    &mut cycles,
+                );
             }
         }
 
@@ -755,7 +986,10 @@ impl DependencyGraph {
         let mut unique_cycles: Vec<Vec<String>> = Vec::new();
         for cycle in cycles {
             let normalized = Self::normalize_cycle(&cycle);
-            if !unique_cycles.iter().any(|c| Self::normalize_cycle(c) == normalized) {
+            if !unique_cycles
+                .iter()
+                .any(|c| Self::normalize_cycle(c) == normalized)
+            {
                 unique_cycles.push(cycle);
             }
         }
@@ -858,7 +1092,8 @@ pub fn analyze_coupling(
     // Determine language for stdlib detection
     let detected_lang = lang.unwrap_or_else(|| {
         // Auto-detect from first file
-        files.first()
+        files
+            .first()
             .and_then(|f| f.extension())
             .and_then(|e| e.to_str())
             .map(|ext| match ext {
@@ -878,9 +1113,7 @@ pub fn analyze_coupling(
     // Extract file information in parallel
     let file_infos: Vec<FileInfo> = files
         .par_iter()
-        .filter_map(|file| {
-            extract_file_info(file, &project_root, detected_lang).ok()
-        })
+        .filter_map(|file| extract_file_info(file, &project_root, detected_lang).ok())
         .collect();
 
     debug!("Extracted info from {} files", file_infos.len());
@@ -962,7 +1195,10 @@ pub fn analyze_coupling(
                 }
                 CouplingLevel::Module => {
                     // Use the first component as package
-                    import.module.split('.').next()
+                    import
+                        .module
+                        .split('.')
+                        .next()
                         .or_else(|| import.module.split('/').next())
                         .unwrap_or(&import.module)
                         .to_string()
@@ -1021,11 +1257,8 @@ pub fn analyze_coupling(
     }
 
     // Build call graph for call dependencies
-    if let Ok(call_graph) = callgraph::build_with_config(
-        path.to_str().unwrap_or("."),
-        lang,
-        false,
-    ) {
+    if let Ok(call_graph) = callgraph::build_with_config(path.to_str().unwrap_or("."), lang, false)
+    {
         add_call_dependencies(&mut graph, &call_graph, &file_infos, level, &project_root);
     }
 
@@ -1042,7 +1275,9 @@ pub fn analyze_coupling(
     let mut modules: Vec<CouplingMetrics> = graph.modules.into_values().collect();
     modules.sort_by(|a, b| {
         // Sort by distance from main sequence (worst first)
-        b.distance.partial_cmp(&a.distance).unwrap_or(std::cmp::Ordering::Equal)
+        b.distance
+            .partial_cmp(&a.distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     Ok(CouplingAnalysis {
@@ -1066,10 +1301,7 @@ pub fn analyze_file_coupling(
 
     let analysis = analyze_coupling(parent, lang, CouplingLevel::File)?;
 
-    let relative = file
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+    let relative = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
     analysis
         .modules
@@ -1091,17 +1323,11 @@ fn resolve_import_to_file(module: &str, files: &[FileInfo], lang: &str) -> Strin
     let candidates: Vec<String> = match lang {
         "python" => {
             let path = module.replace('.', "/");
-            vec![
-                format!("{}.py", path),
-                format!("{}/__init__.py", path),
-            ]
+            vec![format!("{}.py", path), format!("{}/__init__.py", path)]
         }
         "rust" => {
             let path = module.replace("::", "/");
-            vec![
-                format!("{}.rs", path),
-                format!("{}/mod.rs", path),
-            ]
+            vec![format!("{}.rs", path), format!("{}/mod.rs", path)]
         }
         "go" => {
             vec![module.to_string()]
@@ -1130,7 +1356,9 @@ fn resolve_import_to_file(module: &str, files: &[FileInfo], lang: &str) -> Strin
     }
 
     // Fallback to first segment as approximation
-    module.split('.').next()
+    module
+        .split('.')
+        .next()
         .or_else(|| module.split('/').next())
         .unwrap_or(module)
         .to_string()
@@ -1138,9 +1366,9 @@ fn resolve_import_to_file(module: &str, files: &[FileInfo], lang: &str) -> Strin
 
 /// Find where a class is defined.
 fn find_class_definition<'a>(class_name: &str, files: &'a [FileInfo]) -> Option<&'a FileInfo> {
-    files.iter().find(|info| {
-        info.classes.iter().any(|c| c.name == class_name)
-    })
+    files
+        .iter()
+        .find(|info| info.classes.iter().any(|c| c.name == class_name))
 }
 
 /// Add call dependencies from call graph.
@@ -1262,7 +1490,10 @@ fn calculate_stats(graph: &DependencyGraph) -> CouplingStats {
     let total_distance: f64 = modules.iter().map(|m| m.distance).sum();
 
     let zone_of_pain = modules.iter().filter(|m| m.is_in_zone_of_pain()).count();
-    let zone_of_uselessness = modules.iter().filter(|m| m.is_in_zone_of_uselessness()).count();
+    let zone_of_uselessness = modules
+        .iter()
+        .filter(|m| m.is_in_zone_of_uselessness())
+        .count();
 
     // Find most depended-upon modules (highest Ca)
     let mut sorted_by_afferent: Vec<_> = modules.iter().collect();
@@ -1319,10 +1550,22 @@ mod tests {
 
     #[test]
     fn test_coupling_level_parsing() {
-        assert_eq!(CouplingLevel::from_str("file").unwrap(), CouplingLevel::File);
-        assert_eq!(CouplingLevel::from_str("module").unwrap(), CouplingLevel::Module);
-        assert_eq!(CouplingLevel::from_str("package").unwrap(), CouplingLevel::Module);
-        assert_eq!(CouplingLevel::from_str("class").unwrap(), CouplingLevel::Class);
+        assert_eq!(
+            CouplingLevel::from_str("file").unwrap(),
+            CouplingLevel::File
+        );
+        assert_eq!(
+            CouplingLevel::from_str("module").unwrap(),
+            CouplingLevel::Module
+        );
+        assert_eq!(
+            CouplingLevel::from_str("package").unwrap(),
+            CouplingLevel::Module
+        );
+        assert_eq!(
+            CouplingLevel::from_str("class").unwrap(),
+            CouplingLevel::Class
+        );
         assert!(CouplingLevel::from_str("invalid").is_err());
     }
 
@@ -1413,17 +1656,25 @@ mod tests {
         fs::create_dir_all(&src).unwrap();
 
         // Create a simple Python module
-        fs::write(src.join("main.py"), r#"
+        fs::write(
+            src.join("main.py"),
+            r#"
 from utils import helper
 
 def main():
     helper()
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
-        fs::write(src.join("utils.py"), r#"
+        fs::write(
+            src.join("utils.py"),
+            r#"
 def helper():
     pass
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let result = analyze_coupling(temp.path(), Some("python"), CouplingLevel::File);
         assert!(result.is_ok());

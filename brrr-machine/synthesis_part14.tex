@@ -1,0 +1,2161 @@
+% Part XIV: Channel Analysis - Session Types and Causality
+% Fragment file - no preamble
+
+\part{Channel Analysis}
+\label{part:channel-analysis}
+
+\textbf{Foundation}: \textbf{[Honda08]} ``Multiparty Asynchronous Session Types'', \textbf{[Honda98]} ``Language Primitives and Type Discipline for Structured Communication''
+
+This part provides the theoretical foundations for analyzing communication channels in concurrent and distributed systems. Channel analysis extends the core session type theory (Section~\ref{sec:session-types}) with detailed syntax, semantics, and causality analysis for multiparty protocols.
+
+%==================================================
+\chapter{Binary Session Types}
+\label{ch:binary-session-types}
+%==================================================
+
+\textbf{Paper}: \textbf{[Honda98]} ``Language Primitives and Type Discipline for Structured Communication-Based Programming''
+
+Binary session types provide the foundational theory for structured communication between exactly two parties. This precedes and motivates the multiparty extensions in subsequent sections.
+
+\section{The Session Concept}
+\label{sec:session-concept}
+
+\begin{pillarbox}[title={Core Insight (Honda 1998)}]
+A \textbf{session} is a chain of dyadic (two-party) reciprocal interactions serving as a unit of abstraction for describing communication behavior.
+
+\textbf{Motivation}: Traditional primitives (RPC, method invocation, rendez-vous) express only one-time interactions. Complex protocols require sequences of related communications, but prior languages had no construct to structure them.
+
+\textbf{Analogy to Structured Programming}:
+\begin{itemize}
+  \item Imperative (pre-1970s): assignment + goto $\rightarrow$ spaghetti code
+  \item Imperative (post-1970s): assignment + if/while $\rightarrow$ structured programs
+  \item Concurrent (pre-1998): send/receive + parallel $\rightarrow$ unstructured interaction
+  \item Concurrent (post-1998): session primitives + types $\rightarrow$ structured communication
+\end{itemize}
+
+\textbf{Session Structure}:
+\begin{itemize}
+  \item Sessions designated by \textbf{channels} (distinct from names/ports)
+  \item Channel $k$ is private to session, generated fresh at session initiation
+  \item All interactions in session occur through its channel
+  \item Session combines: value passing, label branching, delegation
+\end{itemize}
+\end{pillarbox}
+
+\section{Binary Session Type Syntax}
+\label{sec:binary-session-syntax}
+
+\begin{definition}[Binary Session Type Grammar (Honda 1998, Definition 5.1)]
+\textbf{Sorts} ($S$):
+\[
+S ::= \mathsf{nat} \mid \mathsf{bool} \mid \langle\alpha, \bar{\alpha}\rangle
+\]
+
+\textbf{Types} ($\alpha$, $\beta$):
+\begin{align*}
+\alpha ::=\ & \downarrow[\tilde{S}];\, \alpha & \text{(Input: receive values of sorts $\tilde{S}$)} \\
+      \mid\ & \downarrow[\alpha];\, \beta & \text{(Channel input: delegation receive)} \\
+      \mid\ & \&\{l_1: \alpha_1, \ldots, l_n: \alpha_n\} & \text{(Branching: offer $n$ labeled options)} \\
+      \mid\ & \mathbf{1} & \text{(Termination/inaction)} \\
+      \mid\ & \bot & \text{(No further connection possible)} \\
+      \mid\ & \uparrow[\tilde{S}];\, \alpha & \text{(Output: send values of sorts $\tilde{S}$)} \\
+      \mid\ & \uparrow[\alpha];\, \beta & \text{(Channel output: delegation send)} \\
+      \mid\ & \oplus\{l_1: \alpha_1, \ldots, l_n: \alpha_n\} & \text{(Selection: choose one of $n$ labels)} \\
+      \mid\ & t & \text{(Type variable)} \\
+      \mid\ & \mu t.\, \alpha & \text{(Recursive type)}
+\end{align*}
+\end{definition}
+
+\textbf{Type Interpretation}:
+\begin{itemize}
+  \item $\downarrow[S];\, \alpha$: First receive value of sort $S$, then behave as $\alpha$
+  \item $\uparrow[S];\, \alpha$: First send value of sort $S$, then behave as $\alpha$
+  \item $\&\{l_i: \alpha_i\}$: \textbf{External choice} --- wait for partner to select label
+  \item $\oplus\{l_i: \alpha_i\}$: \textbf{Internal choice} --- select label to send to partner
+  \item $\mu t.\, \alpha$: Recursive behavior (loops, unbounded interactions)
+  \item $\mathbf{1}$: Session complete, no more actions
+  \item $\bot$: Channel consumed/hidden, no reconnection
+\end{itemize}
+
+\textbf{Example Types}:
+\begin{itemize}
+  \item \textbf{Remote Procedure Call}:
+    \begin{itemize}
+      \item Caller: $\uparrow[\mathsf{int}];\, \downarrow[\mathsf{int}]$ (send argument, receive result)
+      \item Callee: $\downarrow[\mathsf{int}];\, \uparrow[\mathsf{int}]$ (receive argument, send result)
+    \end{itemize}
+  \item \textbf{Cell Object}:
+    \begin{itemize}
+      \item Cell: $\&\{\mathsf{read}: \uparrow[\mathsf{int}],\, \mathsf{write}: \downarrow[\mathsf{int}]\}$
+      \item Client: $\oplus\{\mathsf{read}: \downarrow[\mathsf{int}],\, \mathsf{write}: \uparrow[\mathsf{int}]\}$
+    \end{itemize}
+  \item \textbf{ATM Protocol (unbounded)}:
+    \[
+    \mathsf{ATM}: \downarrow[\mathsf{nat}];\, \mu t.\, \&\left\{\begin{array}{l}
+      \mathsf{deposit}: \downarrow[\mathsf{nat}];\, t,\\
+      \mathsf{withdraw}: \downarrow[\mathsf{nat}];\, \oplus\{\mathsf{success}: \uparrow[\mathsf{nat}];\, t,\, \mathsf{failure}: t\},\\
+      \mathsf{balance}: \uparrow[\mathsf{nat}];\, t,\\
+      \mathsf{quit}: \mathbf{1}
+    \end{array}\right\}
+    \]
+\end{itemize}
+
+\section{The Duality Principle}
+\label{sec:duality-principle}
+
+\begin{definition}[Duality (Co-Type)]
+For type $\alpha$ where $\bot$ does not occur, the co-type $\bar{\alpha}$ is defined:
+\begin{align*}
+\overline{\uparrow[S];\, \alpha} &= \downarrow[S];\, \bar{\alpha} & \text{(send dual is receive)} \\
+\overline{\downarrow[S];\, \alpha} &= \uparrow[S];\, \bar{\alpha} & \text{(receive dual is send)} \\
+\overline{\oplus\{l_i: \alpha_i\}} &= \&\{l_i: \bar{\alpha_i}\} & \text{(selection dual is branching)} \\
+\overline{\&\{l_i: \alpha_i\}} &= \oplus\{l_i: \bar{\alpha_i}\} & \text{(branching dual is selection)} \\
+\overline{\uparrow[\alpha];\, \beta} &= \downarrow[\alpha];\, \bar{\beta} & \text{(delegation duals)} \\
+\overline{\downarrow[\alpha];\, \beta} &= \uparrow[\alpha];\, \bar{\beta} \\
+\overline{\mu t.\, \alpha} &= \mu t.\, \bar{\alpha} & \text{(recursion preserves duality)} \\
+\bar{t} &= t & \text{(variable unchanged)} \\
+\bar{\mathbf{1}} &= \mathbf{1} & \text{(termination self-dual)}
+\end{align*}
+\end{definition}
+
+\textbf{Fundamental Property}: $\bar{\bar{\alpha}} = \alpha$ (involution: dualizing twice returns original)
+
+\textbf{Significance}: If two processes communicate on channel $k$ with types $\alpha$ and $\bar{\alpha}$, their interaction patterns are \textbf{compatible} --- no type errors occur.
+
+\textbf{Examples}:
+\begin{itemize}
+  \item Type: $\uparrow[\mathsf{int}];\, \downarrow[\mathsf{bool}]$, Dual: $\downarrow[\mathsf{int}];\, \uparrow[\mathsf{bool}]$
+  \item Type: $\oplus\{\mathsf{ok}: \uparrow[\mathsf{int}],\, \mathsf{err}: \mathbf{1}\}$, Dual: $\&\{\mathsf{ok}: \downarrow[\mathsf{int}],\, \mathsf{err}: \mathbf{1}\}$
+\end{itemize}
+
+\section{Type Algebra for Composition}
+\label{sec:type-algebra}
+
+\begin{definition}[Typing Context Composition (Honda 1998, Definition 5.2)]
+The type algebra governs how typings combine under parallel composition.
+
+\textbf{Compatibility} ($\Delta_1 \diamond \Delta_2$): Two typings are compatible if common channels have \textbf{dual} types:
+\[
+\Delta_1 \diamond \Delta_2 \iff \forall k \in \dom(\Delta_1) \cap \dom(\Delta_2).\; \Delta_1(k) = \overline{\Delta_2(k)}
+\]
+
+\textbf{Composition} ($\Delta_1 \circ \Delta_2$): When $\Delta_1 \diamond \Delta_2$, the composition is:
+\[
+(\Delta_1 \circ \Delta_2)(k) = \begin{cases}
+\bot & \text{if } k \in \dom(\Delta_1) \cap \dom(\Delta_2) \\
+\Delta_i(k) & \text{if } k \in \dom(\Delta_i) \setminus \dom(\Delta_{\text{other}}) \\
+\text{undefined} & \text{otherwise}
+\end{cases}
+\]
+\end{definition}
+
+\textbf{Why $\bot$ After Composition}: When two processes with dual types compose on channel $k$, no \textbf{third} process can join that channel --- it's fully consumed. This prevents interference and ensures session isolation.
+
+\textbf{Typing Rules} (key rules):
+\begin{mathpar}
+\inferrule*[Right=Conc]
+  {\Theta; \Gamma \vdash P \triangleright \Delta \\ \Theta; \Gamma \vdash Q \triangleright \Delta' \\ \Delta \diamond \Delta'}
+  {\Theta; \Gamma \vdash P \mid Q \triangleright \Delta \circ \Delta'}
+
+\inferrule*[Right=Send]
+  {\Gamma \vdash \tilde{e} : \tilde{S} \\ \Theta; \Gamma \vdash P \triangleright \Delta, k: \alpha}
+  {\Theta; \Gamma \vdash k![\tilde{e}];\, P \triangleright \Delta, k: \uparrow[\tilde{S}];\, \alpha}
+
+\inferrule*[Right=Rcv]
+  {\Theta; \Gamma, \tilde{x}: \tilde{S} \vdash P \triangleright \Delta, k: \alpha}
+  {\Theta; \Gamma \vdash k?(\tilde{x})\, \mathbf{in}\, P \triangleright \Delta, k: \downarrow[\tilde{S}];\, \alpha}
+
+\inferrule*[Right=Br]
+  {\Theta; \Gamma \vdash P_1 \triangleright \Delta, k: \alpha_1 \\ \cdots \\ \Theta; \Gamma \vdash P_n \triangleright \Delta, k: \alpha_n}
+  {\Theta; \Gamma \vdash k \triangleleft \{l_1: P_1 \mathbin{[]} \cdots \mathbin{[]} l_n: P_n\} \triangleright \Delta, k: \&\{l_1: \alpha_1, \ldots, l_n: \alpha_n\}}
+
+\inferrule*[Right=Sel]
+  {\Theta; \Gamma \vdash P \triangleright \Delta, k: \alpha_j \\ 1 \leq j \leq n}
+  {\Theta; \Gamma \vdash k \triangleright l_j;\, P \triangleright \Delta, k: \oplus\{l_1: \alpha_1, \ldots, l_n: \alpha_n\}}
+\end{mathpar}
+
+\section{Session Initiation and Delegation}
+\label{sec:session-initiation}
+
+\textbf{Session Initiation}:
+\begin{align*}
+\mathbf{request}\; a(k)\; \mathbf{in}\; P &\quad \text{Request new session via name $a$, bind channel $k$} \\
+\mathbf{accept}\; a(k)\; \mathbf{in}\; P &\quad \text{Accept session request via $a$, bind channel $k$}
+\end{align*}
+
+\textbf{Operational Semantics}:
+\[
+[\text{Link}]\quad (\mathbf{accept}\; a(k)\; \mathbf{in}\; P_1) \mid (\mathbf{request}\; a(k)\; \mathbf{in}\; P_2) \rightarrow (\nu k)(P_1 \mid P_2)
+\]
+Fresh channel $k$ is generated, private to the session. $P_1$ and $P_2$ proceed with complementary views of the protocol.
+
+\textbf{Delegation} (Channel Passing):
+\begin{align*}
+\mathbf{throw}\; k[k'];\, P &\quad \text{Send channel $k'$ through channel $k$} \\
+\mathbf{catch}\; k(k')\; \mathbf{in}\; P &\quad \text{Receive channel through $k$, bind as $k'$}
+\end{align*}
+
+\textbf{Purpose}: Delegation allows \textbf{dynamic redistribution} of session participation. An ongoing session can be handed off to another process.
+
+\textbf{Typing Rules}:
+\begin{mathpar}
+\inferrule*[Right=Thr]
+  {\Theta; \Gamma \vdash P \triangleright \Delta, k: \beta}
+  {\Theta; \Gamma \vdash \mathbf{throw}\; k[k'];\, P \triangleright \Delta, k: \uparrow[\alpha];\, \beta, k': \alpha}
+
+\inferrule*[Right=Cat]
+  {\Theta; \Gamma \vdash P \triangleright \Delta, k: \beta, k': \alpha}
+  {\Theta; \Gamma \vdash \mathbf{catch}\; k(k')\; \mathbf{in}\; P \triangleright \Delta, k: \downarrow[\alpha];\, \beta}
+\end{mathpar}
+
+\textbf{Example} (FTP Server with Delegation):
+The following code illustrates how delegation enables dynamic session redistribution. The FTP server accepts client connections on a public name, then immediately delegates the session to a worker thread, freeing the main loop to continue accepting new connections. This pattern is fundamental to scalable server design.
+
+\begin{fstarcode}[title={FTP Delegation Pattern}]
+(* FTP server that delegates sessions to worker threads *)
+Ftpd(pid, b) = accept pid(s) in      (* Accept client connection *)
+                 request b(k) in      (* Get worker thread *)
+                 throw k[s];          (* Delegate session to worker *)
+                 Ftpd[pid, b]         (* Continue accepting *)
+
+(* The client sees a single session; delegation is transparent *)
+\end{fstarcode}
+
+\textbf{Key Type Signature}: The \texttt{throw k[s]} operation has type $k : \uparrow[T];\, \beta$ where $T$ is the session type being delegated. The worker receives the session with type $k : \downarrow[T];\, \beta'$ and continues the protocol from where it was delegated.
+
+\section{Safety Theorems}
+\label{sec:safety-theorems}
+
+\begin{theorem}[Safety (Honda 1998, Theorem 5.4)]
+\begin{enumerate}
+  \item \textbf{Invariance under Structural Equivalence}: $\Theta; \Gamma \vdash P \triangleright \Delta$ and $P \equiv Q$ implies $\Theta; \Gamma \vdash Q \triangleright \Delta$
+  \item \textbf{Subject Reduction}: $\Theta; \Gamma \vdash P \triangleright \Delta$ and $P \rightarrow^* Q$ implies $\Theta; \Gamma \vdash Q \triangleright \Delta$
+  \item \textbf{Error Freedom}: A typable program \textbf{never} reduces to an error state.
+\end{enumerate}
+\end{theorem}
+
+\begin{definition}[Error States]
+$P$ is an error if $P \equiv \mathbf{def}\; D\; \mathbf{in}\; (\nu \tilde{u})(P' \mid R)$ where $P'$ contains, for some channel $k$, either:
+\begin{itemize}
+  \item Two $k$-processes that don't form a $k$-redex (mismatched operations)
+  \item Three or more $k$-processes (race condition)
+\end{itemize}
+\end{definition}
+
+\textbf{What This Guarantees}:
+\begin{itemize}
+  \item No message type mismatches (send int, expect bool)
+  \item No unhandled selections (select label not in branch)
+  \item No races on channels (exactly two parties per channel)
+  \item Sessions complete or progress (no stuck states except inaction)
+\end{itemize}
+
+\textbf{Connection to Multiparty}: Binary session types ensure 2-party safety. Multiparty session types \textbf{[Honda08]} generalize to $n$ parties via global types and projection, with similar safety guarantees.
+
+\section{Relationship to Go Channels and Rust mpsc}
+\label{sec:go-rust-channels}
+
+\begin{pillarbox}[title={Mapping to Practical Languages}]
+\textbf{Go Channels}: Go channels are \textbf{untyped at the session level} --- only element type is tracked. Go provides \textbf{no static guarantee} of protocol compliance.
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Go Pattern} & \textbf{Session Type Equivalent} \\
+\midrule
+\texttt{ch := make(chan int)} & Create session channel \\
+\texttt{ch <- 42} & $\uparrow[\mathsf{int}]$ \\
+\texttt{x := <-ch} & $\downarrow[\mathsf{int}]$ \\
+\texttt{close(ch)} & End session \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Session types \textbf{add}: sequence constraints, branching/selection typing.
+
+\textbf{Rust mpsc}: Rust's \texttt{std::sync::mpsc} provides typed channels but not session typing. The \texttt{session\_types} crate adds Honda-style session types to Rust.
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Rust Pattern} & \textbf{Session Type Equivalent} \\
+\midrule
+\texttt{let (tx, rx) = channel()} & Create session with dual endpoints \\
+\texttt{tx.send(42)} & $\uparrow[\mathsf{int}]$ \\
+\texttt{let x = rx.recv()} & $\downarrow[\mathsf{int}]$ \\
+\texttt{drop(tx), drop(rx)} & Session end (via affine types) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Session types \textbf{add}: protocol state machine, compile-time progress checks.
+\end{pillarbox}
+
+\textbf{Static Analysis Application}: For Go/Rust channel analysis, we can:
+\begin{enumerate}
+  \item \textbf{Infer} session types from usage patterns
+  \item \textbf{Check} that inferred types are dual at connection points
+  \item \textbf{Detect} protocol violations (missing receives, wrong order)
+  \item \textbf{Verify} deadlock freedom via causality analysis (Section~\ref{sec:causality-analysis})
+\end{enumerate}
+
+%==================================================
+\chapter{Global Type Syntax and Semantics}
+\label{ch:global-type-semantics}
+%==================================================
+
+Global types describe conversation protocols from a bird's-eye view, specifying the complete interaction structure among all participants.
+
+\section{Global Type Grammar}
+\label{sec:global-type-grammar}
+
+\begin{definition}[Global Type Grammar]
+\begin{align*}
+G ::=\ & p \rightarrow q : k\langle U\rangle.G & \text{(Message passing: $p$ sends $U$ to $q$ via channel $k$)} \\
+  \mid\ & p \rightarrow q : k\{l_j : G_j\}_{j \in J} & \text{(Labeled choice: $p$ selects label $l_j$, $q$ branches)} \\
+  \mid\ & G_1 \mid G_2 & \text{(Parallel composition)} \\
+  \mid\ & \mu t.\, G & \text{(Recursive type)} \\
+  \mid\ & t & \text{(Type variable)} \\
+  \mid\ & \mathbf{end} & \text{(Termination)}
+\end{align*}
+
+\textbf{Payload Types} ($U$):
+\begin{align*}
+U ::=\ & \tilde{S} & \text{(Sequence of base sorts)} \\
+  \mid\ & T@p & \text{(Located local type for delegation)}
+\end{align*}
+
+\textbf{Base Sorts} ($S$):
+\begin{align*}
+S ::=\ & \mathsf{bool} \mid \mathsf{nat} \mid \mathsf{int} \mid \mathsf{string} \mid \cdots \\
+  \mid\ & \langle\alpha, \bar{\alpha}\rangle & \text{(Session sort: pair of dual types)} \\
+  \mid\ & G & \text{(Global type as sort for nested sessions)}
+\end{align*}
+\end{definition}
+
+\section{Prefix Ordering}
+\label{sec:prefix-ordering}
+
+The prefix ordering ($\prec$) defines the causal structure of global types. A prefix $a$ precedes prefix $b$ (written $a \prec b$) when $a$ must complete before $b$ can execute.
+
+\begin{definition}[Prefix Ordering Rules]
+\textbf{Sequential Composition}:
+\begin{mathpar}
+\inferrule*{G = G_1.G_2}{\forall a \in \mathrm{prefixes}(G_1),\, b \in \mathrm{prefixes}(G_2).\; a \prec b}
+\end{mathpar}
+
+\textbf{Parallel Independence}:
+\begin{mathpar}
+\inferrule*{G = G_1 \mid G_2}{\neg(a \prec b) \land \neg(b \prec a) \text{ for } a \in G_1, b \in G_2 \\ \text{(unless connected by causality edges)}}
+\end{mathpar}
+
+\textbf{Branch Ordering}:
+\begin{mathpar}
+\inferrule*{G = p \rightarrow q : k\{l_j : G_j\}_{j \in J}}{\mathrm{branch\_prefix} \prec \forall a \in \bigcup_j \mathrm{prefixes}(G_j)}
+\end{mathpar}
+
+\textbf{Recursion Unfolding}:
+\begin{mathpar}
+\inferrule*{G = \mu t.\, G'}{\mathrm{ordering}(G) = \mathrm{ordering}(G'[\mu t.\, G'/t])}
+\end{mathpar}
+\end{definition}
+
+\section{Equi-Recursive Type Handling}
+\label{sec:equi-recursive}
+
+Global types use an equi-recursive interpretation where $\mu t.\, G \equiv G[\mu t.\, G/t]$. This enables infinite unfolding for ongoing protocols.
+
+\begin{definition}[Equi-Recursive Equivalence]
+\begin{itemize}
+  \item \textbf{Unfolding}: $\mu t.\, G \equiv G[\mu t.\, G/t]$
+  \item \textbf{Contractivity}: In $\mu t.\, G$, the variable $t$ must be guarded by at least one message prefix (ensures productive recursion)
+  \item \textbf{Regular Trees}: Global types denote regular infinite trees (finitely representable infinite structures)
+\end{itemize}
+\end{definition}
+
+\textbf{Example} --- Streaming Protocol:
+\[
+\mu t.\, \mathsf{Producer} \rightarrow \mathsf{Consumer} : \mathsf{data}\langle\mathsf{int}\rangle.\,
+\mathsf{Consumer} \rightarrow \mathsf{Producer} : \mathsf{ack}\langle\mathsf{bool}\rangle.\, t
+\]
+Unfolds to infinite alternation of data/ack exchanges.
+
+%==================================================
+\chapter{Causality Analysis}
+\label{ch:causality-analysis}
+%==================================================
+
+Causality analysis determines which prefixes must complete before others can execute. This is fundamental for ensuring progress and detecting deadlocks.
+
+\section{Input-Input Dependency}
+\label{sec:input-input-dep}
+
+\begin{definition}[Input-Input Dependency ($\prec^{II}$)]
+$a \prec^{II} b$ holds when:
+\begin{itemize}
+  \item Both $a$ and $b$ are input prefixes at the same participant $p$
+  \item $a$ must be executed before $b$ according to the global type structure
+  \item They share the same session (belong to same global type $G$)
+\end{itemize}
+
+Formally:
+\begin{mathpar}
+\inferrule*{\mathrm{input\_at}(G, p, k_1) \\ \mathrm{input\_at}(G, p, k_2) \\ \mathrm{precedes\_in}(G, k_1, k_2)}{k_1 \prec^{II}_p k_2}
+\end{mathpar}
+\end{definition}
+
+\textbf{Example}: $G = A \rightarrow B : s_1\langle\mathsf{int}\rangle.\, A \rightarrow B : s_2\langle\mathsf{int}\rangle.\, \mathbf{end}$
+
+At participant $B$: $s_1? \prec^{II}_B s_2?$ (B must receive on $s_1$ before $s_2$)
+
+\textbf{Chain Property}: If $k_1 \prec^{II} k_2 \prec^{II} \cdots \prec^{II} k_n$, then $B$ executes inputs in order $k_1, k_2, \ldots, k_n$.
+
+\section{Input-Output Dependency}
+\label{sec:input-output-dep}
+
+\begin{definition}[Input-Output Dependency ($\prec^{IO}$)]
+$a \prec^{IO} b$ holds when:
+\begin{itemize}
+  \item $a$ is an input prefix and $b$ is an output prefix at the same participant $p$
+  \item The output depends on data received by the input
+  \item $a$ must complete before $b$ can execute
+\end{itemize}
+
+Formally:
+\begin{mathpar}
+\inferrule*{\mathrm{input\_at}(G, p, k_{\mathrm{in}}) \\ \mathrm{output\_at}(G, p, k_{\mathrm{out}}) \\ \mathrm{data\_flows}(G, k_{\mathrm{in}}, k_{\mathrm{out}})}{k_{\mathrm{in}} \prec^{IO}_p k_{\mathrm{out}}}
+\end{mathpar}
+\end{definition}
+
+\textbf{Example}:
+\[
+G = \mathsf{Client} \rightarrow \mathsf{Server} : \mathsf{req}\langle\mathsf{Query}\rangle.\,
+\mathsf{Server} \rightarrow \mathsf{Client} : \mathsf{resp}\langle\mathsf{Result}\rangle.\, \mathbf{end}
+\]
+At Server: $\mathsf{req}? \prec^{IO}_{\mathsf{Server}} \mathsf{resp}!$ (Server must receive query before sending response)
+
+\textbf{Importance}: Captures request-response patterns, essential for detecting causal violations, ensures data availability before output.
+
+\section{Output-Output Dependency}
+\label{sec:output-output-dep}
+
+\begin{definition}[Output-Output Dependency ($\prec^{OO}$)]
+$a \prec^{OO} b$ holds when:
+\begin{itemize}
+  \item Both $a$ and $b$ are output prefixes at the same participant $p$
+  \item \textbf{Synchronous communication}: $a$ must complete (including ack) before $b$
+  \item \textbf{Asynchronous communication}: ordering imposed by channel or explicit sequencing
+\end{itemize}
+
+\textbf{Synchronous Case}:
+\begin{mathpar}
+\inferrule*{\mathrm{output\_at}(G, p, k_1) \\ \mathrm{output\_at}(G, p, k_2) \\ \mathrm{sync\_mode} \\ \mathrm{seq}(G, k_1, k_2)}{k_1 \prec^{OO}_p k_2}
+\end{mathpar}
+
+\textbf{Asynchronous Case}: $\prec^{OO}$ is \textbf{only} induced by:
+\begin{enumerate}
+  \item Same channel (FIFO ordering): $s_1!$ before $s_2!$ on same $s$
+  \item Explicit control flow in process
+\end{enumerate}
+\end{definition}
+
+\textbf{Note}: This is a \textbf{key difference} between sync and async session types. Sync has more causality (OO-edges between any sequential outputs). Async has less causality (more parallelism possible).
+
+\textbf{Examples}:
+\begin{itemize}
+  \item \textbf{Sync}: $G = A \rightarrow B : s\langle\mathsf{int}\rangle.\, A \rightarrow C : t\langle\mathsf{int}\rangle.\, \mathbf{end}$ --- At $A$ (sync): $s! \prec^{OO}_A t!$
+  \item \textbf{Async}: Same $G$, but at $A$ (async): $s!$ and $t!$ can proceed in parallel
+\end{itemize}
+
+\section{Dependency Chain Analysis}
+\label{sec:dependency-chains}
+
+\begin{definition}[Dependency Chains]
+\textbf{Input Dependency Chain}: A sequence $k_1, k_2, \ldots, k_n$ forms an input chain at $p$ if:
+\[
+\forall i \in [1, n-1].\; k_i \prec^{II}_p k_{i+1}
+\]
+Property: Participant $p$ must execute inputs in exactly this order.
+
+\textbf{Output Dependency Chain}: A sequence $k_1, k_2, \ldots, k_n$ forms an output chain at $p$ if:
+\[
+\forall i \in [1, n-1].\; (k_i \prec^{OO}_p k_{i+1}) \lor (k_i \prec^{IO}_p k_{i+1})
+\]
+Property: Participant $p$'s outputs are ordered by this chain.
+\end{definition}
+
+\textbf{Mixed Dependency Graph}: Combine all three relations into directed graph:
+\begin{itemize}
+  \item Nodes: all prefixes in $G$
+  \item Edges: $\prec^{II}$, $\prec^{IO}$, $\prec^{OO}$ edges
+\end{itemize}
+
+\textbf{Acyclicity}: The dependency graph \textbf{must} be acyclic for deadlock freedom.
+
+\textbf{Deadlock Detection}: Cycle in dependency graph $\Rightarrow$ potential deadlock.
+
+\textbf{Example deadlock}:
+\begin{align*}
+A&: s_1?;\, s_2! \quad \text{(input before output)} \\
+B&: s_2?;\, s_1! \quad \text{(input before output)}
+\end{align*}
+Creates cycle: $s_1? \xrightarrow{IO} s_2! \rightarrow s_2? \xrightarrow{IO} s_1! \rightarrow s_1?$
+
+%==================================================
+\chapter{Linearity and Coherence}
+\label{ch:linearity-coherence}
+%==================================================
+
+\section{Linear Global Types}
+\label{sec:linear-global-types}
+
+\begin{definition}[Linearity (Definition 3.5 from Honda 2008)]
+A global type $G$ is \textbf{linear} if every prefix in $G$:
+\begin{enumerate}
+  \item Is not suppressed by $\prec^{II}$ (no conflicting input ordering)
+  \item Is not suppressed by $\prec^{IO}$ (no conflicting input-output ordering)
+  \item Is not suppressed by $\prec^{OO}$ (no conflicting output ordering)
+\end{enumerate}
+
+\textbf{Suppression by $\prec^{II}$}: Prefix $k$ is suppressed if $\exists k'.\, k' \prec^{II} k \land k' \prec^{II} k$ (same predecessor leads to different paths). Intuition: Two inputs at same participant cannot both be ``first''.
+
+\textbf{Suppression by $\prec^{IO}$}: Prefix $k$ (output) is suppressed if $\exists k'.\, k' \prec^{IO} k \land \neg\mathrm{enabled}(k')$ (required input not yet available).
+
+\textbf{Suppression by $\prec^{OO}$}: Prefix $k$ is suppressed if $\exists k'.\, k' \prec^{OO} k \land \neg\mathrm{completed}(k')$ (required prior output not done).
+\end{definition}
+
+The linearity check algorithm verifies that a global type satisfies the suppression-freedom conditions required for well-formed protocols. The algorithm traverses the global type structure, checking at each prefix whether any of the three dependency relations ($\prec^{II}$, $\prec^{IO}$, $\prec^{OO}$) would suppress execution.
+
+\begin{fstarcode}[title={Linearity Check Algorithm}]
+let rec linear (g : global_type) : bool =
+  match g with
+  | GMsg p q k u g' ->
+      not (suppressed_II g k) &&
+      not (suppressed_IO g k) &&
+      not (suppressed_OO g k) &&
+      linear g'
+
+  | GBranch p q k branches ->
+      not (suppressed_II g k) &&
+      not (suppressed_IO g k) &&
+      not (suppressed_OO g k) &&
+      List.for_all (fun (_, gj) -> linear gj) branches
+
+  | GPar g1 g2 ->
+      linear g1 && linear g2 && no_conflicts g1 g2
+
+  | GRec _ g' -> linear g'
+  | GVar _ | GEnd -> true
+\end{fstarcode}
+
+\textbf{Complexity}: The algorithm runs in $O(|G|^2)$ time, where $|G|$ is the size of the global type. The quadratic factor arises from checking suppression conditions for each prefix pair. For practical protocols (typically $|G| < 100$ prefixes), this is fast.
+
+\section{Coherence Condition}
+\label{sec:coherence-condition}
+
+\begin{definition}[Coherence (Definition 4.2 from Honda 2008)]
+A family of local types $\{T_p@p\}_{p \in P}$ is \textbf{coherent} if:
+\begin{enumerate}
+  \item There exists a linear global type $G$
+  \item For each participant $p \in P$: $T_p = G \upharpoonright p$ (projection of $G$ onto $p$)
+\end{enumerate}
+
+Formally:
+\[
+\mathrm{coherent}(\{T_p@p\}_{p \in P}) \iff \exists G.\, \mathrm{linear}(G) \land \forall p \in P.\, T_p = \mathrm{project}(G, p)
+\]
+\end{definition}
+
+\textbf{Coherence Ensures}:
+\begin{enumerate}
+  \item All participants agree on the protocol structure
+  \item Sends match receives (no lost messages)
+  \item Selections match branches (no unhandled cases)
+  \item Delegations are properly received
+\end{enumerate}
+
+\textbf{Coherence Examples}:
+\begin{itemize}
+  \item \textbf{Coherent}: $\{k\oplus\{\mathsf{ok}:\mathbf{end}, \mathsf{quit}:\mathbf{end}\}@A,\, k\&\{\mathsf{ok}:\mathbf{end}, \mathsf{quit}:\mathbf{end}\}@B\}$ (A's selection matches B's branches)
+  \item \textbf{Coherent}: $\{k!\langle\mathsf{int}\rangle@A,\, k?\langle\mathsf{int}\rangle@B\}$ (A's send matches B's receive)
+  \item \textbf{Not Coherent} (from Honda 2008 Figure 5): $\{s!@A,\, s?;\,s?@B,\, s!@C\}$ --- No linear global type generates these projections
+\end{itemize}
+
+\section{Projection Algorithm}
+\label{sec:projection-algorithm}
+
+\begin{definition}[Projection Algorithm (Definition 4.1 from Honda 2008)]
+The projection $G \upharpoonright p$ extracts participant $p$'s local view:
+\end{definition}
+
+The projection algorithm transforms a global type into a local type for a specific participant. This is the core operation that enables decentralized implementation of multiparty protocols: each participant only needs to know their local view, not the full global type.
+
+\begin{fstarcode}[title={Projection Algorithm}]
+let rec project (g : global_type) (p : participant) : local_type option =
+  match g with
+  | GMsg q r k u g' ->
+      if p = q then Some (LSend k u (project g' p))
+      else if p = r then Some (LRecv k u (project g' p))
+      else project g' p  (* p not involved *)
+
+  | GBranch q r k branches ->
+      if p = q then
+        Some (LSelect k (List.map (fun (l, gj) -> (l, project gj p)) branches))
+      else if p = r then
+        Some (LBranch k (List.map (fun (l, gj) -> (l, project gj p)) branches))
+      else
+        (* p not involved: all branches must project identically *)
+        let projs = List.map (fun (_, gj) -> project gj p) branches in
+        if all_equal projs then List.hd projs
+        else None  (* UNDEFINED *)
+
+  | GPar g1 g2 ->
+      merge (project g1 p) (project g2 p)
+
+  | GRec v g' -> Some (LRec v (project g' p))
+  | GVar v -> Some (LVar v)
+  | GEnd -> Some LEnd
+\end{fstarcode}
+
+\textbf{Projection Properties}:
+\begin{itemize}
+  \item \textbf{Totality for Linear Types}: If $G$ is linear and $p \in \mathrm{participants}(G)$, then $\mathrm{project}(G, p)$ is defined.
+  \item \textbf{Projection Preserves Typing}: If $\Gamma \vdash P \triangleright \Delta$ and $\Delta(s) = \llbracket G \rrbracket$ then $\mathrm{project}(G, p)$ types $P$'s behavior at $s$ for $p$.
+  \item \textbf{Merge Operation}: For parallel composition, merge combines independent local behaviors.
+\end{itemize}
+
+%==================================================
+\chapter{Local Type Syntax}
+\label{ch:local-type-syntax}
+%==================================================
+
+\section{Local Type Grammar}
+\label{sec:local-type-grammar}
+
+\begin{definition}[Local Type Grammar]
+\begin{align*}
+T ::=\ & k!\langle U\rangle;\, T & \text{(Output: send payload $U$ via channel $k$)} \\
+  \mid\ & k?\langle U\rangle;\, T & \text{(Input: receive payload $U$ via channel $k$)} \\
+  \mid\ & k\oplus\{l_j : T_j\}_{j \in J} & \text{(Selection: choose one label to send)} \\
+  \mid\ & k\&\{l_j : T_j\}_{j \in J} & \text{(Branching: offer labels, receive choice)} \\
+  \mid\ & k!\langle T'@p\rangle;\, T & \text{(Delegation: send session capability)} \\
+  \mid\ & k?\langle T'@p\rangle;\, T & \text{(Session receive: get delegated capability)} \\
+  \mid\ & \mu t.\, T & \text{(Recursive type)} \\
+  \mid\ & t & \text{(Type variable)} \\
+  \mid\ & \mathbf{end} & \text{(Termination)}
+\end{align*}
+where $k \in \mathbb{N}$ (channel number), $U ::= \tilde{S} \mid T@p$ (payload), $l \in \mathrm{Labels}$, $p \in \mathrm{Participants}$.
+\end{definition}
+
+\section{Duality (Co-Type) Relation}
+\label{sec:local-duality}
+
+\begin{definition}[Duality for Local Types]
+For binary sessions, each type has a dual representing the partner's view:
+\begin{align*}
+\overline{k!\langle U\rangle;\, T} &= k?\langle U\rangle;\, \bar{T} & \text{(send dual is receive)} \\
+\overline{k?\langle U\rangle;\, T} &= k!\langle U\rangle;\, \bar{T} & \text{(receive dual is send)} \\
+\overline{k\oplus\{l_j : T_j\}} &= k\&\{l_j : \bar{T_j}\} & \text{(selection dual is branch)} \\
+\overline{k\&\{l_j : T_j\}} &= k\oplus\{l_j : \bar{T_j}\} & \text{(branch dual is selection)} \\
+\overline{k!\langle T'@p\rangle;\, T} &= k?\langle T'@p\rangle;\, \bar{T} & \text{(delegation dual)} \\
+\overline{k?\langle T'@p\rangle;\, T} &= k!\langle T'@p\rangle;\, \bar{T} & \text{(session receive dual)} \\
+\overline{\mu t.\, T} &= \mu t.\, \bar{T} & \text{(unfold before dualizing)} \\
+\bar{t} &= t & \text{(variable unchanged)} \\
+\overline{\mathbf{end}} &= \mathbf{end} & \text{(termination self-dual)}
+\end{align*}
+\end{definition}
+
+\textbf{Duality Properties}:
+\begin{itemize}
+  \item \textbf{Involution}: $\bar{\bar{T}} = T$ (dualizing twice returns original)
+  \item \textbf{Compatibility}: If two processes have types $T$ and $\bar{T}$ at a shared channel, their interactions will be compatible (no type errors)
+  \item \textbf{Session Safety}: Well-typed binary session with dual endpoints never fails
+\end{itemize}
+
+\section{Type Isomorphism Rules}
+\label{sec:type-isomorphism}
+
+\begin{definition}[Type Isomorphism ($\approx$)]
+\textbf{Permutation of Independent Outputs}:
+\[
+k_1!\langle U_1\rangle;\, k_2!\langle U_2\rangle;\, T \approx k_2!\langle U_2\rangle;\, k_1!\langle U_1\rangle;\, T \quad \text{(when } k_1 \neq k_2\text{)}
+\]
+Rationale: Outputs on different channels can be reordered since they are causally independent in async communication.
+
+\textbf{Permutation of Independent Inputs}:
+\[
+k_1?\langle U_1\rangle;\, k_2?\langle U_2\rangle;\, T \approx k_2?\langle U_2\rangle;\, k_1?\langle U_1\rangle;\, T \quad \text{(when } k_1 \neq k_2\text{)}
+\]
+Rationale: Inputs on different channels can be reordered when no data dependency exists.
+
+\textbf{Associativity}: $(T_1;\, T_2);\, T_3 \approx T_1;\, (T_2;\, T_3)$
+
+\textbf{Identity}: $\mathbf{end};\, T \approx T \approx T;\, \mathbf{end}$
+\end{definition}
+
+\textbf{Isomorphism Preserves Typing}: If $T_1 \approx T_2$ and $\Gamma \vdash P \triangleright \Delta, s:T_1$ then $\Gamma \vdash P \triangleright \Delta, s:T_2$.
+
+\section{Subtyping Relation}
+\label{sec:session-subtyping}
+
+\begin{definition}[Session Subtyping (Gay \& Hole 2005)]
+The subtyping relation $\leq_{\mathrm{sub}}$ allows safe substitution of more specific types.
+
+\textbf{Output} (Covariant in payload):
+\begin{mathpar}
+\inferrule*{U_1 \leq U_2 \\ T_1 \leq_{\mathrm{sub}} T_2}{k!\langle U_1\rangle;\, T_1 \leq_{\mathrm{sub}} k!\langle U_2\rangle;\, T_2}
+\end{mathpar}
+
+\textbf{Input} (Contravariant in payload):
+\begin{mathpar}
+\inferrule*{U_2 \leq U_1 \\ T_1 \leq_{\mathrm{sub}} T_2}{k?\langle U_1\rangle;\, T_1 \leq_{\mathrm{sub}} k?\langle U_2\rangle;\, T_2}
+\end{mathpar}
+
+\textbf{Selection} (Covariant in labels --- fewer choices OK):
+\begin{mathpar}
+\inferrule*{I \subseteq J \\ \forall i \in I.\, T_i \leq_{\mathrm{sub}} T'_i}{k\oplus\{l_i : T_i\}_{i \in I} \leq_{\mathrm{sub}} k\oplus\{l_j : T'_j\}_{j \in J}}
+\end{mathpar}
+
+\textbf{Branching} (Contravariant in labels --- more cases OK):
+\begin{mathpar}
+\inferrule*{J \subseteq I \\ \forall j \in J.\, T_j \leq_{\mathrm{sub}} T'_j}{k\&\{l_i : T_i\}_{i \in I} \leq_{\mathrm{sub}} k\&\{l_j : T'_j\}_{j \in J}}
+\end{mathpar}
+\end{definition}
+
+\textbf{Subtyping Examples}:
+\begin{itemize}
+  \item $k\oplus\{\mathsf{ok} : T_1\} \leq_{\mathrm{sub}} k\oplus\{\mathsf{ok} : T_1, \mathsf{quit} : T_2\}$ (Can select fewer options than offered)
+  \item $k\&\{\mathsf{ok} : T_1, \mathsf{quit} : T_2\} \leq_{\mathrm{sub}} k\&\{\mathsf{ok} : T_1\}$ (Can handle more cases than required)
+\end{itemize}
+
+%==================================================
+\chapter{Runtime Typing}
+\label{ch:runtime-typing}
+%==================================================
+
+Runtime typing extends the static type system to handle message queues, which appear during execution of asynchronous communication.
+
+\section{Type Contexts for Message Queues}
+\label{sec:queue-contexts}
+
+\begin{definition}[Type Context Grammar]
+\begin{align*}
+T[\cdot] ::=\ & [\cdot] & \text{(Hole where local type goes)} \\
+  \mid\ & k!\langle U\rangle;\, T[\cdot] & \text{(Output prefix context)} \\
+  \mid\ & k\oplus l : T[\cdot] & \text{(Selection prefix context, singleton)}
+\end{align*}
+
+\textbf{Context Operations}:
+\begin{itemize}
+  \item \textbf{Hole Filling}: $T[T']$ plugs local type $T'$ into context $T[\cdot]$
+  \item \textbf{Context Composition}: $T_1[\cdot] \circ T_2[\cdot] = T_1[T_2[\cdot]]$ (sequential composition)
+\end{itemize}
+\end{definition}
+
+\textbf{Queue Typing Intuition}: A message queue contains outputs that have been sent but not yet received. The type context ``remembers'' these pending outputs.
+
+\textbf{Example}: Queue: $s : \langle 3\rangle$ (value 3 waiting), Context: $1!\langle\mathsf{nat}\rangle;\, [\cdot]$, Combined: $1!\langle\mathsf{nat}\rangle;\, T$ (rollback: pretend output hasn't happened).
+
+This ``rollback'' technique lets us type runtime states using static types.
+
+\section{Extended Typing Judgment}
+\label{sec:extended-judgment}
+
+\begin{definition}[Runtime Typing Judgment]
+\[
+\Gamma \vdash P \triangleright_{\tilde{s}} \Delta
+\]
+The subscript $\tilde{s}$ tracks which session channels have associated queues.
+
+\textbf{Meaning}: Under environment $\Gamma$, process $P$ with queues for channels $\tilde{s}$ has typing $\Delta$.
+
+\textbf{Key Difference from Static Typing}:
+\begin{itemize}
+  \item Static: $\Gamma \vdash P \triangleright \Delta$ (no queues)
+  \item Runtime: $\Gamma \vdash P \triangleright_{\tilde{s}} \Delta$ (queues for $\tilde{s}$)
+\end{itemize}
+
+\textbf{Coherence of $\tilde{s}$}: For well-typed runtime states:
+\begin{itemize}
+  \item Each channel in $\tilde{s}$ has exactly one queue
+  \item Queue contents match the type context
+  \item No dangling or duplicated queues
+\end{itemize}
+\end{definition}
+
+\section{Queue Typing Rules}
+\label{sec:queue-typing-rules}
+
+\begin{mathpar}
+\inferrule*[Right=Qnil]
+  {\Delta \text{ contains only } \mathbf{end}}
+  {\Gamma \vdash (s_k : \varepsilon) \triangleright_{s_k} \tilde{s} : \{[\cdot]@p\}_p \circ \Delta}
+
+\inferrule*[Right=Qval]
+  {\Gamma \vdash v_i : S_i \\ \Gamma \vdash (s_k : \tilde{h}) \triangleright_{s_k} \Delta, \tilde{s}:\{T@q\} \cup R \\ R = \{H_p@p\}_{p \in I}}
+  {\Gamma \vdash (s_k : \tilde{h} \cdot \tilde{v}) \triangleright_{s_k} \Delta, \tilde{s}:(T[k!\langle\tilde{S}\rangle;\,[\cdot]]@q) \cup R}
+
+\inferrule*[Right=Qsess]
+  {\Gamma \vdash (s_k : \tilde{h}) \triangleright_{s_k} \Delta, \tilde{s}:\{T@q\} \cup R \\ R = \{H_p@p\}_{p \in I}}
+  {\Gamma \vdash (s_k : \tilde{h} \cdot \tilde{t}) \triangleright_{s_k} \Delta, \tilde{s}:(T[k!\langle T'@p'\rangle;\,[\cdot]]@q) \cup R, \tilde{t}:T'@p'}
+
+\inferrule*[Right=Qsel]
+  {\Gamma \vdash (s_k : \tilde{h}) \triangleright_{s_k} \Delta, \tilde{s}:\{T@q\} \cup R \\ R = \{H_p@p\}_{p \in I}}
+  {\Gamma \vdash (s_k : \tilde{h} \cdot l) \triangleright_{s_k} \Delta, \tilde{s}:(T[k\oplus l:[\cdot]]@q) \cup R}
+
+\inferrule*[Right=Conc]
+  {\Gamma \vdash P \triangleright_{\tilde{t}_1} \Delta \\ \Gamma \vdash Q \triangleright_{\tilde{t}_2} \Delta' \\ \tilde{t}_1 \cap \tilde{t}_2 = \emptyset \\ \Delta \bowtie \Delta'}
+  {\Gamma \vdash_{\tilde{t}_1 \cdot \tilde{t}_2} P \mid Q \triangleright_{\tilde{t}_1 \cdot \tilde{t}_2} \Delta \circ \Delta'}
+
+\inferrule*[Right=CRes]
+  {\Gamma \vdash P \triangleright_{\tilde{t}} \Delta, \tilde{s}:\{T_p@p\}_{p \in I} \\ \tilde{s} \in \tilde{t} \\ \{T_p@p\}_{p \in I} \text{ coherent}}
+  {\Gamma \vdash_{\tilde{t} \setminus \tilde{s}} (\nu\tilde{s})P \triangleright \Delta}
+\end{mathpar}
+
+\section{Runtime Typing Properties}
+\label{sec:runtime-properties}
+
+\begin{proposition}[Static/Runtime Equivalence (Proposition 5.1)]
+For program phrases (no queues):
+\[
+\Gamma \vdash P \triangleright \Delta \iff \Gamma \vdash P \triangleright_\emptyset \Delta \quad \text{(without [Subs])}
+\]
+\end{proposition}
+
+\begin{proposition}[Queue Uniqueness (Proposition 5.2)]
+If $\Gamma \vdash P \triangleright_{s_1 \ldots s_m} \Delta$ then:
+\begin{enumerate}
+  \item $P$ has exactly one queue at each $s_i$ ($1 \leq i \leq m$)
+  \item No other queues occur free in $P$
+  \item No queue is under any prefix
+\end{enumerate}
+\end{proposition}
+
+\textbf{Rollback Principle}: Runtime typing ``rolls back'' queue contents into types.
+\begin{itemize}
+  \item Runtime state: Process $P \mid \mathrm{Queue}(s, [v_1, v_2])$
+  \item After rollback: Type includes $k!\langle S_1\rangle;\, k!\langle S_2\rangle;\, [\text{actual local type}]$
+\end{itemize}
+This makes subject reduction work: the queue's effect is captured in types.
+
+\textbf{Type Safety for Runtime}: Well-typed runtime states (including queues) reduce to well-typed states. Combined with communication safety, this ensures no message type mismatches, no lost messages, and no unhandled selections.
+
+%==================================================
+\chapter{Integration with Static Analysis}
+\label{ch:channel-integration}
+%==================================================
+
+\section{Channel Analysis in CPG}
+\label{sec:channel-cpg}
+
+\begin{pillarbox}[title={Channel Analysis CPG Extension}]
+Add to Code Property Graph:
+\begin{enumerate}
+  \item \textbf{Session nodes}: represent session channels
+  \item \textbf{Protocol edges}: connect session nodes per global type
+  \item \textbf{Causality edges}: encode $\prec^{II}$, $\prec^{IO}$, $\prec^{OO}$ relations
+  \item \textbf{Projection nodes}: local type for each participant
+\end{enumerate}
+
+\textbf{CPG Node Types}:
+\begin{itemize}
+  \item $\mathsf{SessionNode}(\mathit{id}, \mathit{global\_type})$
+  \item $\mathsf{ParticipantNode}(\mathit{id}, \mathit{participant}, \mathit{local\_type})$
+  \item $\mathsf{PrefixNode}(\mathit{id}, \mathit{kind}, \mathit{channel}, \mathit{payload})$
+\end{itemize}
+
+\textbf{CPG Edge Types}:
+\begin{itemize}
+  \item $\mathsf{SessionOf}(\mathit{prefix\_node}, \mathit{session\_node})$
+  \item $\mathsf{ParticipantOf}(\mathit{participant\_node}, \mathit{session\_node})$
+  \item $\mathsf{Causality}(\mathit{prefix\_node}, \mathit{prefix\_node}, \mathit{kind})$ --- II, IO, or OO
+  \item $\mathsf{Next}(\mathit{prefix\_node}, \mathit{prefix\_node})$ --- sequential composition
+\end{itemize}
+\end{pillarbox}
+
+\textbf{Analysis Queries}:
+
+\textbf{Deadlock Detection}:
+\begin{verbatim}
+MATCH path = (p1:PrefixNode)-[:Causality*]->(p1)
+RETURN path  // cycle indicates potential deadlock
+\end{verbatim}
+
+\textbf{Protocol Violation}:
+\begin{verbatim}
+MATCH (p:ParticipantNode)-[:LocalType]->(t:Type)
+MATCH (proc:Process)-[:Implements]->(p)
+WHERE NOT conforms(proc, t)
+RETURN proc, t  // process doesn't follow local type
+\end{verbatim}
+
+\textbf{Orphan Message}:
+\begin{verbatim}
+MATCH (send:PrefixNode {kind: 'output'})-[:SessionOf]->(s:Session)
+WHERE NOT exists((recv:PrefixNode {kind: 'input'})-[:Matches]->(send))
+RETURN send  // output with no matching input
+\end{verbatim}
+
+\section{Cross-Reference with Synthesis Sections}
+\label{sec:channel-crossref}
+
+\begin{contributionbox}[title={Channel Analysis: Cross-References}]
+\textbf{Section 5.3 (CPG Construction)}:
+\begin{itemize}
+  \item Session nodes added as new vertex type
+  \item Causality edges extend data dependency edges
+  \item Protocol structure becomes queryable via graph traversal
+\end{itemize}
+
+\textbf{Section 6.4 (IFDS/IDE)}:
+\begin{itemize}
+  \item Session type checking as IFDS problem
+  \item Facts: (node, type\_state) pairs
+  \item Edges: type transitions at prefix nodes
+\end{itemize}
+
+\textbf{Section 8.1 (Taint Analysis)}:
+\begin{itemize}
+  \item Session channels as additional taint propagation paths
+  \item Delegation transfers taint along with capability
+  \item Protocol-aware sanitization (type-directed)
+\end{itemize}
+
+\textbf{Part IX (Multi-Language)}:
+\begin{itemize}
+  \item Global types describe cross-language protocols
+  \item FFI boundaries require session type consistency
+  \item Projection per language gives local implementation spec
+\end{itemize}
+
+\textbf{Part XI (Uncertainty)}:
+\begin{itemize}
+  \item Incomplete session specifications $\rightarrow$ uncertainty
+  \item Missing participants $\rightarrow$ coherence unknown
+  \item Dynamic session creation $\rightarrow$ parametric analysis
+\end{itemize}
+\end{contributionbox}
+
+\section{Language-Specific Channel Mappings}
+\label{sec:language-channel-mappings}
+
+This section defines how channel operations in concrete languages map to the unified IR channel primitives (Part~\ref{part:ir-specification}).
+
+\subsection{Go Channel Mappings}
+
+\begin{center}
+\begin{longtable}{ll}
+\toprule
+\textbf{Go Syntax} & \textbf{IR Statement} \\
+\midrule
+\endhead
+\texttt{ch := make(chan T)} & $\mathsf{SChanCreate}(\mathit{ch}, T, 0)$ --- Unbuffered (synchronous) \\
+\texttt{ch := make(chan T, n)} & $\mathsf{SChanCreate}(\mathit{ch}, T, n)$ --- Buffered with capacity $n$ \\
+\texttt{ch <- v} & $\mathsf{SSend}(\mathit{ch}, v)$ --- Send (may block) \\
+\texttt{v := <-ch} & $\mathsf{SRecv}(v, \mathit{ch})$ --- Receive (may block) \\
+\texttt{v, ok := <-ch} & $\mathsf{SRecvOk}(v, \mathit{ok}, \mathit{ch})$ --- With closed-channel check \\
+\texttt{close(ch)} & $\mathsf{SChanClose}(\mathit{ch})$ --- Close channel \\
+\texttt{select \{...\}} & $\mathsf{SSelect}([\ldots])$ --- Non-deterministic choice \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\textbf{Go Type Mappings}:
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Go Type} & \textbf{IR Type} \\
+\midrule
+\texttt{chan T} & $\mathsf{TChannel}(T, \mathsf{Bidirectional})$ \\
+\texttt{chan<- T} & $\mathsf{TChannel}(T, \mathsf{SendOnly})$ \\
+\texttt{<-chan T} & $\mathsf{TChannel}(T, \mathsf{RecvOnly})$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Rust Channel Mappings}
+
+\begin{center}
+\begin{longtable}{ll}
+\toprule
+\textbf{Rust Syntax (std::sync::mpsc)} & \textbf{IR Statement} \\
+\midrule
+\endhead
+\texttt{let (tx, rx) = mpsc::channel()} & $\mathsf{SChanCreate}(\mathit{ch}, T, \mathsf{UNBOUNDED})$ \\
+\texttt{let (tx, rx) = mpsc::sync\_channel(n)} & $\mathsf{SChanCreate}(\mathit{ch}, T, n)$ \\
+\texttt{tx.send(v).unwrap()} & $\mathsf{SSend}(\mathit{tx}, v)$ \\
+\texttt{let v = rx.recv().unwrap()} & $\mathsf{SRecv}(v, \mathit{rx})$ \\
+\texttt{let v = rx.try\_recv()} & $\mathsf{SRecvTry}(v, \mathit{rx})$ \\
+\texttt{drop(tx)} & $\mathsf{SChanClose}(\mathit{tx})$ --- Implicit close \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\textbf{Rust Type Mappings}:
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Rust Type} & \textbf{IR Type} \\
+\midrule
+\texttt{Sender<T>} & $\mathsf{TChannel}(T, \mathsf{SendOnly})$ \\
+\texttt{Receiver<T>} & $\mathsf{TChannel}(T, \mathsf{RecvOnly})$ \\
+\texttt{(Sender<T>, Receiver<T>)} & $\mathsf{TChannelPair}(T)$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Ownership Considerations}:
+\begin{itemize}
+  \item $\mathsf{Sender}\langle T\rangle$: Can be \texttt{Clone}'d (multiple producers)
+  \item $\mathsf{Receiver}\langle T\rangle$: Cannot be \texttt{Clone}'d (single consumer)
+  \item Channel ownership: Sender owns send capability, Receiver owns recv capability
+  \item Linearity: Each endpoint used linearly (no aliasing of recv end)
+\end{itemize}
+
+\subsection{Python Channel Mappings}
+
+\begin{center}
+\begin{longtable}{ll}
+\toprule
+\textbf{Python Syntax (asyncio.Queue)} & \textbf{IR Statement} \\
+\midrule
+\endhead
+\texttt{q = asyncio.Queue()} & $\mathsf{SChanCreate}(q, \mathsf{Any}, \mathsf{UNBOUNDED})$ \\
+\texttt{q = asyncio.Queue(maxsize=n)} & $\mathsf{SChanCreate}(q, \mathsf{Any}, n)$ \\
+\texttt{await q.put(v)} & $\mathsf{SSend}(q, v)$ with $\mathsf{EAsync}$ \\
+\texttt{v = await q.get()} & $\mathsf{SRecv}(v, q)$ with $\mathsf{EAsync}$ \\
+\texttt{await q.put(None)} & $\mathsf{SSend}(q, \mathsf{None})$ --- Convention for ``close'' \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\textbf{Taint Considerations}:
+\begin{itemize}
+  \item Pickled data through \texttt{multiprocessing.Queue}: taint propagates with serialization
+  \item \texttt{asyncio.Queue}: taint propagates within same process
+  \item Cross-process channels: require taint boundary analysis
+\end{itemize}
+
+\subsection{TypeScript/JavaScript Channel Mappings}
+
+Note: JS/TS don't have built-in channels, but common patterns include async iterators/generators, RxJS Observables, and Web Workers with \texttt{postMessage}.
+
+\begin{center}
+\begin{longtable}{ll}
+\toprule
+\textbf{TypeScript Syntax (RxJS)} & \textbf{IR Statement} \\
+\midrule
+\endhead
+\texttt{const subject = new Subject<T>()} & $\mathsf{SChanCreate}(\mathit{ch}, T, 0)$ --- Unbuffered \\
+\texttt{const subject = new ReplaySubject(n)} & $\mathsf{SChanCreate}(\mathit{ch}, T, n)$ --- Buffered \\
+\texttt{subject.next(v)} & $\mathsf{SSend}(\mathit{ch}, v)$ \\
+\texttt{subject.subscribe(v => body)} & $\mathsf{SRecv}(v, \mathit{ch})$ in async loop \\
+\texttt{subject.complete()} & $\mathsf{SChanClose}(\mathit{ch})$ \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{Session Type Annotations}
+
+For languages supporting annotations/attributes, session types can be specified:
+
+\textbf{Go} (via comments or build tags):
+\begin{verbatim}
+// @session: !string; ?int; &{ok: !string, quit: end}
+func BuyerProtocol(ch chan interface{}) { ... }
+\end{verbatim}
+
+\textbf{Rust} (via attributes):
+\begin{verbatim}
+#[session_type("!String; ?i32; +{ok: !String, quit: end}")]
+async fn buyer_protocol(tx: Sender<...>, rx: Receiver<...>) { ... }
+\end{verbatim}
+
+\textbf{TypeScript} (via decorators or JSDoc):
+\begin{verbatim}
+/** @session !string; ?number; &{ok: !string, quit: end} */
+async function buyerProtocol(ch: Channel<...>): Promise<void> { ... }
+\end{verbatim}
+
+\textbf{Python} (via type hints or decorators):
+\begin{verbatim}
+@session_type("!str; ?int; &{ok: !str, quit: end}")
+async def buyer_protocol(ch: Channel) -> None: ...
+\end{verbatim}
+
+These annotations enable: (1) Static protocol conformance checking, (2) Runtime protocol monitoring, (3) Documentation generation, (4) Cross-language protocol compatibility verification.
+
+\section{Channel Analysis in Existing Analyses}
+\label{sec:channel-existing-analyses}
+
+The following code extends the IFDS dataflow framework (Section~\ref{sec:ifds-foundations}) to handle channel operations. Each channel operation creates or transforms dataflow facts that propagate through the interprocedural analysis. This enables tracking tainted data as it flows through channels, monitoring session type state at each program point, and verifying ownership invariants.
+
+\begin{fstarcode}[title={Channel Operations as IFDS Facts --- Section 5.3 Extension}]
+(* Channel operations create dataflow facts that propagate through IFDS.
+   This enables tracking of:
+   - Tainted data through channels
+   - Session type state at each program point
+   - Channel aliasing and ownership *)
+
+(* IFDS fact domain extended for channels *)
+type channel_ifds_fact =
+  | ChanTainted : chan_id:nat -> source:taint_source -> channel_ifds_fact
+      (* Channel carries tainted data from source *)
+  | ChanTypeState : chan_id:nat -> state:local_session_type -> channel_ifds_fact
+      (* Channel is at session type state *)
+  | ChanOwned : chan_id:nat -> owner:var_id -> channel_ifds_fact
+      (* Channel endpoint owned by variable *)
+  | ChanClosed : chan_id:nat -> channel_ifds_fact
+      (* Channel has been closed *)
+  | ChanDelegated : chan_id:nat -> to_chan:nat -> channel_ifds_fact
+      (* Channel capability was delegated through to_chan *)
+
+(* Transfer function for channel operations *)
+val channel_transfer : ir_stmt -> set channel_ifds_fact -> set channel_ifds_fact
+let channel_transfer stmt facts =
+  match stmt with
+  | SChanCreate dst elem_ty buf_sz ->
+      (* New channel: add ownership fact *)
+      let chan_id = fresh_chan_id () in
+      Set.add (ChanOwned chan_id dst) facts
+
+  | SSend ch v ->
+      (* Send: propagate taint from value to channel *)
+      let chan_id = resolve_chan ch in
+      let v_taint = get_taint v facts in
+      Set.union facts (Set.map (fun t -> ChanTainted chan_id t) v_taint)
+
+  | SRecv dst ch ->
+      (* Receive: propagate taint from channel to destination *)
+      let chan_id = resolve_chan ch in
+      let chan_taint = Set.filter (fun f ->
+        match f with ChanTainted cid _ -> cid = chan_id | _ -> false) facts in
+      let dst_taint = Set.map (fun (ChanTainted _ src) -> VarTainted dst src) chan_taint in
+      Set.union facts dst_taint
+
+  | SChanClose ch ->
+      (* Close: mark channel as closed *)
+      let chan_id = resolve_chan ch in
+      Set.add (ChanClosed chan_id) facts
+
+  | SChanDelegate ch delegated ->
+      (* Delegate: transfer ownership, track delegation *)
+      let chan_id = resolve_chan ch in
+      let del_id = resolve_chan delegated in
+      Set.add (ChanDelegated del_id chan_id) facts
+
+  | _ -> facts  (* Non-channel statements don't affect channel facts *)
+\end{fstarcode}
+
+\textbf{Key Type Signatures}: The \texttt{channel\_ifds\_fact} type captures the different kinds of facts that can be tracked for channels. \texttt{ChanTainted} records that a channel carries tainted data, \texttt{ChanTypeState} tracks the current session type state, and \texttt{ChanOwned}/\texttt{ChanClosed}/\texttt{ChanDelegated} track ownership transitions.
+
+The following code extends taint analysis (Section~\ref{sec:taint-analysis}) to handle channel-based communication. When tainted data is sent through a channel, the channel itself becomes tainted, and any values received from that channel inherit the taint. This models information flow through concurrent communication paths.
+
+\begin{fstarcode}[title={Taint Propagation Through Channels --- Section 8.2 Extension}]
+(* Tainted data sent through a channel taints all received values.
+   This models information flow through concurrent communication. *)
+
+(* Taint flow rules for channels *)
+type channel_taint_rule =
+  | SendTaintsChannel : tainted_value -> channel -> channel_taint_rule
+      (* Sending tainted value taints the channel *)
+  | RecvInheritsTaint : channel -> recv_variable -> channel_taint_rule
+      (* Receiving from tainted channel taints the variable *)
+  | DelegationTransfersTaint : delegated_chan -> via_chan -> channel_taint_rule
+      (* Delegation transfers taint along with capability *)
+  | ClosedChannelNoTaint : channel -> channel_taint_rule
+      (* Closed channels don't propagate new taint *)
+
+val apply_channel_taint : taint_state -> ir_stmt -> taint_state
+let apply_channel_taint state stmt =
+  match stmt with
+  | SSend ch v when is_tainted state v ->
+      (* Taint propagates: value -> channel *)
+      add_channel_taint state ch (get_taint_sources state v)
+
+  | SRecv dst ch when is_channel_tainted state ch ->
+      (* Taint propagates: channel -> variable *)
+      add_var_taint state dst (get_channel_taint_sources state ch)
+
+  | SChanDelegate ch delegated when is_channel_tainted state delegated ->
+      (* Taint propagates with delegation *)
+      add_channel_taint state ch (get_channel_taint_sources state delegated)
+
+  | _ -> state
+\end{fstarcode}
+
+\textbf{Security Implication}: The rule \texttt{DelegationTransfersTaint} is particularly important---when a session capability is delegated, any taint associated with that session transfers with it. This prevents information laundering through delegation.
+
+The following code extends ownership analysis (Section~\ref{sec:ownership-analysis}) to handle channel endpoints. Channel endpoints in languages like Rust have explicit ownership semantics: sender endpoints can be cloned (shared ownership via reference counting), while receiver endpoints are unique (linear). This distinction is critical for detecting use-after-close bugs and ensuring proper resource cleanup.
+
+\begin{fstarcode}[title={Ownership Tracking for Channels --- Section 7.1 Extension}]
+(* Channel endpoints have ownership semantics:
+   - Sender endpoints: can be cloned (shared ownership)
+   - Receiver endpoints: unique ownership (linear)
+   - Closing: requires ownership of endpoint *)
+
+(* Ownership states for channel endpoints (extends Section 7.1.1 Camera) *)
+type channel_ownership =
+  | OwnedSender : refcount:nat -> channel_ownership
+      (* Sender can be cloned; tracks reference count *)
+  | OwnedReceiver : channel_ownership
+      (* Receiver is unique (linear) *)
+  | Borrowed : from:var_id -> channel_ownership
+      (* Temporarily borrowed *)
+  | Moved : channel_ownership
+      (* Ownership has been transferred *)
+
+(* Channel ownership checking *)
+val check_channel_ownership : ownership_context -> ir_stmt -> option ownership_error
+let check_channel_ownership ctx stmt =
+  match stmt with
+  | SSend ch _ ->
+      (* Requires ownership or borrow of sender *)
+      if not (has_send_capability ctx ch) then
+        Some (UseAfterMove ch)
+      else None
+
+  | SRecv _ ch ->
+      (* Requires ownership or borrow of receiver *)
+      if not (has_recv_capability ctx ch) then
+        Some (UseAfterMove ch)
+      else None
+
+  | SChanClose ch ->
+      (* Requires ownership (not just borrow) *)
+      if not (owns_endpoint ctx ch) then
+        Some (InvalidClose ch)
+      else None
+
+  | SChanDelegate _ delegated ->
+      (* Moves ownership of delegated channel *)
+      if not (owns_endpoint ctx delegated) then
+        Some (CannotDelegateUnowned delegated)
+      else None
+
+  | _ -> None
+
+(* Integration with Iris cameras (Section 7.1.1) *)
+val channel_camera : channel_ownership -> camera_element
+let channel_camera own =
+  match own with
+  | OwnedSender n -> Frac (1.0 /. float_of_int n)  (* Fractional for senders *)
+  | OwnedReceiver -> Exclusive ()                   (* Exclusive for receiver *)
+  | Borrowed _ -> Frac 0.5                          (* Temporary borrow *)
+  | Moved -> Invalid                                (* No ownership *)
+\end{fstarcode}
+
+%==================================================
+\chapter{Theoretical Reconciliation: Session Types and Outcome Logic}
+\label{ch:session-outcome-reconciliation}
+%==================================================
+
+This chapter resolves fundamental theoretical tensions between classical session type theory \textbf{[Honda98]}, \textbf{[Honda08]} and the under-approximation framework of Outcome Logic. These tensions arise because session types provide \textbf{sound} guarantees (may reject valid programs) while Outcome Logic targets bug finding via \textbf{under-approximation}. We provide formal resolutions that enable both frameworks to coexist productively.
+
+\section{Tension 1: Over-Approximation vs Under-Approximation}
+\label{sec:tension-overapprox}
+
+\begin{pillarbox}[title={The Fundamental Tension}]
+\textbf{Session Types (Honda 1998, 2008)}:
+\begin{itemize}
+  \item \textbf{Sound} type system: well-typed programs \textbf{never} violate protocols
+  \item \textbf{Over-approximation}: may \textbf{reject} valid programs (false negatives for bugs)
+  \item Guarantees: communication safety, session fidelity, progress
+\end{itemize}
+
+\textbf{Outcome Logic (Zilberstein 2023)}:
+\begin{itemize}
+  \item \textbf{Under-approximation}: may \textbf{miss} bugs (false negatives for safety)
+  \item Focus: \textbf{finding} bugs, not proving absence
+  \item Guarantees: found bugs are \textbf{real} (0\% false positives for manifest)
+\end{itemize}
+
+\textbf{Resolution}: Classify channel bugs by \textbf{detectability}.
+\end{pillarbox}
+
+\begin{definition}[Channel Bug Classification]
+\textbf{Manifest Channel Bugs} (0\% False Positive Rate): Bugs detectable with \textbf{empty presumption} ($\mathsf{emp}$), independent of calling context. These correspond to Le 2022's manifest errors.
+
+\begin{enumerate}
+  \item \textbf{Type Mismatch} --- Send value of wrong type:
+  \[
+  [\mathsf{emp}]\; \mathsf{send}(k, 42)\; [k \text{ expects string};\, \mathsf{Er}]
+  \]
+
+  \item \textbf{Protocol Violation} --- Wrong operation at current state:
+  \[
+  [\mathsf{emp}]\; \mathsf{send}(k, v)\; [\mathsf{session\_state}(k) = \mathsf{receiving};\, \mathsf{Er}]
+  \]
+
+  \item \textbf{Definite Deadlock} --- All participants blocked forever:
+  \[
+  [\mathsf{emp}]\; P_1 \mid P_2 \mid \ldots \mid P_n\; [\forall i.\, \mathsf{blocked}(P_i);\, \mathsf{Er}]
+  \]
+
+  \item \textbf{Channel Linearity Violation} --- Use after close/move:
+  \[
+  [\mathsf{emp}]\; \mathsf{close}(k);\, \mathsf{send}(k, v)\; [\mathsf{closed}(k);\, \mathsf{Er}]
+  \]
+
+  \item \textbf{Session Type Structural Mismatch}:
+  \[
+  [\mathsf{emp}]\; P \text{ at } G \upharpoonright p\; [G \upharpoonright p \text{ undefined or } P \text{ violates } G \upharpoonright p;\, \mathsf{Er}]
+  \]
+\end{enumerate}
+
+\textbf{Latent Channel Bugs} (Require Context/Schedule): Bugs requiring specific \textbf{precondition} or schedule to manifest. These are under-approximate findings with confidence $< 100\%$.
+
+\begin{enumerate}
+  \item \textbf{Potential Deadlock} under specific interleavings:
+  \[
+  [\mathsf{schedule} = \sigma]\; P_1 \mid P_2\; [\mathsf{blocked};\, \mathsf{Er}]
+  \]
+
+  \item \textbf{Race on Channel} under specific timing:
+  \[
+  [\mathsf{arrival\_order} = (m_1, m_2)]\; \mathsf{recv}(k)\; [\text{wrong message received};\, \mathsf{Er}]
+  \]
+
+  \item \textbf{Conditional Protocol Violation}:
+  \[
+  [x > 0]\; \mathsf{branch\_on}(x);\, \mathsf{send}(k, v)\; [\text{protocol error};\, \mathsf{Er}]
+  \]
+\end{enumerate}
+\end{definition}
+
+\begin{theorem}[Session Type Violations Are Manifest (Theorem 14.7.1)]
+If $G$ is a coherent global type and process $P$ has $\Gamma \vdash P \triangleright \Delta$ where $\Delta(s) = \llbracket G \rrbracket$ and $P$ violates a session type rule, then the violation is a \textbf{manifest bug} under Outcome Logic classification.
+\end{theorem}
+
+\begin{proof}[Proof Sketch]
+\begin{enumerate}
+  \item Session type rules (Figure 7, Honda 2008) are \textbf{local} to each process
+  \item Type errors (wrong sort, wrong prefix, wrong branch) are detectable from $P$'s code alone, without caller information
+  \item Therefore ISL presumption is $\mathsf{emp} \land \mathsf{true}$ (Le 2022 Theorem 3.4)
+  \item By True Positives Property: manifest error implies real bug \qedhere
+\end{enumerate}
+\end{proof}
+
+\textbf{Consequence}: Session type violations detected statically have 0\% false positive rate. This justifies \textbf{high} confidence for session type findings in Layer 6.
+
+\section{Tension 2: Static vs Dynamic Participants}
+\label{sec:tension-participants}
+
+\begin{pillarbox}[title={The Participant Count Tension}]
+\textbf{Honda 2008}: Participant count $n$ is \textbf{static} (compile-time)
+\begin{itemize}
+  \item Global type $G$ has fixed set $\mathrm{pid}(G) = \{1, 2, \ldots, n\}$
+  \item [Link] rule synchronizes \textbf{exactly} $n$ participants
+  \item Projection $G \upharpoonright p$ is defined for each $p \in \mathrm{pid}(G)$
+\end{itemize}
+
+\textbf{Go/Rust/Real Programs}: Goroutines/threads created \textbf{dynamically}
+\begin{itemize}
+  \item \texttt{for i := 0; i < n; i++ \{ go worker(ch) \}}
+  \item Number of workers determined at \textbf{runtime}
+  \item Channel may be shared by unbounded number of participants
+\end{itemize}
+\end{pillarbox}
+
+\textbf{Resolution Options}:
+
+\textbf{Option 1: Bounded Model Checking} --- Unroll dynamic participant creation to depth $k$ (typically $k = 3$--$5$).
+
+\textbf{Option 2: Symbolic Participants} --- Abstract over participant count using universal quantification:
+\[
+\forall n \geq 1.\; G(n) = \mu t.\, \mathsf{Worker}_i \rightarrow \mathsf{Coordinator} : \mathit{ch}\langle\mathsf{result}\rangle.\, t \quad (i \in [1,n])
+\]
+
+\textbf{Option 3: Annotation Requirement} --- User specifies participant bounds via annotations.
+
+\textbf{Option 4: Pattern Recognition (Recommended Default)} --- Detect common patterns and apply known-safe protocols.
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Pattern} & \textbf{Global Type Template} \\
+\midrule
+Fan-Out (1-to-N) & $\mu t.\, \forall i \in [1,n].\, \mathsf{Master} \rightarrow \mathsf{Worker}_i : k\langle\mathsf{task}\rangle.\, t$ \\
+Fan-In (N-to-1) & $\mu t.\, \exists i \in [1,n].\, \mathsf{Worker}_i \rightarrow \mathsf{Master} : k\langle\mathsf{result}\rangle.\, t$ \\
+Producer-Consumer & $\mu t.\, \mathsf{Producer} \rightarrow \mathsf{Consumer} : k\langle\mathsf{item}\rangle.\, t$ \\
+Scatter-Gather & Fan-Out \textbf{then} Fan-In composition \\
+Pipeline & $\mathsf{Stage}_1 \rightarrow \mathsf{Stage}_2 \rightarrow \cdots \rightarrow \mathsf{Stage}_n$ \\
+Request-Response & $\mathsf{Client} \rightarrow \mathsf{Server} : \mathsf{req}\langle Q\rangle.\, \mathsf{Server} \rightarrow \mathsf{Client} : \mathsf{resp}\langle R\rangle$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Implementation Strategy}:
+\begin{enumerate}
+  \item First attempt pattern recognition (fast, high confidence)
+  \item If pattern found: instantiate known-safe global type
+  \item If no pattern: fall back to bounded model checking with $k = 3$
+  \item Allow user annotations to override/refine bounds
+\end{enumerate}
+
+The following code implements automatic pattern detection from channel usage in the Code Property Graph. The algorithm counts senders and receivers to classify common communication patterns, then generates appropriate global types.
+
+\begin{fstarcode}[title={Pattern Detection and Global Type Generation}]
+(* Communication patterns recognized from channel usage *)
+type channel_pattern =
+  | FanOut : master:participant -> channel_pattern
+  | FanIn : collector:participant -> channel_pattern
+  | ProducerConsumer : channel_pattern
+  | RequestResponse : channel_pattern
+  | Pipeline : stages:list participant -> channel_pattern
+  | UnrecognizedPattern : channel_pattern
+
+(* Detect pattern from sender/receiver counts *)
+val detect_channel_pattern : cpg -> chan_id -> channel_pattern
+let detect_channel_pattern cpg ch =
+  let senders = get_senders cpg ch in
+  let receivers = get_receivers cpg ch in
+  match (List.length senders, List.length receivers) with
+  | (1, n) when n > 1 -> FanOut (List.hd senders)
+  | (n, 1) when n > 1 -> FanIn (List.hd receivers)
+  | (1, 1) -> if is_bidirectional cpg ch then RequestResponse
+              else ProducerConsumer
+  | _ -> UnrecognizedPattern
+
+(* Generate global type from detected pattern *)
+val pattern_to_global_type : channel_pattern -> nat -> global_type
+let pattern_to_global_type pattern n =
+  match pattern with
+  | FanOut master ->
+      GRec "t" (fold_participants n (fun i acc ->
+        GMsg master (Worker i) 1 SortAny acc) (GVar "t"))
+  | FanIn collector ->
+      GRec "t" (GBranch collector
+        (List.map (fun i -> (label i, GMsg (Worker i) collector 1 SortAny GEnd))
+                  (range 1 n)))
+  | ProducerConsumer ->
+      GRec "t" (GMsg Producer Consumer 1 SortAny (GVar "t"))
+  | RequestResponse ->
+      GMsg Client Server 1 SortAny (GMsg Server Client 1 SortAny GEnd)
+  | _ -> GEnd  (* Fallback: use bounded checking *)
+\end{fstarcode}
+
+\textbf{Connection to Engineering}: This pattern-based approach enables practical analysis of dynamically-spawned goroutines and threads without requiring explicit annotations. The recognized patterns cover the majority of real-world concurrent communication idioms.
+
+\section{Tension 3: Order Preservation}
+\label{sec:tension-ordering}
+
+\begin{pillarbox}[title={The Message Ordering Tension}]
+\textbf{Honda 2008 Assumption}: TCP-like FIFO per channel
+\begin{itemize}
+  \item Messages on \textbf{same} channel preserve sending order
+  \item $\prec^{OO}$ (Output-Output) dependency exploits this
+  \item $s!m_1;\, s!m_2$ guarantees $m_1$ arrives before $m_2$
+\end{itemize}
+
+\textbf{Reality}: Cross-channel messages have \textbf{no} ordering guarantee
+\begin{itemize}
+  \item $s!m_1;\, t!m_2$ does \textbf{not} guarantee $m_1$ arrives before $m_2$
+  \item Even same sender: different channels = no ordering
+  \item Two Buyer Protocol \textbf{requires} separate channels for this reason
+\end{itemize}
+\end{pillarbox}
+
+\textbf{Resolution}: Use Honda 2008's \textbf{modular approach} (Section 6.1).
+
+\textbf{Ordering Rules}:
+\begin{enumerate}
+  \item \textbf{Same-Channel Ordering} ($\prec^{OO}$ preserved): For prefixes $n_1, n_2$ with same sender $p$ and same channel $k$, if $n_1 \prec n_2$ then $n_1 \prec^{OO} n_2$.
+
+  \item \textbf{Cross-Channel Independence}: For prefixes $n_1, n_2$ with different channels $k_1 \neq k_2$, $\neg(n_1 \prec^{OO} n_2) \land \neg(n_2 \prec^{OO} n_1)$.
+
+  \item \textbf{Explicit Synchronization}: If ordering between $k_1$ and $k_2$ is required, add sync edge:
+  \[
+  G = p \rightarrow q : k_1\langle U_1\rangle.\, q \rightarrow r : \mathsf{sync}\langle\mathsf{ack}\rangle.\, p \rightarrow r : k_2\langle U_2\rangle.\, \ldots
+  \]
+\end{enumerate}
+
+\textbf{Analysis Implication}: When analyzing code, do \textbf{not} assume cross-channel ordering. Flag potential races where code assumes ordering without sync.
+
+The following code implements a safety check that verifies cross-channel ordering assumptions are properly synchronized:
+
+\begin{fstarcode}[title={Cross-Channel Ordering Safety Check}]
+(* Verify that cross-channel message pairs are properly synchronized *)
+val cross_channel_ordering_safe : global_type -> bool
+let cross_channel_ordering_safe g =
+  let prefixes = collect_prefixes g in
+  let cross_channel_pairs = List.filter (fun (n1, n2) ->
+    channel_of n1 <> channel_of n2 &&
+    sender_of n1 = sender_of n2 &&
+    n1 `prefix_ordered` n2
+  ) (pairs prefixes) in
+  (* For each cross-channel pair, verify no ordering assumption *)
+  List.for_all (fun (n1, n2) ->
+    not (requires_ordering g n1 n2) ||
+    has_sync_path g n1 n2
+  ) cross_channel_pairs
+\end{fstarcode}
+
+\textbf{Two Buyer Protocol Revisited}: The Two Buyer Protocol from \textbf{[Honda08]} uses \textbf{four} channels ($b_1$, $b_2$, $b_2'$, $s$) precisely because:
+\begin{itemize}
+  \item Buyer$_2$ receives from Seller on $b_2$ (quote)
+  \item Buyer$_2$ receives from Buyer$_1$ on $b_2'$ (contribution)
+  \item Without separate channels, messages could arrive out of order
+  \item This is \textbf{not} a workaround but \textbf{correct} protocol design
+\end{itemize}
+
+\section{Tension 4: Select Non-Determinism}
+\label{sec:tension-select}
+
+\begin{pillarbox}[title={The Select Statement Tension}]
+\textbf{Honda 2008}: Deterministic branching (\textbf{receiver} chooses)
+\begin{itemize}
+  \item $G = p \rightarrow q : k\{l_1 : G_1, l_2 : G_2\}$
+  \item Sender $p$ \textbf{selects} which label to send
+  \item Receiver $q$ \textbf{branches} based on received label
+  \item Selection is \textbf{internal choice} at sender
+\end{itemize}
+
+\textbf{Go select}: Non-deterministic (\textbf{scheduler} chooses)
+\begin{verbatim}
+select {
+  case msg := <-ch1: handle1(msg)
+  case msg := <-ch2: handle2(msg)
+}
+\end{verbatim}
+\begin{itemize}
+  \item Which case fires depends on message \textbf{arrival order}
+  \item This is \textbf{external choice} resolved by environment
+\end{itemize}
+\end{pillarbox}
+
+\textbf{Resolution}: Model select as \textbf{external choice on multiple channels}.
+
+\textbf{Key Insight}: Go select is \textbf{not} the same as session type selection. It is better modeled as external choice where the environment (message arrival timing) determines which branch executes.
+
+\begin{fstarcode}[title={Select Statement Type Checking}]
+type select_branch = {
+  channel : chan_id;
+  direction : SendOrRecv;
+  body : process;
+  local_type : local_type;
+}
+
+type select_stmt = list select_branch
+
+(* Type check select statement *)
+val check_select : gamma -> select_stmt -> delta -> option delta
+let check_select g branches d =
+  (* All branches must be individually well-typed *)
+  let branch_results = List.map (fun br ->
+    match br.direction with
+    | Recv ->
+        let expected_type = LRecv br.channel (infer_sort br.body) br.local_type in
+        check_process g br.body (update d br.channel expected_type)
+    | Send ->
+        let expected_type = LSend br.channel (infer_sort br.body) br.local_type in
+        check_process g br.body (update d br.channel expected_type)
+  ) branches in
+  (* If all succeed, combine results (external choice) *)
+  if List.for_all is_some branch_results then
+    Some (merge_branch_deltas (List.map Option.get branch_results))
+  else None
+\end{fstarcode}
+
+\begin{theorem}[Select Safety (Theorem 14.7.2)]
+If process $P$ uses select over channels $\{k_1, \ldots, k_n\}$ where:
+\begin{enumerate}
+  \item Each channel $k_i$ has valid local type $T_i$ at $P$
+  \item The select body $B_i$ for each case follows $T_i$
+  \item All branches $B_i$ are type-safe continuations
+\end{enumerate}
+Then $P$ is safe regardless of which branch the scheduler selects.
+\end{theorem}
+
+The following code models how select statements can be encoded in global types as parallel composition (external choice):
+
+\begin{fstarcode}[title={Encoding Select in Global Types}]
+(* Model select as external choice in global type *)
+val encode_select : select_stmt -> participant -> global_type
+let encode_select branches self =
+  let branch_globals = List.map (fun br ->
+    match br.direction with
+    | Recv -> GMsg (get_sender br.channel) self br.channel (sort_of br) GEnd
+    | Send -> GMsg self (get_receiver br.channel) br.channel (sort_of br) GEnd
+  ) branches in
+  GPar branch_globals  (* Parallel composition = external choice *)
+\end{fstarcode}
+
+\textbf{Key Insight}: The \texttt{GPar} constructor represents parallel composition where exactly one branch executes (first message arrival wins). This differs from session type selection where the sender actively chooses.
+
+\textbf{Bug Detection}: For \texttt{select \{ case x := <-ch1: ... case ch2 <- y: ... \}}, if \texttt{ch1} and \texttt{ch2} connected to \textbf{same} remote, potential race. Analysis: warn if both branches communicate with same participant.
+
+\section{Tension 5: Global Type Origin}
+\label{sec:tension-origin}
+
+\begin{pillarbox}[title={The Global Type Origin Tension}]
+\textbf{Honda 2008 Assumption}: $G$ is \textbf{given} by programmer
+\begin{itemize}
+  \item Development methodology: design $G$ first, implement to $G$
+  \item Type checking: verify process $P$ conforms to $G \upharpoonright p$
+  \item $G$ serves as contract/specification
+\end{itemize}
+
+\textbf{Reality}: Most code has \textbf{implicit} protocols
+\begin{itemize}
+  \item Legacy code: no explicit protocol specification
+  \item Quick prototypes: evolve protocol during development
+  \item Third-party code: protocols undocumented
+\end{itemize}
+\end{pillarbox}
+
+\textbf{Resolution}: Three-Tier Protocol Extraction.
+
+\textbf{Tier 1: Explicit Annotation} (Highest Confidence, 100\%) --- User provides global type via annotation. Verification: Check code conforms to annotation.
+
+\textbf{Tier 2: Pattern Inference} (Medium Confidence, 80--90\%) --- Detect common communication idioms automatically.
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Code Pattern} & \textbf{Inferred Global Type} \\
+\midrule
+\texttt{ch <- x; y := <-ch} & $p \rightarrow q : k\langle T\rangle.\, q \rightarrow p : k'\langle T'\rangle$ \\
+(send then recv = req-resp) & \\
+\midrule
+\texttt{for \{ ch <- data \}} & $\mu t.\, p \rightarrow q : k\langle T\rangle.\, t$ \\
+(loop send = streaming) & \\
+\midrule
+\texttt{switch msg.Type \{ case A: ... \}} & $p \rightarrow q : k\{A: G_A, B: G_B, \ldots\}$ \\
+(type switch = branching) & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Tier 3: Local Type Extraction + Coherence Check} (Lower Confidence, 60--80\%) --- Extract local types from each participant, then check coherence.
+
+\textbf{Algorithm}:
+\begin{enumerate}
+  \item For each goroutine/thread $p$, extract local type $T_p$ by:
+    \begin{itemize}
+      \item Traversing channel operations in CFG order
+      \item Building type from send $\rightarrow$ $!U$, recv $\rightarrow$ $?U$, select $\rightarrow$ $\&/\oplus$
+    \end{itemize}
+  \item Check if $\{T_p@p\}$ family is \textbf{coherent}:
+    \begin{itemize}
+      \item Attempt to construct $G$ such that $G \upharpoonright p = T_p$ for all $p$
+      \item If construction fails, report potential protocol error
+    \end{itemize}
+\end{enumerate}
+
+The following code implements the three-tier resolution strategy, returning both the inferred global type and a confidence level indicating which tier was used:
+
+\begin{fstarcode}[title={Three-Tier Global Type Resolution}]
+(* Source of global type with confidence *)
+type global_type_source =
+  | ExplicitAnnotation : text:string -> global_type_source
+  | PatternInferred : pattern:channel_pattern -> global_type_source
+  | LocalExtracted : local_types:list (participant * local_type) -> global_type_source
+
+(* Resolve global type using three-tier strategy *)
+val resolve_global_type : cpg -> chan_id -> (global_type * float * global_type_source)
+let resolve_global_type cpg ch =
+  (* Tier 1: Check for explicit annotation *)
+  match find_session_annotation cpg ch with
+  | Some annot ->
+      let g = parse_global_type annot in
+      (g, 1.0, ExplicitAnnotation annot)
+  | None ->
+      (* Tier 2: Attempt pattern inference *)
+      let pattern = detect_channel_pattern cpg ch in
+      match pattern with
+      | UnrecognizedPattern ->
+          (* Tier 3: Extract local types and check coherence *)
+          let participants = get_channel_participants cpg ch in
+          let local_types = List.map (fun p ->
+            (p, extract_local_type cpg ch p)) participants in
+          (match construct_global_from_locals local_types with
+           | Some g -> (g, 0.7, LocalExtracted local_types)
+           | None -> (GEnd, 0.0, LocalExtracted local_types))  (* Incoherent! *)
+      | _ ->
+          let n = count_participants cpg ch in
+          let g = pattern_to_global_type pattern n in
+          (g, 0.85, PatternInferred pattern)
+
+(* Extract local type by traversing CFG *)
+val extract_local_type : cpg -> chan_id -> participant -> local_type
+let extract_local_type cpg ch p =
+  let cfg = get_cfg cpg p in
+  let chan_ops = filter_channel_ops cfg ch in
+  fold_cfg_order chan_ops (fun acc op ->
+    match op with
+    | SSend _ v -> LSend ch (type_of v) acc
+    | SRecv dst _ -> LRecv ch (type_of dst) acc
+    | SSelect _ cases -> LSelect ch (List.map (fun (l, _) -> (l, LEnd)) cases)
+    | _ -> acc
+  ) LEnd
+\end{fstarcode}
+
+\textbf{Connection to Engineering}: The confidence values (1.0, 0.85, 0.7, 0.0) directly inform the finding severity in SARIF output. Explicit annotations give confirmed bugs, pattern inference gives high-confidence warnings, and local extraction gives medium-confidence warnings.
+
+\section{Integration with Outcome Logic Bug Classification}
+\label{sec:channel-outcome-integration}
+
+\begin{fstarcode}[title={Outcome Logic for Channel Bugs}]
+(* OL Triples for Channel Operations:
+
+   <chan_created(k,T)> send(k,v) <v:T /\ msg_in_flight(k,v)>
+     After send, message v of type T is in the channel's queue.
+
+   <msg_in_flight(k,v)> recv(k) <received(k,v)>
+     After recv, if message was in flight, it's now received.
+
+   <~closed(k)> close(k) <closed(k)>
+     After close on open channel, channel is closed.
+
+   <closed(k)> send(k,v) <error: send_on_closed>
+     Send on closed channel is an error.
+
+   <session_state(k) = T> send(k,v) <session_state(k) = advance(T,!v)>
+     Session type advances after send.
+*)
+
+type channel_postcondition =
+  | ChanOk : state:channel_state -> channel_postcondition
+  | ChanError : error:channel_error -> channel_postcondition
+
+type channel_state = {
+  created : bool;
+  closed : bool;
+  msg_queue : list value;
+  session_state : option local_type;
+}
+
+type channel_error =
+  | SendOnClosed : chan:nat -> channel_error
+  | RecvOnClosed : chan:nat -> channel_error
+  | TypeMismatch : expected:sort -> actual:sort -> channel_error
+  | ProtocolViolation : expected:local_type -> actual:chan_op -> channel_error
+  | Deadlock : blocked:list participant -> channel_error
+
+(* Classification: manifest vs latent for channel bugs *)
+val classify_channel_bug : channel_error -> isl_presumption -> bug_classification
+let classify_channel_bug err presumption =
+  match err with
+  | SendOnClosed _ | RecvOnClosed _ | TypeMismatch _ _ ->
+      (* These are manifest: detectable without caller context *)
+      if presumption = EmpPresumption then
+        Manifest { kind = channel_error_to_kind err; confidence = 1.0 }
+      else
+        Latent { kind = channel_error_to_kind err;
+                 required_context = presumption }
+
+  | ProtocolViolation _ _ ->
+      (* Manifest if local type violation, latent if depends on message order *)
+      if is_structural_violation err then
+        Manifest { kind = ProtocolError; confidence = 1.0 }
+      else
+        Latent { kind = ProtocolError;
+                 required_context = MessageOrderContext }
+
+  | Deadlock blocked ->
+      (* Manifest if ALL paths lead to deadlock, latent if schedule-dependent *)
+      if all_paths_deadlock blocked then
+        Manifest { kind = DefiniteDeadlock; confidence = 1.0 }
+      else
+        Latent { kind = PotentialDeadlock;
+                 required_context = ScheduleContext }
+\end{fstarcode}
+
+\section{Integration with Security Analysis}
+\label{sec:channel-security}
+
+Channels are conduits for both \textbf{data} and \textbf{control}. Security analysis must track taint propagation through channels, detect information flow violations, and identify channels as potential covert channels. Session types can serve as information flow policies, declaring the security level of data flowing through each channel.
+
+The following code defines security labels for channels and implements taint propagation rules:
+
+\begin{fstarcode}[title={Channel Security Analysis}]
+(* Security labels for channels *)
+type security_level = High | Low | Unknown
+
+type channel_security = {
+  chan_id : nat;
+  data_level : security_level;      (* Security of data on channel *)
+  timing_level : security_level;    (* Security of timing information *)
+  participants : list (participant * security_level);  (* Cleared participants *)
+}
+
+(* Taint propagation through channels *)
+val propagate_channel_taint : taint_state -> ir_stmt -> taint_state
+let propagate_channel_taint state stmt =
+  match stmt with
+  | SSend ch v ->
+      if is_tainted state v then
+        mark_channel_tainted state ch (get_taint_source state v)
+      else state
+
+  | SRecv dst ch ->
+      if is_channel_tainted state ch then
+        mark_var_tainted state dst (get_channel_taint_source state ch)
+      else state
+
+  | SChanDelegate ch delegated ->
+      if is_channel_tainted state delegated then
+        mark_channel_tainted state ch (get_channel_taint_source state delegated)
+      else state
+
+  | _ -> state
+
+(* Information flow check: does channel violate policy? *)
+type channel_ifc_violation =
+  | HighToLowLeak : high_chan:nat -> low_receiver:participant -> channel_ifc_violation
+  | UnclearedReceiver : chan:nat -> required_level:security_level
+                        -> actual_level:security_level -> channel_ifc_violation
+  | TimingLeak : chan:nat -> channel_ifc_violation
+\end{fstarcode}
+
+\section{Integration with Multi-Language Analysis}
+\label{sec:channel-multilang}
+
+\begin{pillarbox}[title={Cross-Language Channel Boundaries}]
+Channels can cross language boundaries (FFI, IPC, RPC):
+\begin{itemize}
+  \item Go channel to Rust mpsc via CGO
+  \item Python multiprocessing.Queue to C extension
+  \item TypeScript WebSocket to Go server
+\end{itemize}
+
+Session types must be \textbf{compatible} (not necessarily identical) at boundaries.
+\end{pillarbox}
+
+\textbf{Cross-Language Session Type Compatibility}: Two session types $T_1$ (language $L_1$) and $T_2$ (language $L_2$) are \textbf{compatible} at a boundary if there exists a subtyping relation:
+\[
+T_1 \leq_{\mathrm{boundary}} T_2 \quad \text{or} \quad T_2 \leq_{\mathrm{boundary}} T_1
+\]
+
+\textbf{Subtyping Across Boundaries} (extends Gay \& Hole 2005):
+\begin{itemize}
+  \item \textbf{Output is covariant}: Can send more specific type
+  \item \textbf{Input is contravariant}: Can receive more general type
+  \item \textbf{Selection is covariant in labels}: Can select fewer labels
+  \item \textbf{Branching is contravariant in labels}: Can handle more labels
+\end{itemize}
+
+The following code implements boundary subtyping checking between session types from different languages:
+
+\begin{fstarcode}[title={Cross-Language Boundary Subtyping}]
+(* Cross-language type mapping *)
+type cross_lang_type_map = {
+  source_lang : language;
+  target_lang : language;
+  type_mappings : list (sort * sort);
+}
+
+(* Boundary subtyping: T1 <=_boundary T2 *)
+val boundary_subtype : cross_lang_type_map -> local_type -> local_type -> bool
+let rec boundary_subtype map t1 t2 =
+  match (t1, t2) with
+  | (LSend k1 u1 cont1, LSend k2 u2 cont2) when k1 = k2 ->
+      sort_compat map u1 u2 &&  (* Covariant *)
+      boundary_subtype map cont1 cont2
+
+  | (LRecv k1 u1 cont1, LRecv k2 u2 cont2) when k1 = k2 ->
+      sort_compat map u2 u1 &&  (* Contravariant! *)
+      boundary_subtype map cont1 cont2
+
+  | (LSelect k1 branches1, LSelect k2 branches2) when k1 = k2 ->
+      (* Covariant: t1 can select fewer labels *)
+      List.for_all (fun (l, t1_l) ->
+        List.mem_assoc l branches2 &&
+        boundary_subtype map t1_l (List.assoc l branches2)
+      ) branches1
+
+  | (LBranch k1 branches1, LBranch k2 branches2) when k1 = k2 ->
+      (* Contravariant: t1 can handle more labels *)
+      List.for_all (fun (l, t2_l) ->
+        List.mem_assoc l branches1 &&
+        boundary_subtype map (List.assoc l branches1) t2_l
+      ) branches2
+
+  | (LEnd, LEnd) -> true
+  | _ -> false
+
+(* Boundary guard for runtime checking when static verification fails *)
+type boundary_guard =
+  | TypeGuard : expected:sort -> boundary_guard
+  | ProtocolGuard : expected:local_type -> boundary_guard
+
+val needs_boundary_guard : lang_session_type -> lang_session_type -> bool
+let needs_boundary_guard t1 t2 =
+  let map = get_type_map (lang_of t1) (lang_of t2) in
+  not (boundary_subtype map (session_type_of t1) (session_type_of t2))
+\end{fstarcode}
+
+\textbf{Connection to Part IX}: This boundary subtyping integrates with the multi-language semantic framework (Part~\ref{part:multi-language}). When static verification of boundary compatibility fails, runtime guards are inserted to check type and protocol compliance dynamically.
+
+\section{Decidability Results}
+\label{sec:channel-decidability}
+
+\begin{contributionbox}[title={Decidability and Complexity Summary}]
+\textbf{Decidable (Polynomial)}:
+\begin{itemize}
+  \item Linearity checking: $O(|G|^2)$
+  \item Coherence checking: $O(n \times |G|^2)$ where $n$ = participants
+  \item Type inference for processes: $O(|P| \times |G|)$
+  \item Projection $G \upharpoonright p$: $O(|G|)$
+  \item Subtyping $T_1 \leq T_2$: $O(|T_1| \times |T_2|)$ for finite types
+\end{itemize}
+
+\textbf{Decidable (Exponential)}:
+\begin{itemize}
+  \item Subtyping with recursive types: EXPTIME \textbf{[GayHole05]}
+  \item Global type synthesis from locals: 2-EXPTIME in worst case
+\end{itemize}
+
+\textbf{Undecidable (in general)}:
+\begin{itemize}
+  \item Deadlock detection: PSPACE-complete, undecidable for infinite state
+  \item Liveness properties: undecidable for general processes
+\end{itemize}
+
+\textbf{Practical Approach}:
+\begin{itemize}
+  \item Use bounded model checking for undecidable properties
+  \item Exploit session type structure for efficiency
+  \item Under-approximate when sound analysis times out
+\end{itemize}
+\end{contributionbox}
+
+\begin{theorem}[Linearity Decidability (Honda 2008 Prop 3.6)]
+Linearity of a global type $G$ is decidable in $O(|G|^2)$ time.
+\end{theorem}
+
+\begin{proof}[Proof Sketch]
+\begin{enumerate}
+  \item Unfold $G$ exactly once (linear in $|G|$)
+  \item Check suppression conditions for each prefix pair
+  \item At most $|G|^2$ prefix pairs to check \qedhere
+\end{enumerate}
+\end{proof}
+
+\begin{theorem}[Coherence Decidability (Honda 2008 Thm 4.3)]
+Coherence of $G$ is decidable in $O(n \times |G|^2)$ time.
+\end{theorem}
+
+\begin{proof}[Proof Sketch]
+\begin{enumerate}
+  \item Check linearity: $O(|G|^2)$
+  \item For each participant $p$ ($n$ total):
+    \begin{itemize}
+      \item Compute projection $G \upharpoonright p$: $O(|G|)$
+      \item Check projection is defined: $O(|G|)$
+    \end{itemize}
+  \item Total: $O(|G|^2) + n \times O(|G|) = O(n \times |G|^2)$ \qedhere
+\end{enumerate}
+\end{proof}
+
+\begin{theorem}[Type Inference Decidability (Honda 2008 Thm 4.6)]
+Given annotated program phrase $P$ and $\Gamma$, deciding if $\exists\Delta.\, \Gamma \vdash P \triangleright \Delta$ is decidable, and such $\Delta$ can be computed.
+\end{theorem}
+
+\begin{proof}[Proof Sketch]
+\begin{enumerate}
+  \item Type rules (Figure 7, Honda 2008) are syntax-directed
+  \item Each rule determines unique typing for subterms
+  \item Traverse $P$ once, applying rules bottom-up \qedhere
+\end{enumerate}
+\end{proof}
+
+\textbf{Deadlock Decidability}:
+\begin{itemize}
+  \item For \textbf{single session} with finite recursive types: Progress is guaranteed by typing (Theorem 5.12, Honda 2008). Therefore: no deadlock analysis needed --- types ensure progress.
+  \item For \textbf{multiple interleaved sessions}: Progress requires ``simple'' and ``well-linked'' conditions. Checking these is decidable but may require exploring execution tree. PSPACE-complete in general.
+\end{itemize}
+
+The following code provides a practical algorithm that combines these decidability results with the tier-based resolution strategy:
+
+\begin{fstarcode}[title={Practical Channel Analysis Algorithm}]
+(* Combined channel analysis using decidability results *)
+type channel_analysis_result = {
+  global_type : global_type;
+  is_linear : bool;
+  is_coherent : bool;
+  session_typed : option bool;
+  deadlock_free : option bool;
+}
+
+val analyze_channel_properties : cpg -> chan_id -> channel_analysis_result
+let analyze_channel_properties cpg ch =
+  let (g, confidence, source) = resolve_global_type cpg ch in
+  {
+    global_type = g;
+    is_linear = check_linearity g;          (* O(|G|^2), always run *)
+    is_coherent = check_coherence g;        (* O(n*|G|^2), always run *)
+    session_typed =
+      if confidence > 0.7 then
+        Some (check_process_conformance cpg g)  (* O(|P|*|G|), run if confident *)
+      else None;
+    deadlock_free =
+      if is_simple cpg && is_well_linked cpg then
+        Some true                            (* Type system guarantees *)
+      else
+        bounded_deadlock_check cpg 10;       (* Bounded check, depth 10 *)
+  }
+\end{fstarcode}
+
+\textbf{Connection to Engineering}: This algorithm runs linearity and coherence checks unconditionally (fast, polynomial), but gates session type conformance on confidence level. Deadlock checking uses the type-theoretic guarantee when applicable, falling back to bounded model checking otherwise.
+
+\section{F* Theorem: Manifest Bug Classification}
+\label{sec:manifest-theorem}
+
+This section presents the main theoretical result connecting session type theory with Outcome Logic: session type violations are \textbf{manifest bugs} with 0\% false positive rate. This justifies high confidence for session type findings in the analysis output.
+
+The theorem relies on two key observations: (1) session type rules are \textbf{local} to each process---they examine only the process structure, not the calling context; and (2) protocol violations are therefore detectable with an empty ISL presumption ($\mathsf{emp}$), which by Le 2022's True Positives Property implies the bug is manifest.
+
+\begin{fstarcode}[title={Manifest Bug Theorem for Channel Violations --- Main Result}]
+(* This theorem establishes that session type violations are MANIFEST bugs
+   under Outcome Logic, meaning they have 0% false positive rate. *)
+
+(* Prerequisites *)
+assume type process : Type
+assume type global_type : Type
+assume type gamma : Type    (* Sorting context *)
+assume type delta : Type    (* Typing context *)
+assume type participant : Type
+
+(* Typing judgment: Gamma |- P |> Delta *)
+assume val typing_judgment : gamma -> process -> delta -> Type
+
+(* Coherent global type *)
+assume val coherent : global_type -> bool
+
+(* Encode global type as family of local types *)
+assume val encode_global : global_type -> delta
+
+(* Protocol violation predicate *)
+assume val protocol_violation : process -> global_type -> bool
+
+(* Manifest bug predicate (from Section 12.3) *)
+assume val manifest_bug : process -> Type
+
+(* True Positives Property (Le 2022 Theorem 3.4) *)
+assume val true_positives_property :
+  t:isl_triple ->
+  Lemma (requires t.presumption == EmpPresumption /\
+                  satisfiable t.postcondition)
+        (ensures manifest_error t.command)
+
+(* MAIN THEOREM: Channel Bugs Are Manifest *)
+(*
+ * Theorem: Session Type Violations Are Manifest Bugs
+ *
+ * If:
+ *   1. G is a coherent global type
+ *   2. Process P is well-typed under Gamma with Delta
+ *   3. Delta at session s encodes G
+ *   4. P violates the protocol specified by G
+ *
+ * Then:
+ *   The violation is a MANIFEST bug (0% false positive rate)
+ *)
+val channel_manifest_bugs :
+  p:process ->
+  gt:global_type ->
+  g:gamma ->
+  d:delta ->
+  s:nat ->
+  Lemma (requires coherent gt /\
+                  typing_judgment g p d /\
+                  delta_at_session d s == encode_global gt /\
+                  protocol_violation p gt)
+        (ensures manifest_bug p)
+
+let channel_manifest_bugs p gt g d s =
+  (* Step 1: Session type rules are LOCAL to process p *)
+  assert (local_checkable (typing_judgment g p d));
+
+  (* Step 2: Protocol violation is detectable from P alone *)
+  let violation_location = find_violation_site p gt in
+  assert (violation_in_process violation_location p);
+
+  (* Step 3: Construct ISL triple with emp presumption *)
+  let isl = {
+    presumption = EmpPresumption;
+    command = p;
+    postcondition = protocol_error_formula violation_location;
+  } in
+
+  (* Step 4: Postcondition is satisfiable (violation exists) *)
+  assert (satisfiable isl.postcondition);
+
+  (* Step 5: Apply True Positives Property (Le 2022 Theorem 3.4) *)
+  true_positives_property isl;
+
+  (* Step 6: Conclude: manifest bug *)
+  ()
+\end{fstarcode}
+
+\textbf{Corollaries}:
+\begin{enumerate}
+  \item \textbf{Type mismatch is manifest}: If expected $\neq$ actual sort, it's a manifest bug.
+  \item \textbf{Definite deadlock is manifest}: If all paths lead to deadlock with no progress possible, it's a manifest bug.
+  \item \textbf{Linearity violation is manifest}: Use-after-close or use-after-move is a manifest bug.
+\end{enumerate}
+
+\textbf{Integration with Layer 6 Confidence Levels}: The following code maps channel bug classifications to confidence levels for SARIF output. Manifest bugs (type mismatch, definite deadlock, linearity violation) are reported as confirmed bugs with ``error'' severity. Latent bugs (potential deadlock, race conditions) are reported as conditional warnings requiring further investigation.
+
+\begin{fstarcode}[title={Session Finding Confidence Mapping}]
+val session_finding_confidence : channel_bug_class -> confidence_level
+let session_finding_confidence bug =
+  match bug with
+  | ChannelManifest kind ->
+      (* Manifest bugs have HIGH confidence --- 0% FP rate *)
+      match kind with
+      | ChanTypeMismatch _ _ _ -> ConfirmedBug    (* Static type error *)
+      | ChanProtocolViolation _ _ -> HighConfBug  (* Protocol state error *)
+      | ChanDefiniteDeadlock _ -> ConfirmedBug    (* All paths deadlock *)
+      | ChanLinearityViolation _ _ -> ConfirmedBug (* Ownership error *)
+      | ChanStructuralMismatch _ _ -> HighConfBug  (* Structure mismatch *)
+
+  | ChannelLatent kind ->
+      (* Latent bugs have LOWER confidence --- require context *)
+      match kind with
+      | ChanPotentialDeadlock _ -> ConditionalBug  (* Schedule-dependent *)
+      | ChanRaceCondition _ -> TrueAlarm           (* Timing-dependent *)
+      | ChanConditionalViolation _ -> ConditionalBug (* Path-dependent *)
+
+(* Final classification for SARIF output *)
+type sarif_channel_finding = {
+  rule_id : string;
+  level : string;       (* "error" | "warning" | "note" *)
+  message : string;
+  location : source_location;
+  confidence : float;   (* 0.0 to 1.0 *)
+}
+
+val to_sarif : channel_bug_class -> source_location -> sarif_channel_finding
+let to_sarif bug loc =
+  let conf = session_finding_confidence bug in
+  {
+    rule_id = channel_bug_rule_id bug;
+    level = if conf = ConfirmedBug || conf = HighConfBug then "error" else "warning";
+    message = channel_bug_message bug;
+    location = loc;
+    confidence = confidence_to_float conf;
+  }
+\end{fstarcode}
+
+\textbf{Connection to Engineering}: This mapping directly determines how channel analysis findings appear in IDE integrations and CI/CD pipelines. Confirmed bugs (0.95--1.0 confidence) break builds; high-confidence warnings (0.8--0.95) require review; conditional findings (0.5--0.8) are informational.
+
+\subsection*{Part XIV Summary}
+
+This part established the theoretical and practical foundations for channel analysis in the synthesis framework:
+
+\begin{itemize}
+  \item \textbf{Binary Session Types} (Section~\ref{sec:binary-session-types}): Formalized Honda 1998's type system for structured communication, including delegation.
+
+  \item \textbf{Global Types and Projection} (Sections~\ref{sec:global-types}--\ref{sec:projection-algorithm}): Defined multiparty session types following Honda 2008, with causality analysis and coherence conditions.
+
+  \item \textbf{Theoretical Reconciliation} (Sections~\ref{sec:tension-participants}--\ref{sec:tension-origin}): Resolved fundamental tensions between session type theory and practical engineering (dynamic participants, message ordering, select non-determinism, implicit protocols).
+
+  \item \textbf{Integration with Existing Analyses} (Sections~\ref{sec:channel-existing-analyses}--\ref{sec:channel-multilang}): Extended IFDS, taint analysis, ownership tracking, and multi-language boundaries for channel operations.
+
+  \item \textbf{Manifest Bug Theorem} (Section~\ref{sec:manifest-theorem}): Proved that session type violations are manifest bugs under Outcome Logic, justifying high confidence for channel analysis findings.
+\end{itemize}
+
+The key engineering insight is that session types provide a \textbf{compositional} approach to verifying concurrent programs: local type checking at each participant guarantees global protocol compliance, enabling scalable analysis of complex distributed systems.

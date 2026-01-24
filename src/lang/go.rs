@@ -12,8 +12,10 @@
 //! - Named return values
 //! - Doc comments (// style preceding declarations)
 
-use std::collections::HashMap;
 use std::sync::LazyLock;
+
+use rustc_hash::FxHashMap;
+
 use tree_sitter::{Node, Parser, Tree};
 
 use aho_corasick::AhoCorasick;
@@ -22,7 +24,7 @@ use phf::phf_map;
 use crate::ast::types::{ClassInfo, FunctionInfo, ImportInfo};
 use crate::cfg::types::{BlockId, BlockType, CFGBlock, CFGEdge, CFGInfo, EdgeType};
 use crate::dfg::types::{DFGInfo, DataflowEdge, DataflowKind};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::traits::Language;
 
 // =========================================================================
@@ -440,7 +442,7 @@ impl Go {
     /// - recover() only works inside a deferred function
     /// - Named return values can be modified by deferred functions
     fn build_go_cfg(&self, node: Node, source: &[u8], func_name: &str) -> CFGInfo {
-        let mut blocks = HashMap::new();
+        let mut blocks = FxHashMap::default();
         let mut edges = Vec::new();
         let mut block_id = 0;
         let mut exits = Vec::new();
@@ -555,7 +557,7 @@ impl Go {
             exits,
             decision_points,
             comprehension_decision_points: 0, // Go doesn't have Python-style comprehensions
-            nested_cfgs: HashMap::new(), // TODO: Handle Go closures/anonymous functions as nested CFGs
+            nested_cfgs: FxHashMap::default(), // TODO: Handle Go closures/anonymous functions as nested CFGs
             is_async: false,             // Go uses goroutines, not async/await
             await_points: 0,             // Go doesn't have await
             blocking_calls: Vec::new(),  // Go doesn't have async context blocking detection
@@ -574,7 +576,7 @@ impl Go {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
@@ -991,7 +993,7 @@ impl Go {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
@@ -1150,7 +1152,7 @@ impl Go {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
@@ -1278,7 +1280,7 @@ impl Go {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
@@ -1374,7 +1376,7 @@ impl Go {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
@@ -1477,7 +1479,7 @@ impl Go {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
@@ -1657,7 +1659,7 @@ impl Go {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
@@ -2009,8 +2011,8 @@ impl Go {
     /// Build DFG for Go function.
     fn build_go_dfg(&self, node: Node, source: &[u8], func_name: &str) -> DFGInfo {
         let mut edges = Vec::new();
-        let mut definitions: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut uses: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut definitions: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+        let mut uses: FxHashMap<String, Vec<usize>> = FxHashMap::default();
 
         // Extract parameters as definitions
         if let Some(params) = self.child_by_field(node, "parameters") {
@@ -2050,8 +2052,8 @@ impl Go {
         node: Node,
         source: &[u8],
         edges: &mut Vec<DataflowEdge>,
-        definitions: &mut HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         let mut cursor = node.walk();
 
@@ -2175,7 +2177,7 @@ impl Go {
         source: &[u8],
         line: usize,
         edges: &mut Vec<DataflowEdge>,
-        definitions: &mut HashMap<String, Vec<usize>>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
     ) {
         match node.kind() {
             "identifier" => {
@@ -2207,8 +2209,8 @@ impl Go {
         source: &[u8],
         line: usize,
         edges: &mut Vec<DataflowEdge>,
-        definitions: &HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         match node.kind() {
             "identifier" => {
@@ -2264,8 +2266,8 @@ impl Go {
         source: &[u8],
         line: usize,
         edges: &mut Vec<DataflowEdge>,
-        definitions: &mut HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -2294,7 +2296,7 @@ impl Go {
         source: &[u8],
         line: usize,
         edges: &mut Vec<DataflowEdge>,
-        definitions: &mut HashMap<String, Vec<usize>>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
     ) {
         match node.kind() {
             "identifier" => {
@@ -2337,8 +2339,8 @@ impl Go {
         source: &[u8],
         line: usize,
         edges: &mut Vec<DataflowEdge>,
-        definitions: &HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -2357,8 +2359,8 @@ impl Go {
         source: &[u8],
         line: usize,
         edges: &mut Vec<DataflowEdge>,
-        definitions: &HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         match node.kind() {
             "identifier" => {
@@ -2407,8 +2409,8 @@ impl Go {
         source: &[u8],
         line: usize,
         edges: &mut Vec<DataflowEdge>,
-        definitions: &HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         // send_statement: channel <- value
         if let Some(channel) = self.child_by_field(node, "channel") {
@@ -2444,8 +2446,8 @@ impl Go {
         source: &[u8],
         line: usize,
         edges: &mut Vec<DataflowEdge>,
-        definitions: &HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         // unary_expression with <- operator: <-ch
         if let Some(operand) = self.child_by_field(node, "operand") {
@@ -2479,8 +2481,8 @@ impl Go {
         source: &[u8],
         line: usize,
         edges: &mut Vec<DataflowEdge>,
-        definitions: &HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         // defer statement contains a call expression
         let mut cursor = node.walk();
@@ -2499,8 +2501,8 @@ impl Go {
         source: &[u8],
         line: usize,
         edges: &mut Vec<DataflowEdge>,
-        definitions: &HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         // Extract function being deferred
         if let Some(func) = self.child_by_field(node, "function") {
@@ -2536,8 +2538,8 @@ impl Go {
         source: &[u8],
         line: usize,
         edges: &mut Vec<DataflowEdge>,
-        definitions: &HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         // type_assertion_expression: operand.(type)
         if let Some(operand) = self.child_by_field(node, "operand") {
@@ -2592,7 +2594,7 @@ impl Go {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
@@ -2742,7 +2744,7 @@ impl Go {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
@@ -3267,7 +3269,7 @@ impl Go {
         }
 
         let module = path?;
-        let mut aliases = HashMap::new();
+        let mut aliases = FxHashMap::default();
 
         if let Some(alias) = alias_name {
             aliases.insert(module.clone(), alias);

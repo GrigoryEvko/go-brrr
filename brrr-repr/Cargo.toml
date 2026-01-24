@@ -1,0 +1,34 @@
+[package]
+name = "brrr-repr"
+version = "0.1.0"
+edition = "2021"
+description = "Binary and text representation formats for brrr-lang IR"
+license = "Apache-2.0"
+repository = "https://github.com/GrigoryEvko/go-brrr"
+keywords = ["ir", "serialization", "brrr", "encoding"]
+categories = ["encoding", "data-structures"]
+rust-version = "1.70"
+
+[dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+
+# String interning - 4-byte Spur keys
+lasso = { version = "0.7", features = ["multi-threaded", "ahasher", "serialize"] }
+
+# SIMD-accelerated hashing (xxh3) for content addressing
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+# Error handling
+thiserror = "2"
+
+[dev-dependencies]
+pretty_assertions = "1"
+
+[lints.rust]
+unsafe_code = "warn"
+missing_docs = "allow"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }

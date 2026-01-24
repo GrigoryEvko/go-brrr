@@ -41,29 +41,50 @@ fn add_sql_sinks(registry: &mut SinkRegistry) {
     // database/sql standard library
     registry.add(Sink::sql("db.Query", "database/sql db.Query()"));
     registry.add(Sink::sql("db.QueryRow", "database/sql db.QueryRow()"));
-    registry.add(Sink::sql("db.QueryContext", "database/sql db.QueryContext()"));
-    registry.add(Sink::sql("db.QueryRowContext", "database/sql db.QueryRowContext()"));
+    registry.add(Sink::sql(
+        "db.QueryContext",
+        "database/sql db.QueryContext()",
+    ));
+    registry.add(Sink::sql(
+        "db.QueryRowContext",
+        "database/sql db.QueryRowContext()",
+    ));
     registry.add(Sink::sql("db.Exec", "database/sql db.Exec()"));
     registry.add(Sink::sql("db.ExecContext", "database/sql db.ExecContext()"));
 
     // Transaction methods
     registry.add(Sink::sql("tx.Query", "database/sql tx.Query()"));
     registry.add(Sink::sql("tx.QueryRow", "database/sql tx.QueryRow()"));
-    registry.add(Sink::sql("tx.QueryContext", "database/sql tx.QueryContext()"));
-    registry.add(Sink::sql("tx.QueryRowContext", "database/sql tx.QueryRowContext()"));
+    registry.add(Sink::sql(
+        "tx.QueryContext",
+        "database/sql tx.QueryContext()",
+    ));
+    registry.add(Sink::sql(
+        "tx.QueryRowContext",
+        "database/sql tx.QueryRowContext()",
+    ));
     registry.add(Sink::sql("tx.Exec", "database/sql tx.Exec()"));
     registry.add(Sink::sql("tx.ExecContext", "database/sql tx.ExecContext()"));
 
     // Prepared statements
     registry.add(Sink::sql("db.Prepare", "database/sql db.Prepare()"));
-    registry.add(Sink::sql("db.PrepareContext", "database/sql db.PrepareContext()"));
+    registry.add(Sink::sql(
+        "db.PrepareContext",
+        "database/sql db.PrepareContext()",
+    ));
     registry.add(Sink::sql("stmt.Query", "database/sql stmt.Query()"));
     registry.add(Sink::sql("stmt.QueryRow", "database/sql stmt.QueryRow()"));
     registry.add(Sink::sql("stmt.Exec", "database/sql stmt.Exec()"));
 
     // Connection methods
-    registry.add(Sink::sql("conn.QueryContext", "database/sql conn.QueryContext()"));
-    registry.add(Sink::sql("conn.ExecContext", "database/sql conn.ExecContext()"));
+    registry.add(Sink::sql(
+        "conn.QueryContext",
+        "database/sql conn.QueryContext()",
+    ));
+    registry.add(Sink::sql(
+        "conn.ExecContext",
+        "database/sql conn.ExecContext()",
+    ));
 
     // sqlx (popular extension)
     registry.add(Sink::sql("sqlx.Get", "sqlx Get()"));
@@ -75,24 +96,19 @@ fn add_sql_sinks(registry: &mut SinkRegistry) {
     registry.add(Sink::sql("sqlx.NamedExec", "sqlx NamedExec()"));
     registry.add(Sink::sql("db.GetContext", "sqlx db.GetContext()"));
     registry.add(Sink::sql("db.SelectContext", "sqlx db.SelectContext()"));
-    registry.add(Sink::sql("db.NamedExecContext", "sqlx db.NamedExecContext()"));
+    registry.add(Sink::sql(
+        "db.NamedExecContext",
+        "sqlx db.NamedExecContext()",
+    ));
 
     // GORM
     registry.add(Sink::sql("db.Raw", "GORM db.Raw()").with_severity(9));
     registry.add(Sink::sql("db.Exec", "GORM db.Exec()"));
     registry.add(Sink::sql("db.Where", "GORM db.Where() (string form)").with_severity(7));
-    registry.add(
-        Sink::sql("db.Order", "GORM db.Order() (string form)").with_severity(6),
-    );
-    registry.add(
-        Sink::sql("db.Group", "GORM db.Group() (string form)").with_severity(6),
-    );
-    registry.add(
-        Sink::sql("db.Having", "GORM db.Having() (string form)").with_severity(7),
-    );
-    registry.add(
-        Sink::sql("db.Joins", "GORM db.Joins() (string form)").with_severity(7),
-    );
+    registry.add(Sink::sql("db.Order", "GORM db.Order() (string form)").with_severity(6));
+    registry.add(Sink::sql("db.Group", "GORM db.Group() (string form)").with_severity(6));
+    registry.add(Sink::sql("db.Having", "GORM db.Having() (string form)").with_severity(7));
+    registry.add(Sink::sql("db.Joins", "GORM db.Joins() (string form)").with_severity(7));
 
     // Ent ORM
     registry.add(Sink::sql("client.Exec", "Ent client.Exec()"));
@@ -114,7 +130,10 @@ fn add_sql_sinks(registry: &mut SinkRegistry) {
 fn add_command_sinks(registry: &mut SinkRegistry) {
     // os/exec package
     registry.add(Sink::command("exec.Command", "exec.Command()"));
-    registry.add(Sink::command("exec.CommandContext", "exec.CommandContext()"));
+    registry.add(Sink::command(
+        "exec.CommandContext",
+        "exec.CommandContext()",
+    ));
     registry.add(Sink::command("cmd.Run", "cmd.Run()"));
     registry.add(Sink::command("cmd.Output", "cmd.Output()"));
     registry.add(Sink::command("cmd.CombinedOutput", "cmd.CombinedOutput()"));
@@ -155,43 +174,29 @@ fn add_path_sinks(registry: &mut SinkRegistry) {
 
     // io/ioutil (deprecated but still used)
     registry.add(
-        Sink::path("ioutil.ReadFile", "ioutil.ReadFile() (deprecated)")
-            .with_tag("deprecated"),
+        Sink::path("ioutil.ReadFile", "ioutil.ReadFile() (deprecated)").with_tag("deprecated"),
     );
     registry.add(
-        Sink::path("ioutil.WriteFile", "ioutil.WriteFile() (deprecated)")
-            .with_tag("deprecated"),
+        Sink::path("ioutil.WriteFile", "ioutil.WriteFile() (deprecated)").with_tag("deprecated"),
     );
-    registry.add(
-        Sink::path("ioutil.ReadDir", "ioutil.ReadDir() (deprecated)")
-            .with_tag("deprecated"),
-    );
+    registry
+        .add(Sink::path("ioutil.ReadDir", "ioutil.ReadDir() (deprecated)").with_tag("deprecated"));
 
     // filepath package
-    registry.add(
-        Sink::path("filepath.Join", "filepath.Join() path construction")
-            .with_severity(5),
-    );
+    registry.add(Sink::path("filepath.Join", "filepath.Join() path construction").with_severity(5));
     registry.add(Sink::path("filepath.Clean", "filepath.Clean()").with_severity(4));
     registry.add(Sink::path("filepath.Abs", "filepath.Abs()").with_severity(4));
 
     // net/http file serving
-    registry.add(
-        Sink::path("http.ServeFile", "http.ServeFile()")
-            .with_dangerous_params(vec![2]),
-    );
+    registry.add(Sink::path("http.ServeFile", "http.ServeFile()").with_dangerous_params(vec![2]));
     registry.add(Sink::path("http.FileServer", "http.FileServer()"));
     registry.add(Sink::path("http.Dir", "http.Dir()").with_severity(7));
 
     // Archive extraction
     registry.add(Sink::path("zip.OpenReader", "zip.OpenReader()").with_severity(7));
     registry.add(Sink::path("tar.NewReader", "tar.NewReader()").with_severity(7));
-    registry.add(
-        Sink::path("archive/zip", "zip extraction").with_severity(8),
-    );
-    registry.add(
-        Sink::path("archive/tar", "tar extraction").with_severity(8),
-    );
+    registry.add(Sink::path("archive/zip", "zip extraction").with_severity(8));
+    registry.add(Sink::path("archive/tar", "tar extraction").with_severity(8));
 
     // Gin static file serving
     registry.add(Sink::path("c.File", "Gin c.File()"));
@@ -220,11 +225,9 @@ fn add_xss_sinks(registry: &mut SinkRegistry) {
     // net/http response writing
     registry.add(Sink::xss("w.Write", "http.ResponseWriter.Write()").with_severity(5));
     registry.add(Sink::xss("w.WriteString", "WriteString() to response").with_severity(5));
-    registry
-        .add(Sink::xss("fmt.Fprintf(w", "fmt.Fprintf() to ResponseWriter").with_severity(5));
+    registry.add(Sink::xss("fmt.Fprintf(w", "fmt.Fprintf() to ResponseWriter").with_severity(5));
     registry.add(Sink::xss("fmt.Fprint(w", "fmt.Fprint() to ResponseWriter").with_severity(5));
-    registry
-        .add(Sink::xss("fmt.Fprintln(w", "fmt.Fprintln() to ResponseWriter").with_severity(5));
+    registry.add(Sink::xss("fmt.Fprintln(w", "fmt.Fprintln() to ResponseWriter").with_severity(5));
     registry.add(Sink::xss("io.WriteString(w", "io.WriteString() to response").with_severity(5));
     registry.add(Sink::xss("io.Copy(w", "io.Copy() to response").with_severity(5));
 
@@ -255,7 +258,10 @@ fn add_ssrf_sinks(registry: &mut SinkRegistry) {
     registry.add(Sink::ssrf("http.PostForm", "http.PostForm()"));
     registry.add(Sink::ssrf("http.Head", "http.Head()"));
     registry.add(Sink::ssrf("http.NewRequest", "http.NewRequest()"));
-    registry.add(Sink::ssrf("http.NewRequestWithContext", "http.NewRequestWithContext()"));
+    registry.add(Sink::ssrf(
+        "http.NewRequestWithContext",
+        "http.NewRequestWithContext()",
+    ));
     registry.add(Sink::ssrf("client.Do", "http.Client.Do()"));
     registry.add(Sink::ssrf("client.Get", "http.Client.Get()"));
     registry.add(Sink::ssrf("client.Post", "http.Client.Post()"));
@@ -284,7 +290,10 @@ fn add_ssrf_sinks(registry: &mut SinkRegistry) {
 
     // WebSocket
     registry.add(Sink::ssrf("websocket.Dial", "websocket.Dial()").with_severity(6));
-    registry.add(Sink::ssrf("websocket.DefaultDialer.Dial", "websocket DefaultDialer.Dial()"));
+    registry.add(Sink::ssrf(
+        "websocket.DefaultDialer.Dial",
+        "websocket DefaultDialer.Dial()",
+    ));
 }
 
 // =============================================================================
@@ -293,60 +302,27 @@ fn add_ssrf_sinks(registry: &mut SinkRegistry) {
 
 fn add_deserialization_sinks(registry: &mut SinkRegistry) {
     // encoding/json (generally safe but included for completeness)
-    registry.add(
-        Sink::new("json.Unmarshal", SinkCategory::Deserialization)
-            .with_severity(4),
-    );
-    registry.add(
-        Sink::new("json.NewDecoder", SinkCategory::Deserialization)
-            .with_severity(4),
-    );
-    registry.add(
-        Sink::new("decoder.Decode", SinkCategory::Deserialization)
-            .with_severity(4),
-    );
+    registry.add(Sink::new("json.Unmarshal", SinkCategory::Deserialization).with_severity(4));
+    registry.add(Sink::new("json.NewDecoder", SinkCategory::Deserialization).with_severity(4));
+    registry.add(Sink::new("decoder.Decode", SinkCategory::Deserialization).with_severity(4));
 
     // encoding/xml (XXE possible depending on configuration)
-    registry.add(
-        Sink::new("xml.Unmarshal", SinkCategory::Deserialization)
-            .with_severity(6),
-    );
-    registry.add(
-        Sink::new("xml.NewDecoder", SinkCategory::Deserialization)
-            .with_severity(6),
-    );
+    registry.add(Sink::new("xml.Unmarshal", SinkCategory::Deserialization).with_severity(6));
+    registry.add(Sink::new("xml.NewDecoder", SinkCategory::Deserialization).with_severity(6));
 
     // encoding/gob (can be dangerous)
-    registry.add(
-        Sink::new("gob.NewDecoder", SinkCategory::Deserialization)
-            .with_severity(7),
-    );
-    registry.add(
-        Sink::new("gob.Decode", SinkCategory::Deserialization)
-            .with_severity(7),
-    );
+    registry.add(Sink::new("gob.NewDecoder", SinkCategory::Deserialization).with_severity(7));
+    registry.add(Sink::new("gob.Decode", SinkCategory::Deserialization).with_severity(7));
 
     // yaml.v2/yaml.v3
-    registry.add(
-        Sink::new("yaml.Unmarshal", SinkCategory::Deserialization)
-            .with_severity(6),
-    );
-    registry.add(
-        Sink::new("yaml.NewDecoder", SinkCategory::Deserialization)
-            .with_severity(6),
-    );
+    registry.add(Sink::new("yaml.Unmarshal", SinkCategory::Deserialization).with_severity(6));
+    registry.add(Sink::new("yaml.NewDecoder", SinkCategory::Deserialization).with_severity(6));
 
     // msgpack
-    registry.add(
-        Sink::new("msgpack.Unmarshal", SinkCategory::Deserialization)
-            .with_severity(5),
-    );
+    registry.add(Sink::new("msgpack.Unmarshal", SinkCategory::Deserialization).with_severity(5));
 
     // protobuf
-    registry.add(
-        Sink::new("proto.Unmarshal", SinkCategory::Deserialization)
-            .with_severity(4),
-    );
+    registry.add(Sink::new("proto.Unmarshal", SinkCategory::Deserialization).with_severity(4));
 }
 
 // =============================================================================
@@ -356,27 +332,20 @@ fn add_deserialization_sinks(registry: &mut SinkRegistry) {
 fn add_redirect_sinks(registry: &mut SinkRegistry) {
     // net/http
     registry.add(
-        Sink::new("http.Redirect", SinkCategory::OpenRedirect)
-            .with_dangerous_params(vec![2]), // url parameter
+        Sink::new("http.Redirect", SinkCategory::OpenRedirect).with_dangerous_params(vec![2]), // url parameter
     );
 
     // Gin
-    registry.add(
-        Sink::new("c.Redirect", SinkCategory::OpenRedirect)
-            .with_dangerous_params(vec![1]),
-    );
+    registry
+        .add(Sink::new("c.Redirect", SinkCategory::OpenRedirect).with_dangerous_params(vec![1]));
 
     // Echo
-    registry.add(
-        Sink::new("c.Redirect", SinkCategory::OpenRedirect)
-            .with_dangerous_params(vec![1]),
-    );
+    registry
+        .add(Sink::new("c.Redirect", SinkCategory::OpenRedirect).with_dangerous_params(vec![1]));
 
     // Fiber
-    registry.add(
-        Sink::new("c.Redirect", SinkCategory::OpenRedirect)
-            .with_dangerous_params(vec![0]),
-    );
+    registry
+        .add(Sink::new("c.Redirect", SinkCategory::OpenRedirect).with_dangerous_params(vec![0]));
 }
 
 // =============================================================================
@@ -385,44 +354,24 @@ fn add_redirect_sinks(registry: &mut SinkRegistry) {
 
 fn add_template_sinks(registry: &mut SinkRegistry) {
     // text/template (no auto-escaping - dangerous)
+    registry.add(Sink::new("text/template.New", SinkCategory::TemplateInjection).with_severity(8));
+    registry
+        .add(Sink::new("text/template.Parse", SinkCategory::TemplateInjection).with_severity(8));
     registry.add(
-        Sink::new("text/template.New", SinkCategory::TemplateInjection)
-            .with_severity(8),
+        Sink::new("text/template.ParseFiles", SinkCategory::TemplateInjection).with_severity(7),
     );
     registry.add(
-        Sink::new("text/template.Parse", SinkCategory::TemplateInjection)
-            .with_severity(8),
+        Sink::new("template.New", SinkCategory::TemplateInjection).with_severity(7), // Could be either text or html
     );
-    registry.add(
-        Sink::new("text/template.ParseFiles", SinkCategory::TemplateInjection)
-            .with_severity(7),
-    );
-    registry.add(
-        Sink::new("template.New", SinkCategory::TemplateInjection)
-            .with_severity(7), // Could be either text or html
-    );
-    registry.add(
-        Sink::new("template.Parse", SinkCategory::TemplateInjection)
-            .with_severity(7),
-    );
-    registry.add(
-        Sink::new("template.ParseFiles", SinkCategory::TemplateInjection)
-            .with_severity(6),
-    );
-    registry.add(
-        Sink::new("template.ParseGlob", SinkCategory::TemplateInjection)
-            .with_severity(6),
-    );
+    registry.add(Sink::new("template.Parse", SinkCategory::TemplateInjection).with_severity(7));
+    registry
+        .add(Sink::new("template.ParseFiles", SinkCategory::TemplateInjection).with_severity(6));
+    registry.add(Sink::new("template.ParseGlob", SinkCategory::TemplateInjection).with_severity(6));
 
     // html/template (auto-escaping but still risky with user templates)
-    registry.add(
-        Sink::new("html/template.New", SinkCategory::TemplateInjection)
-            .with_severity(6),
-    );
-    registry.add(
-        Sink::new("html/template.Parse", SinkCategory::TemplateInjection)
-            .with_severity(6),
-    );
+    registry.add(Sink::new("html/template.New", SinkCategory::TemplateInjection).with_severity(6));
+    registry
+        .add(Sink::new("html/template.Parse", SinkCategory::TemplateInjection).with_severity(6));
 }
 
 // =============================================================================
@@ -440,7 +389,10 @@ fn add_header_sinks(registry: &mut SinkRegistry) {
     registry.add(Sink::header("c.SetCookie", "Gin c.SetCookie()"));
 
     // Echo
-    registry.add(Sink::header("c.Response().Header().Set", "Echo Header().Set()"));
+    registry.add(Sink::header(
+        "c.Response().Header().Set",
+        "Echo Header().Set()",
+    ));
 }
 
 // =============================================================================
@@ -450,11 +402,17 @@ fn add_header_sinks(registry: &mut SinkRegistry) {
 fn add_ldap_sinks(registry: &mut SinkRegistry) {
     // go-ldap
     registry.add(Sink::ldap("conn.Search", "ldap conn.Search()"));
-    registry.add(Sink::ldap("conn.SearchWithPaging", "ldap conn.SearchWithPaging()"));
+    registry.add(Sink::ldap(
+        "conn.SearchWithPaging",
+        "ldap conn.SearchWithPaging()",
+    ));
     registry.add(Sink::ldap("conn.Modify", "ldap conn.Modify()"));
     registry.add(Sink::ldap("conn.Add", "ldap conn.Add()"));
     registry.add(Sink::ldap("conn.Del", "ldap conn.Del()"));
-    registry.add(Sink::ldap("ldap.NewSearchRequest", "ldap.NewSearchRequest()"));
+    registry.add(Sink::ldap(
+        "ldap.NewSearchRequest",
+        "ldap.NewSearchRequest()",
+    ));
 }
 
 // =============================================================================
@@ -495,32 +453,14 @@ fn add_log_sinks(registry: &mut SinkRegistry) {
 
 fn add_unsafe_sinks(registry: &mut SinkRegistry) {
     // unsafe package
-    registry.add(
-        Sink::new("unsafe.Pointer", SinkCategory::MemoryCorruption)
-            .with_severity(9),
-    );
-    registry.add(
-        Sink::new("unsafe.Slice", SinkCategory::MemoryCorruption)
-            .with_severity(9),
-    );
-    registry.add(
-        Sink::new("unsafe.SliceData", SinkCategory::MemoryCorruption)
-            .with_severity(9),
-    );
-    registry.add(
-        Sink::new("unsafe.String", SinkCategory::MemoryCorruption)
-            .with_severity(9),
-    );
-    registry.add(
-        Sink::new("unsafe.StringData", SinkCategory::MemoryCorruption)
-            .with_severity(9),
-    );
+    registry.add(Sink::new("unsafe.Pointer", SinkCategory::MemoryCorruption).with_severity(9));
+    registry.add(Sink::new("unsafe.Slice", SinkCategory::MemoryCorruption).with_severity(9));
+    registry.add(Sink::new("unsafe.SliceData", SinkCategory::MemoryCorruption).with_severity(9));
+    registry.add(Sink::new("unsafe.String", SinkCategory::MemoryCorruption).with_severity(9));
+    registry.add(Sink::new("unsafe.StringData", SinkCategory::MemoryCorruption).with_severity(9));
 
     // reflect package (can bypass type safety)
-    registry.add(
-        Sink::new("reflect.NewAt", SinkCategory::MemoryCorruption)
-            .with_severity(7),
-    );
+    registry.add(Sink::new("reflect.NewAt", SinkCategory::MemoryCorruption).with_severity(7));
 }
 
 // =============================================================================

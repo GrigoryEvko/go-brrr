@@ -84,6 +84,10 @@ pub fn extract(file: &str, function: &str) -> Result<CFGInfo> {
 /// - The language is not supported
 /// - The function is not found
 /// - Parsing fails
-pub fn extract_with_language(file: &str, function: &str, language: Option<&str>) -> Result<CFGInfo> {
+pub fn extract_with_language(
+    file: &str,
+    function: &str,
+    language: Option<&str>,
+) -> Result<CFGInfo> {
     CfgBuilder::extract_from_file_with_language(file, function, language)
 }

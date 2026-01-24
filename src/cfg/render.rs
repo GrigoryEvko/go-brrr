@@ -354,10 +354,10 @@ pub fn to_json_compact(cfg: &CFGInfo) -> Result<String, serde_json::Error> {
 mod tests {
     use super::*;
     use crate::cfg::types::{BlockType, CFGBlock, CFGEdge, EdgeType};
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap;
 
     fn sample_cfg() -> CFGInfo {
-        let mut blocks = HashMap::new();
+        let mut blocks = FxHashMap::default();
         blocks.insert(
             BlockId(0),
             CFGBlock {
@@ -406,7 +406,7 @@ mod tests {
             exits: vec![BlockId(2)],
             decision_points: 1, // One decision point for the if condition
             comprehension_decision_points: 0,
-            nested_cfgs: HashMap::new(),
+            nested_cfgs: FxHashMap::default(),
             is_async: false,
             await_points: 0,
             blocking_calls: Vec::new(),
@@ -455,8 +455,8 @@ mod tests {
         assert!(!escaped_shape.contains(']'));
         assert!(escaped_shape.contains("#123;")); // {
         assert!(escaped_shape.contains("#125;")); // }
-        assert!(escaped_shape.contains("#91;"));  // [
-        assert!(escaped_shape.contains("#93;"));  // ]
+        assert!(escaped_shape.contains("#91;")); // [
+        assert!(escaped_shape.contains("#93;")); // ]
 
         // Test backticks and semicolons
         let code_label = "func(`arg`); next";
@@ -464,7 +464,7 @@ mod tests {
         assert!(!escaped_code.contains('`'));
         // Semicolons in source become commas (but HTML entities still have ;)
         assert!(escaped_code.contains(", next")); // ; became ,
-        assert!(!escaped_code.contains("); "));   // Original semicolon pattern gone
+        assert!(!escaped_code.contains("); ")); // Original semicolon pattern gone
 
         // Test hash/pound sign
         let hash_label = "comment # here";
@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn test_edge_ordering_deterministic() {
         // Create CFG with edges in non-sorted order to verify sorting works
-        let mut blocks = HashMap::new();
+        let mut blocks = FxHashMap::default();
         for i in 0..4 {
             blocks.insert(
                 BlockId(i),
@@ -668,9 +668,19 @@ mod tests {
         // Insert edges in reverse/unsorted order
         let unsorted_edges = vec![
             CFGEdge::unconditional(BlockId(2), BlockId(3)),
-            CFGEdge::with_condition(BlockId(0), BlockId(2), EdgeType::True, "branch_a".to_string()),
+            CFGEdge::with_condition(
+                BlockId(0),
+                BlockId(2),
+                EdgeType::True,
+                "branch_a".to_string(),
+            ),
             CFGEdge::unconditional(BlockId(1), BlockId(3)),
-            CFGEdge::with_condition(BlockId(0), BlockId(1), EdgeType::False, "branch_b".to_string()),
+            CFGEdge::with_condition(
+                BlockId(0),
+                BlockId(1),
+                EdgeType::False,
+                "branch_b".to_string(),
+            ),
         ];
 
         let cfg = CFGInfo {
@@ -681,7 +691,7 @@ mod tests {
             exits: vec![BlockId(3)],
             decision_points: 1,
             comprehension_decision_points: 0,
-            nested_cfgs: HashMap::new(),
+            nested_cfgs: FxHashMap::default(),
             is_async: false,
             await_points: 0,
             blocking_calls: Vec::new(),
@@ -690,10 +700,7 @@ mod tests {
 
         // Verify Mermaid output has edges in sorted order
         let mermaid = to_mermaid(&cfg);
-        let edge_lines: Vec<&str> = mermaid
-            .lines()
-            .filter(|l| l.contains("-->"))
-            .collect();
+        let edge_lines: Vec<&str> = mermaid.lines().filter(|l| l.contains("-->")).collect();
 
         // Expected order: (0,1), (0,2), (1,3), (2,3)
         assert!(edge_lines[0].contains("B0") && edge_lines[0].contains("B1"));

@@ -61,16 +61,14 @@ pub mod long_method;
 
 // Re-export Long Method detection types
 pub use long_method::{
-    detect_long_methods, detect_long_methods_in_file, format_long_method_summary,
-    BlockType, ComplexityMetrics, ExtractionCandidate, LengthMetrics,
-    LongMethodAnalysis, LongMethodConfig, LongMethodError, LongMethodFinding,
-    LongMethodSeverity, LongMethodStats, MethodCategory, RefactoringType,
-    RefactoringSuggestion, Violation,
+    detect_long_methods, detect_long_methods_in_file, format_long_method_summary, BlockType,
+    ComplexityMetrics, ExtractionCandidate, LengthMetrics, LongMethodAnalysis, LongMethodConfig,
+    LongMethodError, LongMethodFinding, LongMethodSeverity, LongMethodStats, MethodCategory,
+    RefactoringSuggestion, RefactoringType, Violation,
 };
 
 // Re-export God class detection types
 pub use god_class::{
-    detect_god_classes, format_god_class_summary, GodClassAnalysis, GodClassConfig,
-    GodClassError, GodClassFinding, GodClassIndicators, GodClassSeverity,
-    GodClassStats, SuggestedClass,
+    detect_god_classes, format_god_class_summary, GodClassAnalysis, GodClassConfig, GodClassError,
+    GodClassFinding, GodClassIndicators, GodClassSeverity, GodClassStats, SuggestedClass,
 };

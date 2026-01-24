@@ -1,0 +1,366 @@
+================================================================================
+BRRR-LANG TRANSLATION LAYER DESIGN SPECIFICATION
+================================================================================
+
+This document summarizes the translation functor design from source languages
+to Brrr-Lang IR, as implemented in TranslationSpec.fst.
+
+================================================================================
+1. CATEGORICAL FOUNDATION
+================================================================================
+
+Each source language L forms a category Cat_L:
+  - Objects: Types in L
+  - Morphisms: Functions f : A -> B in L
+  - Identity: id_A
+  - Composition: standard function composition
+
+Translation T : Cat_L -> Cat_Brrr is a functor satisfying:
+  T(id_A) = id_{T(A)}                    (Identity)
+  T(g . f) = T(g) . T(f)                 (Composition)
+
+SOUNDNESS: If [[e]]_L(rho) = v, then [[T(e)]]_Brrr(T(rho)) = T(v)
+
+================================================================================
+2. LANGUAGE CONFIGURATION PARAMETERS
+================================================================================
+
+Each language is characterized by a 5-tuple:
+  L = <Memory, Types, Null, Effects, Concurrency>
+
+PARAMETER VALUES:
+-----------------
+Memory:
+  - MemOwnership   : Rust (affine types, move semantics)
+  - MemRC          : Swift (reference counting)
+  - MemGC          : Python, Go, TypeScript, Java
+  - MemManual      : C, C++
+
+Types:
+  - TypeStatic     : Rust, Go, Java
+  - TypeGradual    : TypeScript
+  - TypeDynamic    : Python
+
+Null:
+  - NullNonNull    : Rust (Option), Swift (Optional)
+  - NullOptional   : Kotlin
+  - NullNullable   : Python, Go, Java, TypeScript
+
+Effects:
+  - EffPure        : Effects tracked precisely
+  - EffTracked     : Effects tracked coarsely
+  - EffUntracked   : Effects not tracked
+
+Concurrency:
+  - ConcNone       : No concurrency primitives
+  - ConcThreads    : C/C++, Java (OS threads)
+  - ConcAsync      : TypeScript, Rust, Swift (async/await)
+  - ConcCSP        : Go (channels)
+  - ConcActors     : Swift actors
+
+================================================================================
+3. RUST -> BRRR-LANG TRANSLATION
+================================================================================
+
+TYPE MAPPING:
+-------------
+T_Rs(bool)         = Bool
+T_Rs(i8...i128)    = Int[I8...I128, Signed]
+T_Rs(u8...u128)    = Int[I8...I128, Unsigned]
+T_Rs(f32/f64)      = Float[F32/F64]
+T_Rs(&str/String)  = String
+T_Rs(T)            = own T_Rs^base(T)         [owned value]
+T_Rs(&'a T)        = ref T_Rs^base(T) ['a]    [shared borrow]
+T_Rs(&'a mut T)    = refmut T_Rs^base(T) ['a] [exclusive borrow]
+T_Rs(Box<T>)       = own Box[T_Rs^base(T)]
+T_Rs(Rc<T>)        = rc T_Rs^base(T)
+T_Rs(Arc<T>)       = arc T_Rs^base(T)
+T_Rs(Option<T>)    = Option[T_Rs(T)]
+T_Rs(Result<T,E>)  = Result[T_Rs(T), T_Rs(E)]
+T_Rs(Vec<T>)       = Array[T_Rs(T)]
+
+OWNERSHIP MAPPING:
+------------------
+RsOwned      -> MOne   (linear/affine)
+RsRef 'a     -> MOmega (shared, duplicable)
+RsRefMut 'a  -> MOne   (exclusive, linear)
+RsRc         -> MOmega (shared ownership)
+RsArc        -> MOmega (shared ownership)
+RsBox        -> MOne   (owned heap, linear)
+
+LIFETIME/REGION MAPPING:
+------------------------
+'static      -> RStatic
+'a           -> RNamed "a"
+Fresh scope  -> RFresh n
+
+MOVE SEMANTICS:
+---------------
+T_Rs(let y = x)     = let y = move(x)       [if T not Copy]
+T_Rs(f(x))          = f(move(x))            [by value, non-Copy]
+T_Rs(f(&x))         = f(&x)                 [shared borrow]
+T_Rs(f(&mut x))     = f(&mut x)             [exclusive borrow]
+
+EXPRESSION TRANSLATION:
+-----------------------
+T_Rs(x)             = x                     [if not moved]
+T_Rs(&e)            = borrow(T_Rs(e))
+T_Rs(&mut e)        = borrow_mut(T_Rs(e))
+T_Rs(*e)            = deref(T_Rs(e))
+T_Rs(e?)            = match T_Rs(e) { Ok(v) => v, Err(e) => return Err(e) }
+T_Rs(async { e })   = async(T_Rs(e))
+T_Rs(e.await)       = await(T_Rs(e))
+T_Rs(unsafe { e })  = unsafe(T_Rs(e))
+
+SOUNDNESS: If Rust borrow checker accepts P, then T_Rs(P) is ownership-safe.
+
+================================================================================
+4. TYPESCRIPT -> BRRR-LANG TRANSLATION
+================================================================================
+
+TYPE MAPPING:
+-------------
+T_TS(undefined)     = Unit
+T_TS(null)          = Option[Dynamic]
+T_TS(boolean)       = Bool
+T_TS(number)        = Float[F64]            [JS number is f64]
+T_TS(bigint)        = Int[BigInt, Signed]
+T_TS(string)        = String
+T_TS(symbol)        = String                [approximation]
+T_TS(void)          = Unit
+T_TS(never)         = Never
+T_TS(any)           = Dynamic               [UNSAFE top type]
+T_TS(unknown)       = Unknown               [SAFE top type]
+T_TS(A[])           = gc Array[T_TS(A)]
+T_TS((A,B,...))     = Tuple[T_TS(A), T_TS(B), ...]
+T_TS(Promise<A>)    = Future[T_TS(A), Hot]
+T_TS(A | B)         = Union[T_TS(A), T_TS(B)]  OR  Option[T] if null/undefined
+T_TS(A & B)         = Intersection (approximated)
+
+ASYNC/AWAIT TRANSLATION:
+------------------------
+T_TS(async f)       = f : tau -[Async]-> Future[sigma]
+T_TS(await e)       = await(T_TS(e))
+
+OPTIONAL CHAINING:
+------------------
+T_TS(a?.b)          = match T_TS(a) {
+                        None => None,
+                        Some(v) => Some(v.b)
+                      }
+
+NULLISH COALESCING:
+-------------------
+T_TS(a ?? b)        = match T_TS(a) {
+                        Some(v) => v,
+                        None => T_TS(b)
+                      }
+
+TYPE ASSERTION:
+---------------
+T_TS(e as T)        = cast(T_TS(e), T_TS(T))  [runtime check]
+T_TS(e!)            = match T_TS(e) {
+                        Some(v) => v,
+                        None => panic("non-null assertion failed")
+                      }
+
+DEFAULT EFFECTS: epsilon_TS = <Throw | <Async | epsilon>>
+
+================================================================================
+5. PYTHON -> BRRR-LANG TRANSLATION
+================================================================================
+
+TYPE MAPPING:
+-------------
+T_Py(None)              = Unit
+T_Py(bool)              = Bool
+T_Py(int)               = Int[BigInt, Signed]   [arbitrary precision]
+T_Py(float)             = Float[F64]
+T_Py(str)               = String
+T_Py(bytes)             = Array[u8]
+T_Py(list[A])           = gc Array[T_Py(A)]
+T_Py(dict[K,V])         = gc Dict[T_Py(K), T_Py(V)]
+T_Py(set[A])            = gc Array[T_Py(A)]     [approximation]
+T_Py(tuple[A,B,...])    = Tuple[T_Py(A), T_Py(B), ...]
+T_Py(Optional[A])       = Option[T_Py(A)]
+T_Py(Union[A,B,...])    = Enum { V0(T_Py(A)), V1(T_Py(B)), ... }
+T_Py(Callable[[A],R])   = (T_Py(A)) -[epsilon_Py]-> T_Py(R)
+T_Py(Any)               = Dynamic
+
+EXPRESSION TRANSLATION:
+-----------------------
+T_Py(x)                 = x
+T_Py(lambda x: e)       = lambda x. T_Py(e)
+T_Py(f(args, **kwargs)) = call(T_Py(f), T_Py(args))  [kwargs approximated]
+T_Py(obj.attr)          = field_get(T_Py(obj), attr) [dynamic lookup]
+T_Py([e1, ...])         = gc_alloc([T_Py(e1), ...])
+T_Py({k: v, ...})       = gc_alloc(Dict{T_Py(k): T_Py(v), ...})
+T_Py(raise e)           = throw(T_Py(e))
+T_Py(x if c else y)     = if T_Py(c) then T_Py(x) else T_Py(y)
+T_Py(await e)           = await(T_Py(e))
+T_Py(yield e)           = yield(T_Py(e))
+
+CONTEXT MANAGER (with statement):
+---------------------------------
+T_Py(with resource as alias: body)  =
+  let alias = T_Py(resource) in
+  try { T_Py(body) } finally { alias.__exit__() }
+
+DEFAULT EFFECTS: epsilon_Py = <Throw "Exception" | <IO | epsilon>>
+
+APPROXIMATIONS:
+- kwargs ignored (warning emitted)
+- Attribute access requires dynamic lookup
+- Lambda parameters are dynamically typed
+- Duck typing requires runtime checks
+
+================================================================================
+6. GO -> BRRR-LANG TRANSLATION
+================================================================================
+
+TYPE MAPPING:
+-------------
+T_Go(bool)          = Bool
+T_Go(int)           = Int[I64, Signed]      [platform-dependent]
+T_Go(int8...int64)  = Int[I8...I64, Signed]
+T_Go(uint8...uint64)= Int[I8...I64, Unsigned]
+T_Go(float32/64)    = Float[F32/F64]
+T_Go(complex64/128) = Tuple[Float, Float]   [approximation]
+T_Go(string)        = String
+T_Go(byte)          = Int[I8, Unsigned]
+T_Go(rune)          = Int[I32, Signed]
+T_Go([N]T)          = Array[T_Go(T)]
+T_Go([]T)           = gc Slice[T_Go(T)]
+T_Go(map[K]V)       = gc Dict[T_Go(K), T_Go(V)]
+T_Go(chan T)        = Channel[T_Go(T)]
+T_Go(*T)            = Option[T_Go(T)]       [nullable pointer]
+T_Go(interface{})   = Dynamic
+T_Go(error)         = Named "Error"
+
+GOROUTINE/CHANNEL TRANSLATION:
+------------------------------
+T_Go(go f(x))       = spawn(T_Go(f)(T_Go(x)))
+T_Go(ch <- v)       = chan_send(T_Go(ch), T_Go(v))
+T_Go(<-ch)          = chan_recv(T_Go(ch))
+T_Go(select {...})  = select([...cases...])
+
+ERROR HANDLING:
+---------------
+Go's (T, error) return pattern maps to Result<T, Error>:
+T_Go(func() (T, error)) = () -[epsilon_Go]-> Result[T_Go(T), Error]
+
+T_Go(panic(v))      = throw(T_Go(v))
+T_Go(recover())     = catch_panic()         [requires special handling]
+T_Go(defer f())     = defer(T_Go(f()))      [deferred execution]
+
+DEFAULT EFFECTS: epsilon_Go = <Panic | <Spawn | epsilon>>
+
+APPROXIMATIONS:
+- defer semantics require stack-based execution model
+- recover() needs special catch handling
+- Type assertions require runtime checks
+- nil interface is different from nil concrete type
+
+================================================================================
+7. CROSS-LANGUAGE BOUNDARIES
+================================================================================
+
+LANGUAGE AXIOMS:
+----------------
+Rust:       { AxMemSafe, AxTypeSafe, AxRaceFree, AxLeakFree }
+TypeScript: { AxMemSafe, AxTypeSafe }
+Python:     { AxMemSafe, AxLeakFree }
+Go:         { AxMemSafe, AxTypeSafe, AxLeakFree }
+Swift:      { AxMemSafe, AxTypeSafe, AxNullSafe }
+Java:       { AxMemSafe, AxTypeSafe, AxLeakFree }
+C/C++:      { } (no guarantees)
+
+BOUNDARY RISKS:
+---------------
+Risks(L1, L2) = axioms(L1) \ axioms(L2)
+
+When crossing from L1 to L2, properties in Risks are at risk.
+
+GUARD GENERATION:
+-----------------
+guard(L1, L2, v : tau) =
+  if AxTypeSafe in axioms(L2) \ axioms(L1):
+    type_check(v, tau)
+  if AxNullSafe in axioms(L2) \ axioms(L1):
+    null_check(v)
+  if AxMemSafe in axioms(L1) \ axioms(L2):
+    pin(v)  // prevent GC from moving
+
+================================================================================
+8. APPROXIMATION STRATEGIES
+================================================================================
+
+Features requiring sound approximation:
+
+1. Dynamic Typing (ApproxDynamic)
+   - Python attribute access
+   - Python duck typing
+   - TypeScript 'any' type
+
+2. Union Types (ApproxUnion)
+   - TypeScript unions that aren't Option
+   - Python Union types
+
+3. Intersection Types (ApproxIntersection)
+   - TypeScript A & B simplified to A
+
+4. Duck Typing (ApproxDuckTyping)
+   - Python structural subtyping
+
+5. Decorators (ApproxDecorator)
+   - Python decorators effect approximated
+
+6. Async Semantics (ApproxAsync)
+   - Complex async patterns simplified
+
+7. Channel Operations (ApproxChannel)
+   - Go select statement simplified
+
+8. Interface Dispatch (ApproxInterface)
+   - Go interface dynamic dispatch
+
+9. Lifetime Elision (ApproxLifetime)
+   - Rust lifetime inference approximated
+
+10. Macro Expansion (ApproxMacro)
+    - Macro bodies not expanded
+
+================================================================================
+9. FILES AND STRUCTURE
+================================================================================
+
+/brrr-lang/src/translation/
+  TranslationSpec.fst   - Main translation functor specification
+  TRANSLATION_DESIGN.txt - This design document
+
+Key dependencies:
+  - Primitives.fst      - Base types, int/float widths, spans
+  - Modes.fst           - Mode semiring, fractional permissions
+  - Effects.fst         - Effect rows, effect operations
+  - BrrrTypes.fst       - Core type constructors (12 optimized)
+  - Expressions.fst     - Expression AST
+
+================================================================================
+10. VERIFICATION TARGETS
+================================================================================
+
+To verify translation correctness:
+
+1. Type Preservation:
+   If e : tau in L, then T_L(e) : T_L(tau) in Brrr-Lang
+
+2. Semantic Preservation:
+   If [[e]]_L(rho) = v, then [[T_L(e)]]_Brrr(T_L(rho)) = T_L(v)
+
+3. Effect Soundness:
+   If e has effect epsilon in L, then T_L(e) has effect T_L(epsilon)
+
+4. Approximation Safety:
+   TransApprox returns sound over-approximations (may reject valid programs)
+
+================================================================================

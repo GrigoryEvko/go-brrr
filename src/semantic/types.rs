@@ -516,23 +516,15 @@ impl ContentHashedIndex {
     /// # Returns
     ///
     /// `true` if this is new content (was added), `false` if duplicate (was not added).
-    pub fn add(
-        &mut self,
-        content: &str,
-        file: &str,
-        function_name: &str,
-        line: usize,
-    ) -> bool {
+    pub fn add(&mut self, content: &str, file: &str, function_name: &str, line: usize) -> bool {
         let hash = Self::hash_content(content);
 
         if self.seen.contains_key(&hash) {
             self.duplicates_found += 1;
             false
         } else {
-            self.seen.insert(
-                hash,
-                CodeLocation::new(file, function_name, line),
-            );
+            self.seen
+                .insert(hash, CodeLocation::new(file, function_name, line));
             self.unique_items += 1;
             true
         }

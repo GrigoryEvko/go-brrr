@@ -43,11 +43,11 @@
 //! - **Getter/Setter pairs**: Simple accessor patterns
 //! - **Test functions**: Similar setup/teardown structure
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use fxhash::{FxHashMap, FxHasher};
+use fixedbitset::FixedBitSet;
+use fxhash::{FxHashMap, FxHashSet, FxHasher};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, trace};
@@ -58,7 +58,7 @@ use std::hash::{Hash, Hasher};
 
 use crate::ast::types::FunctionInfo;
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::{Language, LanguageRegistry};
 use crate::quality::clones::textual::CloneType;
 
@@ -121,15 +121,9 @@ pub enum Difference {
         description: String,
     },
     /// A statement was removed.
-    StatementRemoved {
-        line: usize,
-        description: String,
-    },
+    StatementRemoved { line: usize, description: String },
     /// A statement was modified.
-    StatementModified {
-        line: usize,
-        description: String,
-    },
+    StatementModified { line: usize, description: String },
 }
 
 /// A group of structurally similar clones.
@@ -172,9 +166,8 @@ impl StructuralClone {
         if self.instances.len() <= 1 {
             return 0;
         }
-        let avg_lines = self.instances.iter()
-            .map(|i| i.line_count())
-            .sum::<usize>() / self.instances.len();
+        let avg_lines =
+            self.instances.iter().map(|i| i.line_count()).sum::<usize>() / self.instances.len();
         avg_lines * (self.instances.len() - 1)
     }
 }
@@ -361,7 +354,8 @@ impl StructuralCloneAnalysis {
     /// Get only Type-2 clone groups.
     #[must_use]
     pub fn type2_clones(&self) -> Vec<&StructuralClone> {
-        self.clone_groups.iter()
+        self.clone_groups
+            .iter()
             .filter(|c| !c.filtered && matches!(c.clone_type, CloneType::Type2))
             .collect()
     }
@@ -369,7 +363,8 @@ impl StructuralCloneAnalysis {
     /// Get only Type-3 clone groups.
     #[must_use]
     pub fn type3_clones(&self) -> Vec<&StructuralClone> {
-        self.clone_groups.iter()
+        self.clone_groups
+            .iter()
             .filter(|c| !c.filtered && matches!(c.clone_type, CloneType::Type3))
             .collect()
     }
@@ -400,7 +395,7 @@ struct AstNormalizer {
     /// Counter for parameter placeholders.
     param_counter: usize,
     /// Mapping from original identifiers to placeholders.
-    identifier_map: HashMap<String, String>,
+    identifier_map: FxHashMap<String, String>,
     /// Language being processed.
     language: String,
 }
@@ -413,7 +408,7 @@ impl AstNormalizer {
             func_counter: 0,
             type_counter: 0,
             param_counter: 0,
-            identifier_map: HashMap::new(),
+            identifier_map: FxHashMap::default(),
             language: language.to_string(),
         }
     }
@@ -457,7 +452,8 @@ impl AstNormalizer {
             }
         };
 
-        self.identifier_map.insert(name.to_string(), placeholder.clone());
+        self.identifier_map
+            .insert(name.to_string(), placeholder.clone());
         placeholder
     }
 
@@ -467,14 +463,19 @@ impl AstNormalizer {
         match kind {
             "integer" | "integer_literal" | "number" | "int_literal" => "$INT".to_string(),
             "float" | "float_literal" | "decimal_floating_point_literal" => "$FLOAT".to_string(),
-            "string" | "string_literal" | "interpreted_string_literal" | "raw_string_literal" => "$STRING".to_string(),
+            "string" | "string_literal" | "interpreted_string_literal" | "raw_string_literal" => {
+                "$STRING".to_string()
+            }
             "true" | "false" | "boolean" | "True" | "False" => "$BOOL".to_string(),
             "none" | "nil" | "null" | "None" | "nullptr" => "$NULL".to_string(),
             "character_literal" | "char_literal" => "$CHAR".to_string(),
             _ => {
                 // Unknown literal type - use text but mark it
                 let text = Self::node_text(node, source);
-                if text.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-') {
+                if text
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+                {
                     "$NUM".to_string()
                 } else if text.starts_with('"') || text.starts_with('\'') || text.starts_with('`') {
                     "$STRING".to_string()
@@ -494,9 +495,14 @@ impl AstNormalizer {
     fn is_identifier_kind(&self, kind: &str) -> bool {
         matches!(
             kind,
-            "identifier" | "name" | "variable_name" | "field_identifier"
-                | "property_identifier" | "shorthand_property_identifier"
-                | "type_identifier" | "scoped_identifier"
+            "identifier"
+                | "name"
+                | "variable_name"
+                | "field_identifier"
+                | "property_identifier"
+                | "shorthand_property_identifier"
+                | "type_identifier"
+                | "scoped_identifier"
         )
     }
 
@@ -504,12 +510,29 @@ impl AstNormalizer {
     fn is_literal_kind(&self, kind: &str) -> bool {
         matches!(
             kind,
-            "integer" | "integer_literal" | "float" | "float_literal"
-                | "string" | "string_literal" | "interpreted_string_literal"
-                | "raw_string_literal" | "number" | "decimal_floating_point_literal"
-                | "true" | "false" | "boolean" | "none" | "nil" | "null"
-                | "None" | "True" | "False" | "nullptr" | "character_literal"
-                | "char_literal" | "int_literal"
+            "integer"
+                | "integer_literal"
+                | "float"
+                | "float_literal"
+                | "string"
+                | "string_literal"
+                | "interpreted_string_literal"
+                | "raw_string_literal"
+                | "number"
+                | "decimal_floating_point_literal"
+                | "true"
+                | "false"
+                | "boolean"
+                | "none"
+                | "nil"
+                | "null"
+                | "None"
+                | "True"
+                | "False"
+                | "nullptr"
+                | "character_literal"
+                | "char_literal"
+                | "int_literal"
         )
     }
 
@@ -517,16 +540,65 @@ impl AstNormalizer {
     fn is_keyword(&self, kind: &str) -> bool {
         matches!(
             kind,
-            "if" | "else" | "elif" | "while" | "for" | "return" | "break"
-                | "continue" | "try" | "except" | "catch" | "finally" | "throw"
-                | "raise" | "assert" | "pass" | "yield" | "await" | "async"
-                | "with" | "as" | "import" | "from" | "class" | "def" | "fn"
-                | "func" | "function" | "let" | "var" | "const" | "mut"
-                | "pub" | "private" | "public" | "protected" | "static"
-                | "match" | "switch" | "case" | "default" | "in" | "not"
-                | "and" | "or" | "is" | "lambda" | "new" | "delete" | "this"
-                | "self" | "super" | "interface" | "struct" | "enum" | "trait"
-                | "impl" | "type" | "extends" | "implements"
+            "if" | "else"
+                | "elif"
+                | "while"
+                | "for"
+                | "return"
+                | "break"
+                | "continue"
+                | "try"
+                | "except"
+                | "catch"
+                | "finally"
+                | "throw"
+                | "raise"
+                | "assert"
+                | "pass"
+                | "yield"
+                | "await"
+                | "async"
+                | "with"
+                | "as"
+                | "import"
+                | "from"
+                | "class"
+                | "def"
+                | "fn"
+                | "func"
+                | "function"
+                | "let"
+                | "var"
+                | "const"
+                | "mut"
+                | "pub"
+                | "private"
+                | "public"
+                | "protected"
+                | "static"
+                | "match"
+                | "switch"
+                | "case"
+                | "default"
+                | "in"
+                | "not"
+                | "and"
+                | "or"
+                | "is"
+                | "lambda"
+                | "new"
+                | "delete"
+                | "this"
+                | "self"
+                | "super"
+                | "interface"
+                | "struct"
+                | "enum"
+                | "trait"
+                | "impl"
+                | "type"
+                | "extends"
+                | "implements"
         )
     }
 
@@ -534,12 +606,50 @@ impl AstNormalizer {
     fn is_operator(&self, kind: &str) -> bool {
         matches!(
             kind,
-            "+" | "-" | "*" | "/" | "%" | "**" | "//" | "==" | "!=" | "<"
-                | ">" | "<=" | ">=" | "&&" | "||" | "!" | "&" | "|" | "^"
-                | "~" | "<<" | ">>" | "=" | "+=" | "-=" | "*=" | "/="
-                | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "++" | "--"
-                | "." | "->" | "::" | "?" | ":" | "=>" | "binary_operator"
-                | "unary_operator" | "comparison_operator" | "assignment"
+            "+" | "-"
+                | "*"
+                | "/"
+                | "%"
+                | "**"
+                | "//"
+                | "=="
+                | "!="
+                | "<"
+                | ">"
+                | "<="
+                | ">="
+                | "&&"
+                | "||"
+                | "!"
+                | "&"
+                | "|"
+                | "^"
+                | "~"
+                | "<<"
+                | ">>"
+                | "="
+                | "+="
+                | "-="
+                | "*="
+                | "/="
+                | "%="
+                | "&="
+                | "|="
+                | "^="
+                | "<<="
+                | ">>="
+                | "++"
+                | "--"
+                | "."
+                | "->"
+                | "::"
+                | "?"
+                | ":"
+                | "=>"
+                | "binary_operator"
+                | "unary_operator"
+                | "comparison_operator"
+                | "assignment"
         )
     }
 
@@ -586,10 +696,11 @@ impl AstNormalizer {
                     "type" | "type_annotation" | "type_identifier" | "generic_type" => {
                         PlaceholderType::Type
                     }
-                    "parameter" | "typed_parameter" | "required_parameter" | "optional_parameter" => {
-                        PlaceholderType::Parameter
+                    "parameter" | "typed_parameter" | "required_parameter"
+                    | "optional_parameter" => PlaceholderType::Parameter,
+                    "field_expression" | "member_expression" | "attribute" => {
+                        PlaceholderType::Field
                     }
-                    "field_expression" | "member_expression" | "attribute" => PlaceholderType::Field,
                     _ => PlaceholderType::Variable,
                 }
             } else {
@@ -613,18 +724,45 @@ impl AstNormalizer {
             // For structural nodes, output the kind and recurse into children
             let is_structural = matches!(
                 kind,
-                "block" | "compound_statement" | "statement_block" | "body"
-                    | "if_statement" | "while_statement" | "for_statement"
-                    | "for_in_statement" | "try_statement" | "with_statement"
-                    | "match_statement" | "switch_statement" | "return_statement"
-                    | "expression_statement" | "assignment_expression" | "assignment"
-                    | "call_expression" | "call" | "binary_expression"
-                    | "unary_expression" | "comparison" | "boolean_operator"
-                    | "conditional_expression" | "ternary_expression"
-                    | "subscript_expression" | "index_expression" | "slice"
-                    | "list" | "tuple" | "dictionary" | "set" | "array"
-                    | "object" | "argument_list" | "parameters" | "arguments"
-                    | "lambda" | "arrow_function" | "function_expression"
+                "block"
+                    | "compound_statement"
+                    | "statement_block"
+                    | "body"
+                    | "if_statement"
+                    | "while_statement"
+                    | "for_statement"
+                    | "for_in_statement"
+                    | "try_statement"
+                    | "with_statement"
+                    | "match_statement"
+                    | "switch_statement"
+                    | "return_statement"
+                    | "expression_statement"
+                    | "assignment_expression"
+                    | "assignment"
+                    | "call_expression"
+                    | "call"
+                    | "binary_expression"
+                    | "unary_expression"
+                    | "comparison"
+                    | "boolean_operator"
+                    | "conditional_expression"
+                    | "ternary_expression"
+                    | "subscript_expression"
+                    | "index_expression"
+                    | "slice"
+                    | "list"
+                    | "tuple"
+                    | "dictionary"
+                    | "set"
+                    | "array"
+                    | "object"
+                    | "argument_list"
+                    | "parameters"
+                    | "arguments"
+                    | "lambda"
+                    | "arrow_function"
+                    | "function_expression"
             );
 
             if is_structural {
@@ -648,53 +786,192 @@ impl AstNormalizer {
     fn is_builtin(&self, name: &str) -> bool {
         // Python builtins
         let python_builtins = [
-            "print", "len", "range", "enumerate", "zip", "map", "filter",
-            "sorted", "reversed", "list", "dict", "set", "tuple", "str",
-            "int", "float", "bool", "bytes", "type", "isinstance", "hasattr",
-            "getattr", "setattr", "delattr", "open", "input", "sum", "max",
-            "min", "abs", "round", "pow", "divmod", "all", "any", "iter",
-            "next", "repr", "format", "id", "hash", "callable", "super",
-            "object", "Exception", "ValueError", "TypeError", "KeyError",
-            "IndexError", "AttributeError", "RuntimeError", "StopIteration",
+            "print",
+            "len",
+            "range",
+            "enumerate",
+            "zip",
+            "map",
+            "filter",
+            "sorted",
+            "reversed",
+            "list",
+            "dict",
+            "set",
+            "tuple",
+            "str",
+            "int",
+            "float",
+            "bool",
+            "bytes",
+            "type",
+            "isinstance",
+            "hasattr",
+            "getattr",
+            "setattr",
+            "delattr",
+            "open",
+            "input",
+            "sum",
+            "max",
+            "min",
+            "abs",
+            "round",
+            "pow",
+            "divmod",
+            "all",
+            "any",
+            "iter",
+            "next",
+            "repr",
+            "format",
+            "id",
+            "hash",
+            "callable",
+            "super",
+            "object",
+            "Exception",
+            "ValueError",
+            "TypeError",
+            "KeyError",
+            "IndexError",
+            "AttributeError",
+            "RuntimeError",
+            "StopIteration",
         ];
 
         // JavaScript/TypeScript builtins
         let js_builtins = [
-            "console", "Math", "JSON", "Object", "Array", "String", "Number",
-            "Boolean", "Date", "RegExp", "Error", "Map", "Set", "WeakMap",
-            "WeakSet", "Promise", "Symbol", "BigInt", "parseInt", "parseFloat",
-            "isNaN", "isFinite", "encodeURI", "decodeURI", "setTimeout",
-            "setInterval", "clearTimeout", "clearInterval", "fetch", "alert",
-            "confirm", "prompt", "undefined", "NaN", "Infinity",
+            "console",
+            "Math",
+            "JSON",
+            "Object",
+            "Array",
+            "String",
+            "Number",
+            "Boolean",
+            "Date",
+            "RegExp",
+            "Error",
+            "Map",
+            "Set",
+            "WeakMap",
+            "WeakSet",
+            "Promise",
+            "Symbol",
+            "BigInt",
+            "parseInt",
+            "parseFloat",
+            "isNaN",
+            "isFinite",
+            "encodeURI",
+            "decodeURI",
+            "setTimeout",
+            "setInterval",
+            "clearTimeout",
+            "clearInterval",
+            "fetch",
+            "alert",
+            "confirm",
+            "prompt",
+            "undefined",
+            "NaN",
+            "Infinity",
         ];
 
         // Rust builtins
         let rust_builtins = [
-            "Some", "None", "Ok", "Err", "Vec", "String", "Box", "Rc", "Arc",
-            "Cell", "RefCell", "Mutex", "RwLock", "Option", "Result", "println",
-            "print", "eprintln", "eprint", "format", "panic", "assert", "debug_assert",
-            "todo", "unimplemented", "unreachable", "Default", "Clone", "Copy",
-            "Send", "Sync", "Sized", "Drop", "Fn", "FnMut", "FnOnce",
+            "Some",
+            "None",
+            "Ok",
+            "Err",
+            "Vec",
+            "String",
+            "Box",
+            "Rc",
+            "Arc",
+            "Cell",
+            "RefCell",
+            "Mutex",
+            "RwLock",
+            "Option",
+            "Result",
+            "println",
+            "print",
+            "eprintln",
+            "eprint",
+            "format",
+            "panic",
+            "assert",
+            "debug_assert",
+            "todo",
+            "unimplemented",
+            "unreachable",
+            "Default",
+            "Clone",
+            "Copy",
+            "Send",
+            "Sync",
+            "Sized",
+            "Drop",
+            "Fn",
+            "FnMut",
+            "FnOnce",
         ];
 
         // Go builtins
         let go_builtins = [
-            "len", "cap", "make", "new", "append", "copy", "delete", "close",
-            "panic", "recover", "print", "println", "complex", "real", "imag",
-            "error", "string", "int", "int8", "int16", "int32", "int64",
-            "uint", "uint8", "uint16", "uint32", "uint64", "float32", "float64",
-            "bool", "byte", "rune", "nil", "true", "false", "iota",
+            "len", "cap", "make", "new", "append", "copy", "delete", "close", "panic", "recover",
+            "print", "println", "complex", "real", "imag", "error", "string", "int", "int8",
+            "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "float32",
+            "float64", "bool", "byte", "rune", "nil", "true", "false", "iota",
         ];
 
         // C/C++ builtins
         let c_builtins = [
-            "printf", "scanf", "malloc", "free", "realloc", "calloc",
-            "sizeof", "memcpy", "memset", "strcmp", "strlen", "strcpy",
-            "strcat", "fopen", "fclose", "fread", "fwrite", "fprintf",
-            "fscanf", "exit", "abort", "assert", "NULL", "stdin", "stdout",
-            "stderr", "EOF", "size_t", "ptrdiff_t", "nullptr", "std",
-            "cout", "cin", "endl", "cerr", "vector", "map", "set",
-            "string", "unique_ptr", "shared_ptr", "make_unique", "make_shared",
+            "printf",
+            "scanf",
+            "malloc",
+            "free",
+            "realloc",
+            "calloc",
+            "sizeof",
+            "memcpy",
+            "memset",
+            "strcmp",
+            "strlen",
+            "strcpy",
+            "strcat",
+            "fopen",
+            "fclose",
+            "fread",
+            "fwrite",
+            "fprintf",
+            "fscanf",
+            "exit",
+            "abort",
+            "assert",
+            "NULL",
+            "stdin",
+            "stdout",
+            "stderr",
+            "EOF",
+            "size_t",
+            "ptrdiff_t",
+            "nullptr",
+            "std",
+            "cout",
+            "cin",
+            "endl",
+            "cerr",
+            "vector",
+            "map",
+            "set",
+            "string",
+            "unique_ptr",
+            "shared_ptr",
+            "make_unique",
+            "make_shared",
         ];
 
         match self.language.as_str() {
@@ -773,7 +1050,10 @@ fn edit_distance_hashed(a_hashes: &[u64], b_hashes: &[u64]) -> u32 {
             // Use inline assembly for prefetch on x86_64, no-op on other archs
             #[cfg(target_arch = "x86_64")]
             unsafe {
-                std::arch::x86_64::_mm_prefetch(next_ptr.cast::<i8>(), std::arch::x86_64::_MM_HINT_T0);
+                std::arch::x86_64::_mm_prefetch(
+                    next_ptr.cast::<i8>(),
+                    std::arch::x86_64::_MM_HINT_T0,
+                );
             }
         }
 
@@ -880,8 +1160,14 @@ fn extract_differences(a: &str, b: &str) -> Vec<Difference> {
             position += 1;
         } else if a_tok.starts_with('$') && b_tok.starts_with('$') {
             // Both are placeholders - check if same type
-            let a_type = a_tok.chars().take_while(|c| c.is_alphabetic() || *c == '$').collect::<String>();
-            let b_type = b_tok.chars().take_while(|c| c.is_alphabetic() || *c == '$').collect::<String>();
+            let a_type = a_tok
+                .chars()
+                .take_while(|c| c.is_alphabetic() || *c == '$')
+                .collect::<String>();
+            let b_type = b_tok
+                .chars()
+                .take_while(|c| c.is_alphabetic() || *c == '$')
+                .collect::<String>();
 
             if a_type == b_type {
                 // Same type placeholder, different number - that's expected
@@ -1007,14 +1293,47 @@ fn are_interface_implementations(instances: &[&NormalizedFunction]) -> bool {
     if all_same_name {
         // Common interface method names
         let common_interface_methods = [
-            "__init__", "__str__", "__repr__", "__eq__", "__hash__",
-            "__len__", "__iter__", "__next__", "__enter__", "__exit__",
-            "__getitem__", "__setitem__", "__contains__", "__call__",
-            "toString", "equals", "hashCode", "compareTo", "clone",
-            "String", "Debug", "Display", "Default", "Clone", "Copy",
-            "serialize", "deserialize", "to_json", "from_json",
-            "encode", "decode", "read", "write", "close", "flush",
-            "get", "set", "new", "default", "build", "create",
+            "__init__",
+            "__str__",
+            "__repr__",
+            "__eq__",
+            "__hash__",
+            "__len__",
+            "__iter__",
+            "__next__",
+            "__enter__",
+            "__exit__",
+            "__getitem__",
+            "__setitem__",
+            "__contains__",
+            "__call__",
+            "toString",
+            "equals",
+            "hashCode",
+            "compareTo",
+            "clone",
+            "String",
+            "Debug",
+            "Display",
+            "Default",
+            "Clone",
+            "Copy",
+            "serialize",
+            "deserialize",
+            "to_json",
+            "from_json",
+            "encode",
+            "decode",
+            "read",
+            "write",
+            "close",
+            "flush",
+            "get",
+            "set",
+            "new",
+            "default",
+            "build",
+            "create",
         ];
 
         if common_interface_methods.contains(&first_name.as_str()) {
@@ -1123,22 +1442,23 @@ impl StructuralCloneDetector {
         let functions_analyzed: Mutex<usize> = Mutex::new(0);
 
         // Process files
-        let process_file = |file: &PathBuf| {
-            match self.process_file(file) {
-                Ok(funcs) => {
-                    let count = funcs.len();
-                    if !funcs.is_empty() {
-                        let mut all = all_functions.lock().unwrap_or_else(|e| e.into_inner());
-                        all.extend(funcs);
-                    }
-                    *functions_analyzed.lock().unwrap_or_else(|e| e.into_inner()) += count;
+        let process_file = |file: &PathBuf| match self.process_file(file) {
+            Ok(funcs) => {
+                let count = funcs.len();
+                if !funcs.is_empty() {
+                    let mut all = all_functions.lock().unwrap_or_else(|e| e.into_inner());
+                    all.extend(funcs);
                 }
-                Err(e) => {
-                    errors.lock().unwrap_or_else(|e| e.into_inner()).push(StructuralCloneError {
+                *functions_analyzed.lock().unwrap_or_else(|e| e.into_inner()) += count;
+            }
+            Err(e) => {
+                errors
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(StructuralCloneError {
                         file: file.clone(),
                         message: e.to_string(),
                     });
-                }
             }
         };
 
@@ -1150,7 +1470,9 @@ impl StructuralCloneDetector {
         }
 
         // Extract results
-        let all_functions = all_functions.into_inner().unwrap_or_else(|e| e.into_inner());
+        let all_functions = all_functions
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner());
         let errors = errors.into_inner().unwrap_or_else(|e| e.into_inner());
         stats.functions_analyzed = *functions_analyzed.lock().unwrap_or_else(|e| e.into_inner());
         stats.files_skipped = errors.len();
@@ -1218,8 +1540,7 @@ impl StructuralCloneDetector {
             )
         })?;
 
-        let source = std::fs::read(path)
-            .map_err(|e| BrrrError::io_with_path(e, path))?;
+        let source = std::fs::read(path).map_err(|e| BrrrError::io_with_path(e, path))?;
 
         // Check content compatibility
         if lang.should_skip_file(path, &source) {
@@ -1262,7 +1583,11 @@ impl StructuralCloneDetector {
         while let Some(match_) = matches.next() {
             // Get function node
             let node = if let Some(idx) = query.capture_index_for_name("function") {
-                match_.captures.iter().find(|c| c.index == idx).map(|c| c.node)
+                match_
+                    .captures
+                    .iter()
+                    .find(|c| c.index == idx)
+                    .map(|c| c.node)
             } else {
                 match_.captures.first().map(|c| c.node)
             };
@@ -1270,7 +1595,9 @@ impl StructuralCloneDetector {
             if let Some(node) = node {
                 if let Some(func_info) = lang.extract_function(node, source) {
                     // Check test filter
-                    if self.config.filter_tests && is_test_function(&func_info.name, &func_info.decorators) {
+                    if self.config.filter_tests
+                        && is_test_function(&func_info.name, &func_info.decorators)
+                    {
                         continue;
                     }
 
@@ -1279,11 +1606,13 @@ impl StructuralCloneDetector {
                     let target_node = body_node.unwrap_or(node);
 
                     // Normalize the function
-                    let (normalized, node_count) = normalizer.normalize_function(target_node, source);
+                    let (normalized, node_count) =
+                        normalizer.normalize_function(target_node, source);
                     let hash = hash_normalized(&normalized);
 
                     // Check accessor filter
-                    let line_count = func_info.end_line_number
+                    let line_count = func_info
+                        .end_line_number
                         .map(|end| end.saturating_sub(func_info.line_number) + 1)
                         .unwrap_or(1);
 
@@ -1314,7 +1643,11 @@ impl StructuralCloneDetector {
 
         while let Some(match_) = class_matches.next() {
             let class_node = if let Some(idx) = class_query.capture_index_for_name("class") {
-                match_.captures.iter().find(|c| c.index == idx).map(|c| c.node)
+                match_
+                    .captures
+                    .iter()
+                    .find(|c| c.index == idx)
+                    .map(|c| c.node)
             } else {
                 match_.captures.first().map(|c| c.node)
             };
@@ -1323,23 +1656,30 @@ impl StructuralCloneDetector {
                 if let Some(class_info) = lang.extract_class(class_node, source) {
                     for method in &class_info.methods {
                         // Check test filter
-                        if self.config.filter_tests && is_test_function(&method.name, &method.decorators) {
+                        if self.config.filter_tests
+                            && is_test_function(&method.name, &method.decorators)
+                        {
                             continue;
                         }
 
                         // Find method node in the class
-                        if let Some(method_node) = Self::find_method_node(class_node, &method.name, source) {
+                        if let Some(method_node) =
+                            Self::find_method_node(class_node, &method.name, source)
+                        {
                             let body_node = Self::find_body_node(method_node);
                             let target_node = body_node.unwrap_or(method_node);
 
-                            let (normalized, node_count) = normalizer.normalize_function(target_node, source);
+                            let (normalized, node_count) =
+                                normalizer.normalize_function(target_node, source);
                             let hash = hash_normalized(&normalized);
 
-                            let line_count = method.end_line_number
+                            let line_count = method
+                                .end_line_number
                                 .map(|end| end.saturating_sub(method.line_number) + 1)
                                 .unwrap_or(1);
 
-                            if self.config.filter_accessors && is_accessor(&normalized, line_count) {
+                            if self.config.filter_accessors && is_accessor(&normalized, line_count)
+                            {
                                 continue;
                             }
 
@@ -1362,7 +1702,13 @@ impl StructuralCloneDetector {
 
     /// Find the body/block node of a function.
     fn find_body_node(func_node: Node) -> Option<Node> {
-        let body_kinds = ["block", "compound_statement", "statement_block", "body", "expression_body"];
+        let body_kinds = [
+            "block",
+            "compound_statement",
+            "statement_block",
+            "body",
+            "expression_body",
+        ];
 
         let mut cursor = func_node.walk();
         for child in func_node.children(&mut cursor) {
@@ -1382,10 +1728,18 @@ impl StructuralCloneDetector {
     }
 
     /// Find a method node within a class node by name.
-    fn find_method_node<'a>(class_node: Node<'a>, method_name: &str, source: &[u8]) -> Option<Node<'a>> {
+    fn find_method_node<'a>(
+        class_node: Node<'a>,
+        method_name: &str,
+        source: &[u8],
+    ) -> Option<Node<'a>> {
         let method_kinds = [
-            "function_definition", "method_definition", "function_declaration",
-            "method_declaration", "function_item", "constructor_declaration",
+            "function_definition",
+            "method_definition",
+            "function_declaration",
+            "method_declaration",
+            "function_item",
+            "constructor_declaration",
         ];
 
         let mut cursor = class_node.walk();
@@ -1402,8 +1756,9 @@ impl StructuralCloneDetector {
         if method_kinds.contains(&node.kind()) {
             // Check if this is the method we're looking for
             if let Some(name_node) = node.child_by_field_name("name") {
-                let name = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
-                    .unwrap_or("");
+                let name =
+                    std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
+                        .unwrap_or("");
                 if name == method_name {
                     return Some(node);
                 }
@@ -1413,7 +1768,13 @@ impl StructuralCloneDetector {
         // Recurse into children
         for child in node.children(cursor) {
             let mut child_cursor = child.walk();
-            if let Some(found) = Self::find_method_recursive(child, method_name, source, method_kinds, &mut child_cursor) {
+            if let Some(found) = Self::find_method_recursive(
+                child,
+                method_name,
+                source,
+                method_kinds,
+                &mut child_cursor,
+            ) {
                 return Some(found);
             }
         }
@@ -1434,7 +1795,7 @@ impl StructuralCloneDetector {
         // Type-3 detection: find similar but not identical functions
         if self.config.detect_type3 {
             // Get hashes of functions already in Type-2 groups
-            let type2_hashes: std::collections::HashSet<u64> = clone_groups
+            let type2_hashes: FxHashSet<u64> = clone_groups
                 .iter()
                 .flat_map(|g| g.instances.iter().map(|_| g.normalized_hash))
                 .collect();
@@ -1482,7 +1843,8 @@ impl StructuralCloneDetector {
                 let node_count = group.first().map(|f| f.node_count).unwrap_or(0);
 
                 // Check for interface implementations
-                let filtered = self.config.filter_interface_impls && are_interface_implementations(group.as_slice());
+                let filtered = self.config.filter_interface_impls
+                    && are_interface_implementations(group.as_slice());
 
                 clone_groups.push(StructuralClone {
                     normalized_hash: hash,
@@ -1508,7 +1870,7 @@ impl StructuralCloneDetector {
     fn find_type3_clones(
         &self,
         functions: &[NormalizedFunction],
-        excluded_hashes: &std::collections::HashSet<u64>,
+        excluded_hashes: &FxHashSet<u64>,
     ) -> Vec<StructuralClone> {
         let mut clone_groups = Vec::new();
 
@@ -1526,19 +1888,19 @@ impl StructuralCloneDetector {
         let max_candidates = self.config.max_comparisons.min(candidates.len());
         let candidates = &candidates[..max_candidates];
 
-        // Track which functions are already grouped
-        let mut grouped: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        // Track which functions are already grouped (FixedBitSet for index tracking)
+        let mut grouped = FixedBitSet::with_capacity(candidates.len());
 
         // Compare each pair of functions
         for (i, func_a) in candidates.iter().enumerate() {
-            if grouped.contains(&i) {
+            if grouped.contains(i) {
                 continue;
             }
 
             let mut group_members = vec![(i, *func_a, 1.0f64)];
 
             for (j, func_b) in candidates.iter().enumerate().skip(i + 1) {
-                if grouped.contains(&j) {
+                if grouped.contains(j) {
                     continue;
                 }
 
@@ -1591,10 +1953,12 @@ impl StructuralCloneDetector {
                     })
                     .collect();
 
-                let funcs: Vec<&NormalizedFunction> = group_members.iter().map(|(_, f, _)| *f).collect();
+                let funcs: Vec<&NormalizedFunction> =
+                    group_members.iter().map(|(_, f, _)| *f).collect();
 
                 // Check for interface implementations
-                let filtered = self.config.filter_interface_impls && are_interface_implementations(funcs.as_slice());
+                let filtered = self.config.filter_interface_impls
+                    && are_interface_implementations(funcs.as_slice());
 
                 let node_count = func_a.node_count;
 
@@ -1671,16 +2035,43 @@ pub fn format_structural_clone_summary(analysis: &StructuralCloneAnalysis) -> St
 
     // Statistics
     output.push_str("Statistics:\n");
-    output.push_str(&format!("  Files scanned:        {}\n", analysis.stats.files_scanned));
-    output.push_str(&format!("  Functions analyzed:   {}\n", analysis.stats.functions_analyzed));
-    output.push_str(&format!("  Functions considered: {}\n", analysis.stats.functions_considered));
-    output.push_str(&format!("  Type-2 clone groups:  {}\n", analysis.stats.type2_groups));
-    output.push_str(&format!("  Type-3 clone groups:  {}\n", analysis.stats.type3_groups));
-    output.push_str(&format!("  Total instances:      {}\n", analysis.stats.clone_instances));
-    output.push_str(&format!("  Duplicated nodes:     {}\n", analysis.stats.duplicated_nodes));
-    output.push_str(&format!("  Duplicated lines:     ~{}\n", analysis.stats.duplicated_lines));
+    output.push_str(&format!(
+        "  Files scanned:        {}\n",
+        analysis.stats.files_scanned
+    ));
+    output.push_str(&format!(
+        "  Functions analyzed:   {}\n",
+        analysis.stats.functions_analyzed
+    ));
+    output.push_str(&format!(
+        "  Functions considered: {}\n",
+        analysis.stats.functions_considered
+    ));
+    output.push_str(&format!(
+        "  Type-2 clone groups:  {}\n",
+        analysis.stats.type2_groups
+    ));
+    output.push_str(&format!(
+        "  Type-3 clone groups:  {}\n",
+        analysis.stats.type3_groups
+    ));
+    output.push_str(&format!(
+        "  Total instances:      {}\n",
+        analysis.stats.clone_instances
+    ));
+    output.push_str(&format!(
+        "  Duplicated nodes:     {}\n",
+        analysis.stats.duplicated_nodes
+    ));
+    output.push_str(&format!(
+        "  Duplicated lines:     ~{}\n",
+        analysis.stats.duplicated_lines
+    ));
     if analysis.stats.filtered_groups > 0 {
-        output.push_str(&format!("  Filtered (false pos): {}\n", analysis.stats.filtered_groups));
+        output.push_str(&format!(
+            "  Filtered (false pos): {}\n",
+            analysis.stats.filtered_groups
+        ));
     }
     output.push('\n');
 
@@ -1705,7 +2096,9 @@ pub fn format_structural_clone_summary(analysis: &StructuralCloneAnalysis) -> St
             ));
 
             for instance in &clone.instances {
-                let class_prefix = instance.class_name.as_ref()
+                let class_prefix = instance
+                    .class_name
+                    .as_ref()
                     .map(|c| format!("{}.", c))
                     .unwrap_or_default();
 
@@ -1724,11 +2117,21 @@ pub fn format_structural_clone_summary(analysis: &StructuralCloneAnalysis) -> St
                 output.push_str("   Differences:\n");
                 for diff in clone.differences.iter().take(5) {
                     match diff {
-                        Difference::IdentifierRenamed { original, renamed, .. } => {
-                            output.push_str(&format!("     - Renamed: {} -> {}\n", original, renamed));
+                        Difference::IdentifierRenamed {
+                            original, renamed, ..
+                        } => {
+                            output.push_str(&format!(
+                                "     - Renamed: {} -> {}\n",
+                                original, renamed
+                            ));
                         }
-                        Difference::LiteralChanged { original, changed, .. } => {
-                            output.push_str(&format!("     - Literal: {} -> {}\n", original, changed));
+                        Difference::LiteralChanged {
+                            original, changed, ..
+                        } => {
+                            output.push_str(&format!(
+                                "     - Literal: {} -> {}\n",
+                                original, changed
+                            ));
                         }
                         Difference::StatementAdded { description, .. } => {
                             output.push_str(&format!("     - Added: {}\n", description));
@@ -1745,7 +2148,10 @@ pub fn format_structural_clone_summary(analysis: &StructuralCloneAnalysis) -> St
         }
 
         if active_clones.len() > 15 {
-            output.push_str(&format!("\n... and {} more clone groups\n", active_clones.len() - 15));
+            output.push_str(&format!(
+                "\n... and {} more clone groups\n",
+                active_clones.len() - 15
+            ));
         }
     }
 
@@ -1767,11 +2173,26 @@ mod tests {
         let mut normalizer = AstNormalizer::new("python");
 
         // Test placeholder generation
-        assert_eq!(normalizer.get_placeholder("x", PlaceholderType::Variable), "$VAR1");
-        assert_eq!(normalizer.get_placeholder("x", PlaceholderType::Variable), "$VAR1"); // Same name returns same placeholder
-        assert_eq!(normalizer.get_placeholder("y", PlaceholderType::Variable), "$VAR2");
-        assert_eq!(normalizer.get_placeholder("foo", PlaceholderType::Function), "$FUNC1");
-        assert_eq!(normalizer.get_placeholder("int", PlaceholderType::Type), "$TYPE1");
+        assert_eq!(
+            normalizer.get_placeholder("x", PlaceholderType::Variable),
+            "$VAR1"
+        );
+        assert_eq!(
+            normalizer.get_placeholder("x", PlaceholderType::Variable),
+            "$VAR1"
+        ); // Same name returns same placeholder
+        assert_eq!(
+            normalizer.get_placeholder("y", PlaceholderType::Variable),
+            "$VAR2"
+        );
+        assert_eq!(
+            normalizer.get_placeholder("foo", PlaceholderType::Function),
+            "$FUNC1"
+        );
+        assert_eq!(
+            normalizer.get_placeholder("int", PlaceholderType::Type),
+            "$TYPE1"
+        );
     }
 
     #[test]
@@ -1784,7 +2205,10 @@ mod tests {
         normalizer.reset();
 
         // After reset, counters start over
-        assert_eq!(normalizer.get_placeholder("a", PlaceholderType::Variable), "$VAR1");
+        assert_eq!(
+            normalizer.get_placeholder("a", PlaceholderType::Variable),
+            "$VAR1"
+        );
     }
 
     #[test]
@@ -1836,7 +2260,10 @@ mod tests {
         let hash3 = hash_normalized("$VAR1 = $STRING return $VAR1");
 
         assert_eq!(hash1, hash2, "Same normalized string should have same hash");
-        assert_ne!(hash1, hash3, "Different normalized strings should have different hashes");
+        assert_ne!(
+            hash1, hash3,
+            "Different normalized strings should have different hashes"
+        );
     }
 
     #[test]
@@ -1848,7 +2275,10 @@ mod tests {
         assert!(is_accessor("assignment( $FIELD1 $PARAM1 )", 2));
 
         // Too long for accessor
-        assert!(!is_accessor("if( $VAR1 ) block( return $VAR2 ) else block( return $VAR3 )", 10));
+        assert!(!is_accessor(
+            "if( $VAR1 ) block( return $VAR2 ) else block( return $VAR3 )",
+            10
+        ));
     }
 
     #[test]
@@ -1857,7 +2287,10 @@ mod tests {
         assert!(is_test_function("TestMyClass", &[]));
         assert!(is_test_function("my_function_test", &[]));
         assert!(is_test_function("setUp", &[]));
-        assert!(is_test_function("normal_function", &["pytest.fixture".to_string()]));
+        assert!(is_test_function(
+            "normal_function",
+            &["pytest.fixture".to_string()]
+        ));
         assert!(!is_test_function("normal_function", &[]));
     }
 
@@ -1957,10 +2390,9 @@ def different_function():
             .with_min_nodes(5)
             .with_min_lines(3);
         let detector = StructuralCloneDetector::new(config);
-        let result = detector.detect_in_files(
-            temp_dir.path().to_path_buf(),
-            &[file1, file2]
-        ).unwrap();
+        let result = detector
+            .detect_in_files(temp_dir.path().to_path_buf(), &[file1, file2])
+            .unwrap();
 
         // Should detect the structural clone
         assert!(

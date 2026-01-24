@@ -32,11 +32,14 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 use tree_sitter::{Node, Tree};
-use wide::{u8x32, u32x8, CmpEq};
+use wide::{u32x8, u8x32, CmpEq};
 
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
+use crate::metrics::node_types::{
+    COMMENT_NODE_TYPES, FUNCTION_NODE_TYPES, STATEMENT_NODE_TYPES, STRING_NODE_TYPES,
+};
 
 // =============================================================================
 // TYPES
@@ -335,10 +338,7 @@ impl LineClassifier {
         // 2. All enum variants have values 0, 1, 2, 3 which are valid u8
         // 3. The slice length and alignment are preserved
         let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(
-                self.line_types.as_ptr().cast::<u8>(),
-                self.line_types.len(),
-            )
+            std::slice::from_raw_parts(self.line_types.as_ptr().cast::<u8>(), self.line_types.len())
         };
 
         let mut blank = 0u32;
@@ -514,10 +514,10 @@ fn simd_sum_u32(slice: &[u32]) -> u32 {
 // =============================================================================
 
 /// Whitespace byte constants for SIMD comparison.
-const WS_SPACE: u8 = b' ';    // 0x20
-const WS_TAB: u8 = b'\t';     // 0x09
+const WS_SPACE: u8 = b' '; // 0x20
+const WS_TAB: u8 = b'\t'; // 0x09
 const WS_NEWLINE: u8 = b'\n'; // 0x0A
-const WS_CR: u8 = b'\r';      // 0x0D
+const WS_CR: u8 = b'\r'; // 0x0D
 
 /// Check if a byte is ASCII whitespace (space, tab, newline, carriage return).
 #[inline(always)]
@@ -570,10 +570,8 @@ fn find_first_nonws(bytes: &[u8]) -> Option<usize> {
 
         // Check if each byte is any whitespace character
         // Each lane becomes 0xFF for whitespace, 0x00 for non-whitespace
-        let is_ws = data.cmp_eq(space_v)
-            | data.cmp_eq(tab_v)
-            | data.cmp_eq(nl_v)
-            | data.cmp_eq(cr_v);
+        let is_ws =
+            data.cmp_eq(space_v) | data.cmp_eq(tab_v) | data.cmp_eq(nl_v) | data.cmp_eq(cr_v);
 
         // Find first non-whitespace (first 0x00 in is_ws mask)
         if let Some(offset) = find_first_zero_in_ws_mask(is_ws) {
@@ -647,10 +645,8 @@ fn find_last_nonws(bytes: &[u8]) -> Option<usize> {
         let arr: [u8; 32] = chunk.try_into().unwrap_or([0u8; 32]);
         let data = u8x32::from(arr);
 
-        let is_ws = data.cmp_eq(space_v)
-            | data.cmp_eq(tab_v)
-            | data.cmp_eq(nl_v)
-            | data.cmp_eq(cr_v);
+        let is_ws =
+            data.cmp_eq(space_v) | data.cmp_eq(tab_v) | data.cmp_eq(nl_v) | data.cmp_eq(cr_v);
 
         // Find last non-whitespace (last 0x00 in is_ws mask)
         if let Some(offset) = find_last_zero_in_ws_mask(is_ws) {
@@ -811,72 +807,6 @@ impl AggregateMetricsCollector {
 // AST ANALYSIS
 // =============================================================================
 
-/// Node types that represent comments in various languages.
-const COMMENT_NODE_TYPES: &[&str] = &[
-    "comment",       // Python, Go, TypeScript/JavaScript, Java
-    "line_comment",  // Rust, Java, C/C++
-    "block_comment", // Rust, Java, C/C++
-];
-
-/// Node types that represent string literals (potential multi-line).
-const STRING_NODE_TYPES: &[&str] = &[
-    "string",              // Python
-    "string_literal",      // Rust, C, C++, Java
-    "raw_string_literal",  // Rust, C++
-    "template_string",     // TypeScript/JavaScript
-    "interpreted_string_literal", // Go
-    "raw_string",          // Python raw strings
-];
-
-/// Node types that represent statements (for logical LOC).
-const STATEMENT_NODE_TYPES: &[&str] = &[
-    // Python
-    "expression_statement", "return_statement", "if_statement", "for_statement",
-    "while_statement", "try_statement", "with_statement", "assert_statement",
-    "raise_statement", "pass_statement", "break_statement", "continue_statement",
-    "import_statement", "import_from_statement", "global_statement", "nonlocal_statement",
-    "delete_statement", "future_import_statement", "match_statement",
-    // TypeScript/JavaScript
-    "expression_statement", "return_statement", "if_statement", "switch_statement",
-    "for_statement", "for_in_statement", "while_statement", "do_statement",
-    "try_statement", "with_statement", "throw_statement", "break_statement",
-    "continue_statement", "import_statement", "export_statement", "variable_declaration",
-    "lexical_declaration",
-    // Rust
-    "expression_statement", "let_declaration", "return_expression", "if_expression",
-    "match_expression", "for_expression", "while_expression", "loop_expression",
-    "break_expression", "continue_expression", "macro_invocation",
-    // Go
-    "expression_statement", "return_statement", "if_statement", "switch_statement",
-    "for_statement", "go_statement", "select_statement", "defer_statement",
-    "var_declaration", "short_var_declaration", "assignment_statement",
-    // Java
-    "expression_statement", "return_statement", "if_statement", "switch_expression",
-    "for_statement", "enhanced_for_statement", "while_statement", "do_statement",
-    "try_statement", "throw_statement", "break_statement", "continue_statement",
-    "local_variable_declaration", "assert_statement",
-    // C/C++
-    "expression_statement", "return_statement", "if_statement", "switch_statement",
-    "for_statement", "while_statement", "do_statement", "break_statement",
-    "continue_statement", "goto_statement", "declaration", "compound_statement",
-];
-
-/// Function-defining node types.
-const FUNCTION_NODE_TYPES: &[&str] = &[
-    // Python
-    "function_definition",
-    // TypeScript/JavaScript
-    "function_declaration", "method_definition", "arrow_function",
-    // Rust
-    "function_item",
-    // Go
-    "function_declaration", "method_declaration",
-    // Java
-    "method_declaration", "constructor_declaration",
-    // C/C++
-    "function_definition",
-];
-
 /// Analyze a parsed AST to extract LOC information.
 struct ASTAnalyzer<'a> {
     source: &'a [u8],
@@ -1034,7 +964,9 @@ impl<'a> ASTAnalyzer<'a> {
                                 // It's a docstring if it's among the first statements
                                 return idx < 3; // Allow for decorators/comments before
                             }
-                            if STATEMENT_NODE_TYPES.contains(&child.kind()) && child.id() != parent.id() {
+                            if STATEMENT_NODE_TYPES.contains(&child.kind())
+                                && child.id() != parent.id()
+                            {
                                 // Found a different statement before this one
                                 return false;
                             }
@@ -1053,18 +985,14 @@ impl<'a> ASTAnalyzer<'a> {
         for child in node.children(&mut cursor) {
             match child.kind() {
                 "identifier" | "name" | "property_identifier" => {
-                    return child.utf8_text(self.source)
-                        .unwrap_or("")
-                        .to_string();
+                    return child.utf8_text(self.source).unwrap_or("").to_string();
                 }
                 "function_declarator" | "declarator" => {
                     // C/C++ style: recurse into declarator
                     let mut inner_cursor = child.walk();
                     for inner in child.children(&mut inner_cursor) {
                         if inner.kind() == "identifier" {
-                            return inner.utf8_text(self.source)
-                                .unwrap_or("")
-                                .to_string();
+                            return inner.utf8_text(self.source).unwrap_or("").to_string();
                         }
                     }
                 }
@@ -1083,27 +1011,30 @@ impl<'a> ASTAnalyzer<'a> {
 
     /// Get function-level metrics.
     fn get_function_metrics(&self, file: &Path) -> Vec<FunctionSize> {
-        self.function_ranges.iter().map(|(name, start, end)| {
-            let sloc = self.count_sloc_in_range(*start, *end);
-            let statements = self.count_statements_in_range(*start, *end);
-            let comment_lines = self.count_comments_in_range(*start, *end);
-            let comment_density = if sloc > 0 {
-                f64::from(comment_lines) / f64::from(sloc) * 100.0
-            } else {
-                0.0
-            };
+        self.function_ranges
+            .iter()
+            .map(|(name, start, end)| {
+                let sloc = self.count_sloc_in_range(*start, *end);
+                let statements = self.count_statements_in_range(*start, *end);
+                let comment_lines = self.count_comments_in_range(*start, *end);
+                let comment_density = if sloc > 0 {
+                    f64::from(comment_lines) / f64::from(sloc) * 100.0
+                } else {
+                    0.0
+                };
 
-            FunctionSize {
-                name: name.clone(),
-                file: file.to_path_buf(),
-                line: *start + 1, // 1-indexed
-                end_line: *end + 1,
-                sloc,
-                statements,
-                comment_density,
-                is_too_long: sloc > FunctionSize::DEFAULT_THRESHOLD,
-            }
-        }).collect()
+                FunctionSize {
+                    name: name.clone(),
+                    file: file.to_path_buf(),
+                    line: *start + 1, // 1-indexed
+                    end_line: *end + 1,
+                    sloc,
+                    statements,
+                    comment_density,
+                    is_too_long: sloc > FunctionSize::DEFAULT_THRESHOLD,
+                }
+            })
+            .collect()
     }
 
     /// Count SLOC in a line range using SIMD-accelerated comparison.
@@ -1127,9 +1058,8 @@ impl<'a> ASTAnalyzer<'a> {
 
         // SAFETY: LineType is #[repr(u8)] with discriminants 0-3,
         // so the memory layout is identical to &[u8].
-        let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(slice.as_ptr().cast::<u8>(), slice.len())
-        };
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(slice.as_ptr().cast::<u8>(), slice.len()) };
 
         let mut count = 0u32;
 
@@ -1222,9 +1152,9 @@ pub fn analyze_loc(
     }
 
     // Directory analysis
-    let path_str = path.to_str().ok_or_else(|| {
-        BrrrError::InvalidArgument("Invalid path encoding".to_string())
-    })?;
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| BrrrError::InvalidArgument("Invalid path encoding".to_string()))?;
 
     let scanner = ProjectScanner::new(path_str)?;
 
@@ -1244,7 +1174,10 @@ pub fn analyze_loc(
         )));
     }
 
-    debug!("Analyzing {} files for LOC metrics", scan_result.files.len());
+    debug!(
+        "Analyzing {} files for LOC metrics",
+        scan_result.files.len()
+    );
 
     // Analyze files in parallel
     let results: Vec<std::result::Result<FileLOC, LOCError>> = scan_result
@@ -1295,10 +1228,7 @@ pub fn analyze_loc(
 }
 
 /// Analyze a single file for LOC metrics.
-pub fn analyze_file_loc(
-    path: impl AsRef<Path>,
-    function_threshold: u32,
-) -> Result<LOCAnalysis> {
+pub fn analyze_file_loc(path: impl AsRef<Path>, function_threshold: u32) -> Result<LOCAnalysis> {
     let path = path.as_ref();
 
     if !path.exists() {
@@ -1315,7 +1245,8 @@ pub fn analyze_file_loc(
     let stats = calculate_distribution(&[file_loc.clone()]);
     let largest_files = get_largest_files(&[file_loc.clone()], &stats, 1);
 
-    let oversized_functions: Vec<FunctionSize> = file_loc.functions
+    let oversized_functions: Vec<FunctionSize> = file_loc
+        .functions
         .iter()
         .filter(|f| f.is_too_long)
         .cloned()
@@ -1414,7 +1345,10 @@ fn aggregate_by_language(files: &[FileLOC]) -> Vec<LanguageLOC> {
     let mut by_lang: HashMap<String, Vec<&FileLOC>> = HashMap::new();
 
     for file in files {
-        let lang = file.language.clone().unwrap_or_else(|| "unknown".to_string());
+        let lang = file
+            .language
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
         by_lang.entry(lang).or_default().push(file);
     }
 
@@ -1804,9 +1738,11 @@ func main() {
         let analysis = result.unwrap();
 
         // Should detect the function as oversized
-        assert!(analysis.stats.oversized_function_count > 0 ||
-                !analysis.oversized_functions.is_empty() ||
-                analysis.files.iter().any(|f| f.oversized_functions > 0));
+        assert!(
+            analysis.stats.oversized_function_count > 0
+                || !analysis.oversized_functions.is_empty()
+                || analysis.files.iter().any(|f| f.oversized_functions > 0)
+        );
     }
 
     #[test]
@@ -1844,21 +1780,23 @@ func main() {
     #[test]
     fn test_aggregate_metrics_collector() {
         // Create mock FileLOC entries
-        let files: Vec<super::FileLOC> = (0..20).map(|i| {
-            super::FileLOC {
-                file: std::path::PathBuf::from(format!("test_{}.py", i)),
-                language: Some("python".to_string()),
-                metrics: super::LOCMetrics::from_counts(
-                    100 + i,    // physical
-                    80 + i,     // source
-                    60 + i,     // logical
-                    10 + i,     // comment
-                    10,         // blank (constant)
-                ),
-                functions: Vec::new(),
-                oversized_functions: 0,
-            }
-        }).collect();
+        let files: Vec<super::FileLOC> = (0..20)
+            .map(|i| {
+                super::FileLOC {
+                    file: std::path::PathBuf::from(format!("test_{}.py", i)),
+                    language: Some("python".to_string()),
+                    metrics: super::LOCMetrics::from_counts(
+                        100 + i, // physical
+                        80 + i,  // source
+                        60 + i,  // logical
+                        10 + i,  // comment
+                        10,      // blank (constant)
+                    ),
+                    functions: Vec::new(),
+                    oversized_functions: 0,
+                }
+            })
+            .collect();
 
         let collector = super::AggregateMetricsCollector::collect_from_file_locs(&files);
         let (physical, source, logical, comment, blank) = collector.sum_all();
@@ -1867,8 +1805,8 @@ func main() {
         assert_eq!(physical, 2190);
         assert_eq!(source, 1790); // 20*80 + 190
         assert_eq!(logical, 1390); // 20*60 + 190
-        assert_eq!(comment, 390);  // 20*10 + 190
-        assert_eq!(blank, 200);    // 20*10
+        assert_eq!(comment, 390); // 20*10 + 190
+        assert_eq!(blank, 200); // 20*10
     }
 
     #[test]
@@ -1882,7 +1820,10 @@ func main() {
         assert_eq!(super::find_first_nonws(b"   "), None);
         assert_eq!(super::find_first_nonws(b"\t\t\t"), None);
         assert_eq!(super::find_first_nonws(b" \t \n \r "), None);
-        assert_eq!(super::find_first_nonws(b"                                "), None); // 32 spaces
+        assert_eq!(
+            super::find_first_nonws(b"                                "),
+            None
+        ); // 32 spaces
     }
 
     #[test]
@@ -1938,7 +1879,10 @@ func main() {
     fn test_find_last_nonws_all_whitespace() {
         assert_eq!(super::find_last_nonws(b"   "), None);
         assert_eq!(super::find_last_nonws(b"\t\n\r "), None);
-        assert_eq!(super::find_last_nonws(b"                                "), None); // 32 spaces
+        assert_eq!(
+            super::find_last_nonws(b"                                "),
+            None
+        ); // 32 spaces
     }
 
     #[test]
@@ -1998,9 +1942,13 @@ func main() {
             assert!(last.is_some(), "last should find non-ws in {:?}", input);
 
             // First should be <= last
-            assert!(first.unwrap() <= last.unwrap(),
+            assert!(
+                first.unwrap() <= last.unwrap(),
                 "first {} should be <= last {} for {:?}",
-                first.unwrap(), last.unwrap(), input);
+                first.unwrap(),
+                last.unwrap(),
+                input
+            );
         }
     }
 

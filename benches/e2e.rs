@@ -188,21 +188,33 @@ fn bench_code_structure_extraction(c: &mut Criterion) {
     group.bench_function("python_module_info", |b| {
         b.iter(|| {
             let module = ast::extract_file(black_box(py_path.to_str().unwrap())).unwrap();
-            black_box((module.functions.len(), module.classes.len(), module.imports.len()))
+            black_box((
+                module.functions.len(),
+                module.classes.len(),
+                module.imports.len(),
+            ))
         })
     });
 
     group.bench_function("typescript_module_info", |b| {
         b.iter(|| {
             let module = ast::extract_file(black_box(ts_path.to_str().unwrap())).unwrap();
-            black_box((module.functions.len(), module.classes.len(), module.imports.len()))
+            black_box((
+                module.functions.len(),
+                module.classes.len(),
+                module.imports.len(),
+            ))
         })
     });
 
     group.bench_function("rust_module_info", |b| {
         b.iter(|| {
             let module = ast::extract_file(black_box(rs_path.to_str().unwrap())).unwrap();
-            black_box((module.functions.len(), module.classes.len(), module.imports.len()))
+            black_box((
+                module.functions.len(),
+                module.classes.len(),
+                module.imports.len(),
+            ))
         })
     });
 

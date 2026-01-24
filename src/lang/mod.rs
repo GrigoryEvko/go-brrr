@@ -3,7 +3,14 @@
 //! Provides a unified interface for multi-language code analysis via the
 //! [`Language`] trait. Each supported language implements this trait to
 //! provide tree-sitter queries and extraction logic.
+//!
+//! # Module Organization
+//!
+//! - [`common`]: Shared utilities for all language handlers (node traversal, text extraction)
+//! - [`traits`]: Core `Language` trait definition
+//! - [`registry`]: Language detection and handler registry
 
+pub mod common;
 pub mod registry;
 pub mod traits;
 

@@ -14,7 +14,8 @@
 //! - For Loop edges: body lines are control-dependent on loop header
 //! - For Exception edges: handler lines are control-dependent on try block
 
-use std::collections::{HashMap, HashSet};
+use fixedbitset::FixedBitSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::cfg::types::{BlockId, CFGInfo, EdgeType};
 use crate::dfg::types::DFGInfo;
@@ -30,14 +31,14 @@ pub struct PDGBuilder {
     control_deps: Vec<ControlDependence>,
 
     /// Cache: block ID -> (start_line, end_line)
-    block_line_ranges: HashMap<BlockId, (usize, usize)>,
+    block_line_ranges: FxHashMap<BlockId, (usize, usize)>,
 }
 
 impl PDGBuilder {
     /// Create a new PDGBuilder from CFG and DFG.
     pub fn new(cfg: CFGInfo, dfg: DFGInfo) -> Self {
         // Pre-compute block line ranges for efficient lookup
-        let block_line_ranges: HashMap<BlockId, (usize, usize)> = cfg
+        let block_line_ranges: FxHashMap<BlockId, (usize, usize)> = cfg
             .blocks
             .iter()
             .map(|(id, block)| (*id, (block.start_line, block.end_line)))
@@ -80,7 +81,7 @@ impl PDGBuilder {
                     BranchType::True // Treat as conditional
                 }
                 EdgeType::OkSome | EdgeType::ErrNone => BranchType::True, // Rust Result/Option
-                EdgeType::Pass | EdgeType::Fail => BranchType::True,     // Assert
+                EdgeType::Pass | EdgeType::Fail => BranchType::True,      // Assert
                 _ => continue, // Skip unconditional/sequential edges
             };
 
@@ -114,7 +115,12 @@ impl PDGBuilder {
 
         // Process transitive control dependencies after releasing the immutable borrow
         for (source_block, start_block, condition_line, branch_type) in transitive_deps {
-            self.add_transitive_control_deps(source_block, start_block, condition_line, branch_type);
+            self.add_transitive_control_deps(
+                source_block,
+                start_block,
+                condition_line,
+                branch_type,
+            );
         }
 
         // Deduplicate control dependencies
@@ -132,7 +138,9 @@ impl PDGBuilder {
         branch_type: BranchType,
     ) {
         // Find all blocks reachable from start_block
-        let mut visited: HashSet<BlockId> = HashSet::new();
+        // Use FixedBitSet for O(1) visited checks with minimal memory
+        let capacity = self.cfg.blocks.len();
+        let mut visited = FixedBitSet::with_capacity(capacity);
         let mut to_visit: Vec<BlockId> = vec![start_block];
 
         // Find the reconvergence point (where branches merge)
@@ -141,7 +149,7 @@ impl PDGBuilder {
         const MAX_DEPTH: usize = 50;
 
         while let Some(block_id) = to_visit.pop() {
-            if visited.contains(&block_id) || depth > MAX_DEPTH {
+            if visited.contains(block_id.0) || depth > MAX_DEPTH {
                 continue;
             }
 
@@ -150,13 +158,18 @@ impl PDGBuilder {
                 continue;
             }
 
-            visited.insert(block_id);
+            visited.insert(block_id.0);
             depth += 1;
 
             // Get successors of this block
             for &succ in self.cfg.successors(block_id) {
                 // Skip back edges to avoid infinite loops
-                if let Some(edge) = self.cfg.edges.iter().find(|e| e.from == block_id && e.to == succ) {
+                if let Some(edge) = self
+                    .cfg
+                    .edges
+                    .iter()
+                    .find(|e| e.from == block_id && e.to == succ)
+                {
                     if edge.edge_type == EdgeType::BackEdge {
                         continue;
                     }
@@ -167,7 +180,8 @@ impl PDGBuilder {
 
         // For all visited blocks (except start_block which we already handled),
         // add control dependencies for their lines
-        for block_id in visited {
+        for block_idx in visited.ones() {
+            let block_id = BlockId(block_idx);
             if block_id == start_block {
                 continue;
             }
@@ -200,7 +214,7 @@ impl PDGBuilder {
 
     /// Remove duplicate control dependencies.
     fn deduplicate_control_deps(&mut self) {
-        let mut seen: HashSet<(usize, usize)> = HashSet::new();
+        let mut seen: FxHashSet<(usize, usize)> = FxHashSet::default();
         self.control_deps.retain(|dep| {
             let key = (dep.condition_line, dep.dependent_line);
             seen.insert(key)
@@ -275,7 +289,7 @@ mod tests {
     ///     return result   # Block 4, line 6 (exit)
     /// ```
     fn create_test_cfg() -> CFGInfo {
-        let mut blocks = HashMap::new();
+        let mut blocks = FxHashMap::default();
 
         blocks.insert(
             BlockId(0),
@@ -358,7 +372,7 @@ mod tests {
             exits: vec![BlockId(4)],
             decision_points: 1,
             comprehension_decision_points: 0,
-            nested_cfgs: HashMap::new(),
+            nested_cfgs: FxHashMap::default(),
             is_async: false,
             await_points: 0,
             blocking_calls: Vec::new(),
@@ -433,7 +447,10 @@ mod tests {
         let pdg = PDGBuilder::new(cfg, dfg).build();
 
         // Should have control dependencies
-        assert!(pdg.control_dep_count() > 0, "PDG should have control dependencies");
+        assert!(
+            pdg.control_dep_count() > 0,
+            "PDG should have control dependencies"
+        );
 
         // Should have data flow edges
         assert!(pdg.data_edge_count() > 0, "PDG should have data flow edges");

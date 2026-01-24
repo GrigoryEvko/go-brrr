@@ -12,7 +12,7 @@ use tracing::{debug, warn};
 
 use crate::ast::extractor::AstExtractor;
 use crate::ast::types::{ClassSummary, CodeStructure, FunctionSummary, ModuleInfo};
-use crate::error::{validate_path_containment, Result, BrrrError};
+use crate::error::{validate_path_containment, BrrrError, Result};
 use crate::lang::LanguageRegistry;
 
 /// Extract code structure from a directory.
@@ -455,7 +455,8 @@ class Service {
     #[test]
     fn test_code_structure_python_only() {
         let dir = create_test_project();
-        let result = code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
+        let result =
+            code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
 
         // Should only find Python files
         assert!(result.total_files >= 3);
@@ -480,7 +481,8 @@ class Service {
     #[test]
     fn test_code_structure_typescript_only() {
         let dir = create_test_project();
-        let result = code_structure(dir.path().to_str().unwrap(), Some("typescript"), 100, false).unwrap();
+        let result =
+            code_structure(dir.path().to_str().unwrap(), Some("typescript"), 100, false).unwrap();
 
         // Should find the TypeScript file
         assert!(result.total_files >= 1);
@@ -517,7 +519,8 @@ class Service {
     #[test]
     fn test_code_structure_relative_paths() {
         let dir = create_test_project();
-        let result = code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
+        let result =
+            code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
 
         // File paths should be relative, not absolute
         for func in &result.functions {
@@ -532,7 +535,8 @@ class Service {
     #[test]
     fn test_code_structure_nested_directory() {
         let dir = create_test_project();
-        let result = code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
+        let result =
+            code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
 
         // Should find function in nested lib/core.py
         let has_nested = result.functions.iter().any(|f| f.file.contains("lib"));
@@ -612,7 +616,8 @@ class Service {
     #[test]
     fn test_function_summary_has_signature() {
         let dir = create_test_project();
-        let result = code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
+        let result =
+            code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
 
         // All functions should have non-empty signatures
         for func in &result.functions {
@@ -631,7 +636,8 @@ class Service {
     #[test]
     fn test_class_summary_has_method_count() {
         let dir = create_test_project();
-        let result = code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
+        let result =
+            code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
 
         // Find the Greeter class
         let greeter = result.classes.iter().find(|c| c.name == "Greeter");
@@ -709,7 +715,8 @@ class Service {
         // This should be excluded from analysis for security
         let _ = symlink("/etc/passwd", dir.path().join("escape.py"));
 
-        let result = code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
+        let result =
+            code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
 
         // Should find the safe function
         let has_safe = result.functions.iter().any(|f| f.name == "safe_func");
@@ -733,9 +740,13 @@ class Service {
         fs::write(sub_dir.join("utils.py"), "def util_func(): pass").unwrap();
 
         // Create a symlink that points INSIDE the root (safe)
-        let _ = symlink(sub_dir.join("utils.py"), dir.path().join("link_to_utils.py"));
+        let _ = symlink(
+            sub_dir.join("utils.py"),
+            dir.path().join("link_to_utils.py"),
+        );
 
-        let result = code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
+        let result =
+            code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
 
         // Should find util_func (from the actual file)
         let has_util = result.functions.iter().any(|f| f.name == "util_func");
@@ -863,7 +874,8 @@ class Service {
         // Create a Python file with invalid syntax that will fail parsing
         fs::write(dir.path().join("invalid.py"), "def bad( missing colon").unwrap();
 
-        let result = code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
+        let result =
+            code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
 
         // total_files should count both files
         assert_eq!(result.total_files, 2, "Should find 2 Python files");
@@ -888,7 +900,8 @@ class Service {
     fn test_files_processed_reflects_success() {
         // BUG-009: Verify files_processed counts only successfully parsed files
         let dir = create_test_project();
-        let result = code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
+        let result =
+            code_structure(dir.path().to_str().unwrap(), Some("python"), 100, false).unwrap();
 
         // files_processed should equal the number of unique files that contributed functions/classes
         let unique_files: std::collections::HashSet<&str> = result
@@ -951,10 +964,7 @@ function tsFunc(x: number): number {
             js_result.total_files
         );
         assert!(
-            js_result
-                .functions
-                .iter()
-                .any(|f| f.file.ends_with(".js")),
+            js_result.functions.iter().any(|f| f.file.ends_with(".js")),
             "Should find functions in .js files"
         );
 

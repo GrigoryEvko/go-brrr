@@ -69,16 +69,10 @@ pub mod design_patterns;
 // Re-export main types for convenience.
 pub use design_patterns::{
     // Main API
-    detect_patterns,
-    format_pattern_summary,
-    PatternDetector,
-    // Types
-    DesignPattern,
-    Location,
-    PatternAnalysis,
-    PatternCategory,
+    detect_patterns, format_pattern_summary,
+    // Configuration
     PatternConfig,
-    PatternError,
-    PatternMatch,
-    PatternStats,
+    // Types
+    DesignPattern, Location, PatternAnalysis, PatternCategory, PatternDetector, PatternError,
+    PatternMatch, PatternStats,
 };

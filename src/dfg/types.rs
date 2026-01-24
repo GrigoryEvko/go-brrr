@@ -1,7 +1,8 @@
 //! DFG type definitions.
 
+use nohash_hasher::IntMap;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::OnceLock;
 
 /// Kind of data flow.
@@ -113,10 +114,12 @@ pub struct DataflowEdge {
 pub struct AdjacencyCache {
     /// Incoming edges: to_line -> [from_lines]
     /// Used for backward slicing.
-    pub incoming: HashMap<usize, Vec<usize>>,
+    /// Uses `IntMap` for zero-cost hashing on usize keys.
+    pub incoming: IntMap<usize, Vec<usize>>,
     /// Outgoing edges: from_line -> [to_lines]
     /// Used for forward slicing.
-    pub outgoing: HashMap<usize, Vec<usize>>,
+    /// Uses `IntMap` for zero-cost hashing on usize keys.
+    pub outgoing: IntMap<usize, Vec<usize>>,
 }
 
 /// Per-variable adjacency cache for variable-filtered slicing.
@@ -130,10 +133,12 @@ pub struct AdjacencyCache {
 pub struct VariableAdjacencyCache {
     /// Per-variable incoming edges: variable -> (to_line -> [from_lines])
     /// Used for variable-specific backward slicing.
-    pub var_incoming: HashMap<String, HashMap<usize, Vec<usize>>>,
+    /// Uses `FxHashMap` for string keys, `IntMap` for line number keys.
+    pub var_incoming: FxHashMap<String, IntMap<usize, Vec<usize>>>,
     /// Per-variable outgoing edges: variable -> (from_line -> [to_lines])
     /// Used for variable-specific forward slicing.
-    pub var_outgoing: HashMap<String, HashMap<usize, Vec<usize>>>,
+    /// Uses `FxHashMap` for string keys, `IntMap` for line number keys.
+    pub var_outgoing: FxHashMap<String, IntMap<usize, Vec<usize>>>,
 }
 
 /// Complete data flow graph for a function.
@@ -147,6 +152,8 @@ pub struct VariableAdjacencyCache {
 /// The adjacency cache is built once on first slice operation and reused for all
 /// subsequent operations. This amortizes the O(E) cost of building adjacency lists
 /// across multiple slice calls, providing up to 15900x speedup for repeated queries.
+///
+/// Uses `FxHashMap` for string-keyed maps (2-3x faster than std HashMap).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DFGInfo {
     /// Function name
@@ -154,9 +161,9 @@ pub struct DFGInfo {
     /// All data flow edges
     pub edges: Vec<DataflowEdge>,
     /// Where each variable is defined
-    pub definitions: HashMap<String, Vec<usize>>,
+    pub definitions: FxHashMap<String, Vec<usize>>,
     /// Where each variable is used
-    pub uses: HashMap<String, Vec<usize>>,
+    pub uses: FxHashMap<String, Vec<usize>>,
     /// Cached adjacency lists for O(1) edge lookups during slicing.
     /// Lazily initialized on first access via `get_adjacency_cache()`.
     #[serde(skip)]
@@ -191,8 +198,8 @@ impl DFGInfo {
     pub fn new(
         function_name: String,
         edges: Vec<DataflowEdge>,
-        definitions: HashMap<String, Vec<usize>>,
-        uses: HashMap<String, Vec<usize>>,
+        definitions: FxHashMap<String, Vec<usize>>,
+        uses: FxHashMap<String, Vec<usize>>,
     ) -> Self {
         Self {
             function_name,
@@ -221,8 +228,10 @@ impl DFGInfo {
     pub fn get_adjacency_cache(&self) -> &AdjacencyCache {
         self.adjacency_cache.get_or_init(|| {
             let edge_count = self.edges.len();
-            let mut incoming: HashMap<usize, Vec<usize>> = HashMap::with_capacity(edge_count);
-            let mut outgoing: HashMap<usize, Vec<usize>> = HashMap::with_capacity(edge_count);
+            let mut incoming: IntMap<usize, Vec<usize>> =
+                IntMap::with_capacity_and_hasher(edge_count, nohash_hasher::BuildNoHashHasher::default());
+            let mut outgoing: IntMap<usize, Vec<usize>> =
+                IntMap::with_capacity_and_hasher(edge_count, nohash_hasher::BuildNoHashHasher::default());
 
             for edge in &self.edges {
                 incoming
@@ -281,8 +290,8 @@ impl DFGInfo {
     #[inline]
     pub fn get_variable_adjacency_cache(&self) -> &VariableAdjacencyCache {
         self.variable_adjacency_cache.get_or_init(|| {
-            let mut var_incoming: HashMap<String, HashMap<usize, Vec<usize>>> = HashMap::new();
-            let mut var_outgoing: HashMap<String, HashMap<usize, Vec<usize>>> = HashMap::new();
+            let mut var_incoming: FxHashMap<String, IntMap<usize, Vec<usize>>> = FxHashMap::default();
+            let mut var_outgoing: FxHashMap<String, IntMap<usize, Vec<usize>>> = FxHashMap::default();
 
             for edge in &self.edges {
                 var_incoming
@@ -343,7 +352,7 @@ impl DFGInfo {
     ///
     /// Returns `None` if the variable has no incoming edges in the DFG.
     #[inline]
-    pub fn get_var_incoming_lines(&self, variable: &str) -> Option<&HashMap<usize, Vec<usize>>> {
+    pub fn get_var_incoming_lines(&self, variable: &str) -> Option<&IntMap<usize, Vec<usize>>> {
         self.get_variable_adjacency_cache()
             .var_incoming
             .get(variable)
@@ -353,7 +362,7 @@ impl DFGInfo {
     ///
     /// Returns `None` if the variable has no outgoing edges in the DFG.
     #[inline]
-    pub fn get_var_outgoing_lines(&self, variable: &str) -> Option<&HashMap<usize, Vec<usize>>> {
+    pub fn get_var_outgoing_lines(&self, variable: &str) -> Option<&IntMap<usize, Vec<usize>>> {
         self.get_variable_adjacency_cache()
             .var_outgoing
             .get(variable)
@@ -569,12 +578,7 @@ mod tests {
 
     #[test]
     fn test_empty_dfg_variable_cache() {
-        let dfg = DFGInfo::new(
-            "empty".to_string(),
-            vec![],
-            HashMap::new(),
-            HashMap::new(),
-        );
+        let dfg = DFGInfo::new("empty".to_string(), vec![], FxHashMap::default(), FxHashMap::default());
 
         // Should not panic on empty DFG
         let cache = dfg.get_variable_adjacency_cache();

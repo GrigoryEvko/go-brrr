@@ -43,7 +43,7 @@ use crate::callgraph::indexer::FunctionIndex;
 use crate::callgraph::resolver;
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
 use crate::callgraph::types::{CallEdge, CallGraph, FunctionRef};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 
 // =============================================================================
 // Cache Types
@@ -173,9 +173,8 @@ pub fn save_cached_graph(project: &Path, cached: &CachedCallGraph) -> Result<()>
     }
 
     // Serialize with pretty printing for human readability
-    let content = serde_json::to_string_pretty(cached).map_err(|e| {
-        BrrrError::Cache(format!("Failed to serialize cache: {}", e))
-    })?;
+    let content = serde_json::to_string_pretty(cached)
+        .map_err(|e| BrrrError::Cache(format!("Failed to serialize cache: {}", e)))?;
 
     fs::write(&cache_file, content).map_err(|e| {
         BrrrError::Cache(format!(
@@ -298,7 +297,10 @@ pub fn apply_incremental_update(
         return Ok(());
     }
 
-    info!("Applying incremental update for {} dirty files", dirty_files.len());
+    info!(
+        "Applying incremental update for {} dirty files",
+        dirty_files.len()
+    );
 
     // Build set of dirty file paths for efficient lookup
     let dirty_set: HashSet<String> = dirty_files
@@ -316,7 +318,8 @@ pub fn apply_incremental_update(
 
     // Build index from remaining files
     // We need to include all existing files to properly resolve cross-file calls
-    let mut all_files: Vec<PathBuf> = graph.edges
+    let mut all_files: Vec<PathBuf> = graph
+        .edges
         .iter()
         .flat_map(|e| {
             let mut files = Vec::new();
@@ -378,7 +381,9 @@ pub fn get_or_build_graph_with_config(
     lang: Option<&str>,
     no_ignore: bool,
 ) -> Result<CallGraph> {
-    let project = project.canonicalize().unwrap_or_else(|_| project.to_path_buf());
+    let project = project
+        .canonicalize()
+        .unwrap_or_else(|_| project.to_path_buf());
 
     // When no_ignore is set, always do fresh build to ensure consistency
     // (cache was built with ignore patterns, but user now wants to include ignored files)
@@ -421,7 +426,10 @@ pub fn get_or_build_graph_with_config(
             return Ok(graph);
         }
 
-        info!("Found {} dirty files, applying incremental update", dirty_files.len());
+        info!(
+            "Found {} dirty files, applying incremental update",
+            dirty_files.len()
+        );
 
         // Convert cache to CallGraph
         let edges: Vec<CallEdge> = cached.edges.iter().map(|e| e.to_edge()).collect();
@@ -463,11 +471,8 @@ fn build_and_cache_with_config(
     info!("Building fresh call graph for {}", project.display());
 
     // Use the build_with_config function that respects no_ignore
-    let graph = crate::callgraph::build_with_config(
-        project.to_str().unwrap_or("."),
-        lang,
-        no_ignore,
-    )?;
+    let graph =
+        crate::callgraph::build_with_config(project.to_str().unwrap_or("."), lang, no_ignore)?;
 
     // Only save to cache if not in no_ignore mode
     // (cache built with no_ignore would be inconsistent with normal cached graphs)

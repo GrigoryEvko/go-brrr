@@ -9,11 +9,151 @@
 //! This is invaluable for debugging (what affects this bug?), understanding
 //! code (what does this change impact?), and refactoring (safe change scope).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 
+use nohash_hasher::IntMap;
+use rustc_hash::FxHashSet;
 use wide::u64x4;
 
 use crate::dfg::types::DFGInfo;
+
+// =============================================================================
+// Slice Direction
+// =============================================================================
+
+/// Direction of graph traversal for slicing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SliceDirection {
+    /// Backward: follow incoming edges (who affects me?)
+    Backward,
+    /// Forward: follow outgoing edges (who do I affect?)
+    Forward,
+}
+
+// =============================================================================
+// Generic Slice Traversal
+// =============================================================================
+
+/// Generic BFS traversal for variable-filtered slicing with optional control deps.
+///
+/// This unified implementation handles both backward and forward slicing,
+/// eliminating code duplication between the two directions.
+///
+/// # Arguments
+/// * `dfg` - Data flow graph
+/// * `start_line` - Starting line for traversal
+/// * `variable` - Variable to track
+/// * `direction` - Backward or Forward
+/// * `control_deps` - Optional pre-computed control dependencies
+///
+/// # Returns
+/// Sorted vector of line numbers in the slice.
+fn slice_variable_with_control(
+    dfg: &DFGInfo,
+    start_line: usize,
+    variable: &str,
+    direction: SliceDirection,
+    control_deps: Option<&IntMap<usize, Vec<usize>>>,
+) -> Vec<usize> {
+    // Validate start line exists using cached adjacency (O(1) lookup)
+    let cache = dfg.get_adjacency_cache();
+    let line_exists =
+        cache.incoming.contains_key(&start_line) || cache.outgoing.contains_key(&start_line);
+    if !line_exists {
+        return Vec::new();
+    }
+
+    // Get per-variable adjacency based on direction
+    let var_adjacency = match direction {
+        SliceDirection::Backward => dfg.get_var_incoming_lines(variable),
+        SliceDirection::Forward => dfg.get_var_outgoing_lines(variable),
+    };
+
+    // BFS traversal using pre-computed adjacency + control dependencies
+    let mut result: FxHashSet<usize> = FxHashSet::default();
+    let mut frontier = VecDeque::new();
+    frontier.push_back(start_line);
+
+    while let Some(line) = frontier.pop_front() {
+        if result.insert(line) {
+            // Follow variable-specific data flow edges (O(1) lookup)
+            if let Some(var_adj) = var_adjacency {
+                if let Some(neighbors) = var_adj.get(&line) {
+                    for &neighbor in neighbors {
+                        if !result.contains(&neighbor) {
+                            frontier.push_back(neighbor);
+                        }
+                    }
+                }
+            }
+
+            // Also follow ALL control dependencies (not variable-specific)
+            // This matches Python's PDG behavior where control edges are always followed
+            if let Some(deps) = control_deps {
+                if let Some(dep_lines) = deps.get(&line) {
+                    for &dep_line in dep_lines {
+                        if !result.contains(&dep_line) {
+                            frontier.push_back(dep_line);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut lines: Vec<_> = result.into_iter().collect();
+    lines.sort_unstable();
+    lines
+}
+
+// =============================================================================
+// Shared Trait for Line Collections
+// =============================================================================
+
+/// Trait for types that contain a sorted collection of line numbers.
+///
+/// Provides common operations for slices and chops, avoiding code duplication.
+pub trait LineCollection {
+    /// Get the underlying lines slice.
+    fn lines(&self) -> &[usize];
+
+    /// Get the line range covered by the collection.
+    ///
+    /// Returns `Some((min_line, max_line))` if non-empty, `None` if empty.
+    /// Assumes lines are sorted (as guaranteed by slice/chop implementations).
+    #[inline]
+    fn line_range(&self) -> Option<(usize, usize)> {
+        let lines = self.lines();
+        match (lines.first(), lines.last()) {
+            (Some(&first), Some(&last)) => Some((first, last)),
+            _ => None,
+        }
+    }
+
+    /// Check if a specific line is in the collection.
+    ///
+    /// Uses binary search since lines are sorted.
+    #[inline]
+    fn contains_line(&self, line: usize) -> bool {
+        self.lines().binary_search(&line).is_ok()
+    }
+
+    /// Check if the collection is empty.
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.lines().is_empty()
+    }
+
+    /// Get the number of lines in the collection.
+    #[inline]
+    fn len(&self) -> usize {
+        self.lines().len()
+    }
+}
+
+// =============================================================================
+// Public API
+// =============================================================================
 
 /// Criteria for slicing operations.
 #[derive(Debug, Clone)]
@@ -110,31 +250,10 @@ impl SliceMetrics {
     }
 }
 
-impl SliceResult {
-    /// Check if a specific line is in the slice.
-    #[allow(dead_code)] // Public API for library consumers
+impl LineCollection for SliceResult {
     #[inline]
-    pub fn contains_line(&self, line: usize) -> bool {
-        self.lines.binary_search(&line).is_ok()
-    }
-
-    /// Get the line range covered by the slice.
-    ///
-    /// Returns `Some((min_line, max_line))` if the slice is non-empty,
-    /// `None` if the slice is empty.
-    #[allow(dead_code)] // Public API for library consumers
-    pub fn line_range(&self) -> Option<(usize, usize)> {
-        match (self.lines.first(), self.lines.last()) {
-            (Some(&first), Some(&last)) => Some((first, last)),
-            _ => None,
-        }
-    }
-
-    /// Check if the slice is empty.
-    #[allow(dead_code)] // Public API for library consumers
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.lines.is_empty()
+    fn lines(&self) -> &[usize] {
+        &self.lines
     }
 }
 
@@ -325,31 +444,10 @@ pub struct ChopResult {
     pub variable: Option<String>,
 }
 
-impl ChopResult {
-    /// Check if a specific line is in the chop.
-    #[allow(dead_code)] // Public API for library consumers
+impl LineCollection for ChopResult {
     #[inline]
-    pub fn contains_line(&self, line: usize) -> bool {
-        self.lines.binary_search(&line).is_ok()
-    }
-
-    /// Get the line range covered by the chop.
-    ///
-    /// Returns `Some((min_line, max_line))` if the chop is non-empty,
-    /// `None` if the chop is empty.
-    #[allow(dead_code)] // Public API for library consumers
-    pub fn line_range(&self) -> Option<(usize, usize)> {
-        match (self.lines.first(), self.lines.last()) {
-            (Some(&first), Some(&last)) => Some((first, last)),
-            _ => None,
-        }
-    }
-
-    /// Check if the chop is empty.
-    #[allow(dead_code)] // Public API for library consumers
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.lines.is_empty()
+    fn lines(&self) -> &[usize] {
+        &self.lines
     }
 }
 
@@ -456,10 +554,10 @@ fn chop_impl(
 
     // Use cached adjacency to validate lines exist (O(1) lookup)
     let cache = dfg.get_adjacency_cache();
-    let source_exists = cache.incoming.contains_key(&source_line)
-        || cache.outgoing.contains_key(&source_line);
-    let target_exists = cache.incoming.contains_key(&target_line)
-        || cache.outgoing.contains_key(&target_line);
+    let source_exists =
+        cache.incoming.contains_key(&source_line) || cache.outgoing.contains_key(&source_line);
+    let target_exists =
+        cache.incoming.contains_key(&target_line) || cache.outgoing.contains_key(&target_line);
 
     if !source_exists || !target_exists {
         return ChopResult {
@@ -470,19 +568,16 @@ fn chop_impl(
         };
     }
 
-    let forward_set: HashSet<usize> = forward_slice_variable_impl(dfg, source_line, var)
+    let forward_set: FxHashSet<usize> = forward_slice_variable_impl(dfg, source_line, var)
         .into_iter()
         .collect();
 
-    let backward_set: HashSet<usize> = backward_slice_variable_impl(dfg, target_line, var)
+    let backward_set: FxHashSet<usize> = backward_slice_variable_impl(dfg, target_line, var)
         .into_iter()
         .collect();
 
     // Chop = intersection of forward from source and backward from target
-    let mut chop_lines: Vec<usize> = forward_set
-        .intersection(&backward_set)
-        .copied()
-        .collect();
+    let mut chop_lines: Vec<usize> = forward_set.intersection(&backward_set).copied().collect();
 
     chop_lines.sort_unstable();
 
@@ -533,19 +628,23 @@ fn chop_bidirectional(dfg: &DFGInfo, source_line: usize, target_line: usize) -> 
     // Handle trivial case: same source and target
     if source_line == target_line {
         let cache = dfg.get_adjacency_cache();
-        let exists = cache.incoming.contains_key(&source_line)
-            || cache.outgoing.contains_key(&source_line);
-        return if exists { vec![source_line] } else { Vec::new() };
+        let exists =
+            cache.incoming.contains_key(&source_line) || cache.outgoing.contains_key(&source_line);
+        return if exists {
+            vec![source_line]
+        } else {
+            Vec::new()
+        };
     }
 
     // Get cached adjacency (O(1) if already built, O(E) first time)
     let cache = dfg.get_adjacency_cache();
 
     // Validate both endpoints exist in the graph
-    let source_exists = cache.incoming.contains_key(&source_line)
-        || cache.outgoing.contains_key(&source_line);
-    let target_exists = cache.incoming.contains_key(&target_line)
-        || cache.outgoing.contains_key(&target_line);
+    let source_exists =
+        cache.incoming.contains_key(&source_line) || cache.outgoing.contains_key(&source_line);
+    let target_exists =
+        cache.incoming.contains_key(&target_line) || cache.outgoing.contains_key(&target_line);
 
     if !source_exists || !target_exists {
         return Vec::new();
@@ -553,8 +652,8 @@ fn chop_bidirectional(dfg: &DFGInfo, source_line: usize, target_line: usize) -> 
 
     // Pre-allocate with reasonable capacity based on graph density
     let estimated_size = (cache.outgoing.len() + cache.incoming.len()) / 4;
-    let mut forward_visited: HashSet<usize> = HashSet::with_capacity(estimated_size);
-    let mut backward_visited: HashSet<usize> = HashSet::with_capacity(estimated_size);
+    let mut forward_visited: FxHashSet<usize> = FxHashSet::with_capacity_and_hasher(estimated_size, Default::default());
+    let mut backward_visited: FxHashSet<usize> = FxHashSet::with_capacity_and_hasher(estimated_size, Default::default());
 
     let mut forward_frontier: VecDeque<usize> = VecDeque::with_capacity(estimated_size / 2);
     let mut backward_frontier: VecDeque<usize> = VecDeque::with_capacity(estimated_size / 2);
@@ -646,14 +745,14 @@ pub(crate) fn backward_slice_all(dfg: &DFGInfo, target_line: usize) -> Vec<usize
 
     // Validate target line exists in DFG before traversal
     // A line exists if it appears in either incoming or outgoing adjacency
-    let target_exists = cache.incoming.contains_key(&target_line)
-        || cache.outgoing.contains_key(&target_line);
+    let target_exists =
+        cache.incoming.contains_key(&target_line) || cache.outgoing.contains_key(&target_line);
     if !target_exists {
         return Vec::new();
     }
 
     // BFS backward using cached incoming adjacency
-    let mut result = HashSet::new();
+    let mut result: FxHashSet<usize> = FxHashSet::default();
     let mut frontier = VecDeque::new();
     frontier.push_back(target_line);
 
@@ -679,92 +778,9 @@ pub(crate) fn backward_slice_all(dfg: &DFGInfo, target_line: usize) -> Vec<usize
 /// This is the internal implementation that only considers data flow for the specified
 /// variable. For semantically correct slicing that matches Python's PDG behavior,
 /// use `backward_slice_variable_with_control` which also includes control dependencies.
+#[inline]
 fn backward_slice_variable_impl(dfg: &DFGInfo, target_line: usize, variable: &str) -> Vec<usize> {
-    backward_slice_variable_with_control_impl(dfg, target_line, variable, None)
-}
-
-/// Backward slice for a specific variable with optional control dependencies.
-///
-/// This matches Python's PDG slicing semantics where:
-/// - Data flow edges are filtered to the specific variable
-/// - Control dependencies are ALWAYS followed (regardless of variable)
-///
-/// Without control dependencies, the slice would miss conditions that determine
-/// whether the variable is defined. For example:
-/// ```text
-/// 1: if flag:
-/// 2:     x = 10
-/// 3: print(x)
-/// ```
-/// A backward slice from line 3 for variable 'x' should include line 1 (the condition)
-/// because the condition determines whether x is defined.
-///
-/// Returns empty vector if target_line does not exist in the DFG,
-/// matching Python's PDG semantics.
-///
-/// # Arguments
-/// * `dfg` - Data flow graph
-/// * `target_line` - Line to slice from
-/// * `variable` - Variable to track
-/// * `control_deps` - Optional pre-computed control dependencies (reverse mapping)
-///
-/// # Performance
-/// Uses pre-computed per-variable adjacency cache for O(1) edge lookups.
-/// First call builds cache O(E), subsequent calls are O(V + E_var) where
-/// E_var is the number of edges for the specific variable.
-fn backward_slice_variable_with_control_impl(
-    dfg: &DFGInfo,
-    target_line: usize,
-    variable: &str,
-    control_deps: Option<&HashMap<usize, Vec<usize>>>,
-) -> Vec<usize> {
-    // Use cached adjacency to validate target line exists
-    // This avoids O(E) traversal of get_valid_lines()
-    let cache = dfg.get_adjacency_cache();
-    let target_exists = cache.incoming.contains_key(&target_line)
-        || cache.outgoing.contains_key(&target_line);
-    if !target_exists {
-        return Vec::new();
-    }
-
-    // Get pre-computed per-variable incoming adjacency (O(1) after first build)
-    let var_incoming = dfg.get_var_incoming_lines(variable);
-
-    // BFS backward using pre-computed adjacency + control dependencies
-    let mut result = HashSet::new();
-    let mut frontier = VecDeque::new();
-    frontier.push_back(target_line);
-
-    while let Some(line) = frontier.pop_front() {
-        if result.insert(line) {
-            // Follow variable-specific data flow edges (O(1) lookup)
-            if let Some(var_adj) = var_incoming {
-                if let Some(sources) = var_adj.get(&line) {
-                    for &source in sources {
-                        if !result.contains(&source) {
-                            frontier.push_back(source);
-                        }
-                    }
-                }
-            }
-
-            // Also follow ALL control dependencies (not variable-specific)
-            // This matches Python's PDG behavior where control edges are always followed
-            if let Some(deps) = control_deps {
-                if let Some(condition_lines) = deps.get(&line) {
-                    for &condition_line in condition_lines {
-                        if !result.contains(&condition_line) {
-                            frontier.push_back(condition_line);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let mut lines: Vec<_> = result.into_iter().collect();
-    lines.sort_unstable();
-    lines
+    slice_variable_with_control(dfg, target_line, variable, SliceDirection::Backward, None)
 }
 
 /// Forward slice without variable filtering.
@@ -792,14 +808,14 @@ pub(crate) fn forward_slice_all(dfg: &DFGInfo, source_line: usize) -> Vec<usize>
 
     // Validate source line exists in DFG before traversal
     // A line exists if it appears in either incoming or outgoing adjacency
-    let source_exists = cache.incoming.contains_key(&source_line)
-        || cache.outgoing.contains_key(&source_line);
+    let source_exists =
+        cache.incoming.contains_key(&source_line) || cache.outgoing.contains_key(&source_line);
     if !source_exists {
         return Vec::new();
     }
 
     // BFS forward using cached outgoing adjacency
-    let mut result = HashSet::new();
+    let mut result: FxHashSet<usize> = FxHashSet::default();
     let mut frontier = VecDeque::new();
     frontier.push_back(source_line);
 
@@ -825,85 +841,9 @@ pub(crate) fn forward_slice_all(dfg: &DFGInfo, source_line: usize) -> Vec<usize>
 /// This is the internal implementation that only considers data flow for the specified
 /// variable. For semantically correct slicing that matches Python's PDG behavior,
 /// use `forward_slice_variable_with_control` which also includes control dependencies.
+#[inline]
 fn forward_slice_variable_impl(dfg: &DFGInfo, source_line: usize, variable: &str) -> Vec<usize> {
-    forward_slice_variable_with_control_impl(dfg, source_line, variable, None)
-}
-
-/// Forward slice for a specific variable with optional control dependencies.
-///
-/// This matches Python's PDG slicing semantics where:
-/// - Data flow edges are filtered to the specific variable
-/// - Control dependencies are ALWAYS followed (regardless of variable)
-///
-/// For forward slicing, if a condition controls where the variable flows,
-/// we need to include the controlled lines.
-///
-/// Returns empty vector if source_line does not exist in the DFG,
-/// matching Python's PDG semantics.
-///
-/// # Arguments
-/// * `dfg` - Data flow graph
-/// * `source_line` - Line to slice from
-/// * `variable` - Variable to track
-/// * `control_deps` - Optional pre-computed control dependencies (forward mapping)
-///
-/// # Performance
-/// Uses pre-computed per-variable adjacency cache for O(1) edge lookups.
-/// First call builds cache O(E), subsequent calls are O(V + E_var) where
-/// E_var is the number of edges for the specific variable.
-fn forward_slice_variable_with_control_impl(
-    dfg: &DFGInfo,
-    source_line: usize,
-    variable: &str,
-    control_deps: Option<&HashMap<usize, Vec<usize>>>,
-) -> Vec<usize> {
-    // Use cached adjacency to validate source line exists
-    // This avoids O(E) traversal of get_valid_lines()
-    let cache = dfg.get_adjacency_cache();
-    let source_exists = cache.incoming.contains_key(&source_line)
-        || cache.outgoing.contains_key(&source_line);
-    if !source_exists {
-        return Vec::new();
-    }
-
-    // Get pre-computed per-variable outgoing adjacency (O(1) after first build)
-    let var_outgoing = dfg.get_var_outgoing_lines(variable);
-
-    // BFS forward using pre-computed adjacency + control dependencies
-    let mut result = HashSet::new();
-    let mut frontier = VecDeque::new();
-    frontier.push_back(source_line);
-
-    while let Some(line) = frontier.pop_front() {
-        if result.insert(line) {
-            // Follow variable-specific data flow edges (O(1) lookup)
-            if let Some(var_adj) = var_outgoing {
-                if let Some(targets) = var_adj.get(&line) {
-                    for &target in targets {
-                        if !result.contains(&target) {
-                            frontier.push_back(target);
-                        }
-                    }
-                }
-            }
-
-            // Also follow ALL control dependencies (not variable-specific)
-            // This matches Python's PDG behavior where control edges are always followed
-            if let Some(deps) = control_deps {
-                if let Some(dependent_lines) = deps.get(&line) {
-                    for &dependent_line in dependent_lines {
-                        if !result.contains(&dependent_line) {
-                            frontier.push_back(dependent_line);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let mut lines: Vec<_> = result.into_iter().collect();
-    lines.sort_unstable();
-    lines
+    slice_variable_with_control(dfg, source_line, variable, SliceDirection::Forward, None)
 }
 
 // =============================================================================
@@ -912,9 +852,9 @@ fn forward_slice_variable_with_control_impl(
 
 /// Collect all variables involved in edges touching the given lines.
 fn collect_slice_variables(dfg: &DFGInfo, lines: &[usize]) -> Vec<String> {
-    let line_set: HashSet<usize> = lines.iter().copied().collect();
+    let line_set: FxHashSet<usize> = lines.iter().copied().collect();
 
-    let mut variables: HashSet<&str> = HashSet::new();
+    let mut variables: FxHashSet<&str> = FxHashSet::default();
     for edge in &dfg.edges {
         if line_set.contains(&edge.from_line) || line_set.contains(&edge.to_line) {
             variables.insert(&edge.variable);
@@ -960,9 +900,7 @@ fn count_edges_in_slice(dfg: &DFGInfo, lines: &[usize]) -> usize {
         .iter()
         .filter(|e| {
             // Skip self-loops - they add no data flow information
-            e.from_line != e.to_line
-                && contains(lines, e.from_line)
-                && contains(lines, e.to_line)
+            e.from_line != e.to_line && contains(lines, e.from_line) && contains(lines, e.to_line)
         })
         .count()
 }
@@ -1620,16 +1558,12 @@ mod tests {
                 let bidirectional = chop_bidirectional(&dfg, source, target);
 
                 // Compute using original approach
-                let forward_set: HashSet<usize> = forward_slice_all(&dfg, source)
-                    .into_iter()
-                    .collect();
-                let backward_set: HashSet<usize> = backward_slice_all(&dfg, target)
-                    .into_iter()
-                    .collect();
-                let mut original: Vec<usize> = forward_set
-                    .intersection(&backward_set)
-                    .copied()
-                    .collect();
+                let forward_set: FxHashSet<usize> =
+                    forward_slice_all(&dfg, source).into_iter().collect();
+                let backward_set: FxHashSet<usize> =
+                    backward_slice_all(&dfg, target).into_iter().collect();
+                let mut original: Vec<usize> =
+                    forward_set.intersection(&backward_set).copied().collect();
                 original.sort_unstable();
 
                 assert_eq!(
@@ -1674,24 +1608,21 @@ mod tests {
                     kind: DataflowKind::Use,
                 },
             ],
-            [
-                ("x".to_string(), vec![1]),
-                ("y".to_string(), vec![1]),
-            ]
-            .into_iter()
-            .collect(),
-            [
-                ("x".to_string(), vec![2, 4]),
-                ("y".to_string(), vec![3, 4]),
-            ]
-            .into_iter()
-            .collect(),
+            [("x".to_string(), vec![1]), ("y".to_string(), vec![1])]
+                .into_iter()
+                .collect(),
+            [("x".to_string(), vec![2, 4]), ("y".to_string(), vec![3, 4])]
+                .into_iter()
+                .collect(),
         );
 
         // Chop from 1 to 4 should include all paths: {1, 2, 3, 4}
         let result = chop_bidirectional(&dfg, 1, 4);
-        assert_eq!(result, vec![1, 2, 3, 4],
-            "Bidirectional chop should find ALL nodes on ALL paths");
+        assert_eq!(
+            result,
+            vec![1, 2, 3, 4],
+            "Bidirectional chop should find ALL nodes on ALL paths"
+        );
     }
 
     #[test]
@@ -1714,18 +1645,12 @@ mod tests {
                     kind: DataflowKind::Definition,
                 },
             ],
-            [
-                ("x".to_string(), vec![1]),
-                ("y".to_string(), vec![3]),
-            ]
-            .into_iter()
-            .collect(),
-            [
-                ("x".to_string(), vec![2]),
-                ("y".to_string(), vec![4]),
-            ]
-            .into_iter()
-            .collect(),
+            [("x".to_string(), vec![1]), ("y".to_string(), vec![3])]
+                .into_iter()
+                .collect(),
+            [("x".to_string(), vec![2]), ("y".to_string(), vec![4])]
+                .into_iter()
+                .collect(),
         );
 
         // No path from 1 to 4
@@ -1741,8 +1666,10 @@ mod tests {
         let chop_result = chop(&dfg, 2, 4);
         let bidirectional_result = chop_bidirectional(&dfg, 2, 4);
 
-        assert_eq!(chop_result.lines, bidirectional_result,
-            "chop() should use chop_bidirectional internally");
+        assert_eq!(
+            chop_result.lines, bidirectional_result,
+            "chop() should use chop_bidirectional internally"
+        );
     }
 
     #[test]

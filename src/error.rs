@@ -66,6 +66,14 @@ pub enum BrrrError {
     /// Configuration error (e.g., invalid ignore patterns)
     #[error("Configuration error: {0}")]
     Config(String),
+
+    /// Analysis error (invariant detection, state machine analysis, etc.)
+    #[error("Analysis error: {0}")]
+    Analysis(String),
+
+    /// Serialization/deserialization error (non-JSON formats)
+    #[error("Serialization error: {0}")]
+    Serialization(String),
 }
 
 /// Convenience type alias for Results using BrrrError.
@@ -132,10 +140,7 @@ impl BrrrError {
 /// assert!(validate_path_containment(base, safe).is_ok());
 /// assert!(validate_path_containment(base, unsafe_path).is_err());
 /// ```
-pub fn validate_path_containment(
-    base: &Path,
-    target: &Path,
-) -> Result<std::path::PathBuf> {
+pub fn validate_path_containment(base: &Path, target: &Path) -> Result<std::path::PathBuf> {
     let canonical_base = base.canonicalize()?;
     let canonical_target = target.canonicalize()?;
 

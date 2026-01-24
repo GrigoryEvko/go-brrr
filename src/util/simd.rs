@@ -100,9 +100,7 @@ fn find_bytes_many(haystack: &[u8], needles: &[u8]) -> Option<usize> {
     // Iterate through haystack checking membership
     // Note: For very long haystacks with many needles, consider using
     // memchr::memmem or aho-corasick for better performance
-    haystack
-        .iter()
-        .position(|&byte| lookup[byte as usize])
+    haystack.iter().position(|&byte| lookup[byte as usize])
 }
 
 /// Count the number of occurrences of a byte in a slice.

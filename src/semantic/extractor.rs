@@ -4,9 +4,10 @@
 //! a project and prepare them for semantic embedding. Handles chunking of
 //! oversized units and semantic pattern detection.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+
+use parking_lot::RwLock;
+use rustc_hash::FxHashMap;
 use std::time::SystemTime;
 
 use once_cell::sync::Lazy;
@@ -18,7 +19,7 @@ use crate::ast::{AstExtractor, ClassInfo, FunctionInfo};
 use crate::callgraph::{self, CallGraph, FunctionRef};
 use crate::cfg::{CfgBuilder, EdgeType};
 use crate::dfg::DfgBuilder;
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
 use crate::util::ignore::BrrrIgnore;
 
@@ -66,8 +67,8 @@ struct CachedUnits {
 
 /// Per-file cache for extracted semantic units.
 /// Key is the canonicalized file path to ensure consistency.
-static UNIT_CACHE: Lazy<RwLock<HashMap<PathBuf, CachedUnits>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
+static UNIT_CACHE: Lazy<RwLock<FxHashMap<PathBuf, CachedUnits>>> =
+    Lazy::new(|| RwLock::new(FxHashMap::default()));
 
 /// Process a file with caching based on modification time.
 ///
@@ -89,7 +90,7 @@ fn process_file_cached(
 
     // Check cache first (read lock)
     {
-        let cache = UNIT_CACHE.read().unwrap();
+        let cache = UNIT_CACHE.read();
         if let Some(cached) = cache.get(&canonical_path) {
             if cached.mtime == mtime && cached.language == language {
                 return Ok(cached.units.clone());
@@ -102,7 +103,7 @@ fn process_file_cached(
 
     // Update cache (write lock)
     {
-        let mut cache = UNIT_CACHE.write().unwrap();
+        let mut cache = UNIT_CACHE.write();
         cache.insert(
             canonical_path,
             CachedUnits {
@@ -121,7 +122,7 @@ fn process_file_cached(
 /// Useful when you want to force re-extraction of all files,
 /// or to free memory when the cache is no longer needed.
 pub fn clear_unit_cache() {
-    let mut cache = UNIT_CACHE.write().unwrap();
+    let mut cache = UNIT_CACHE.write();
     cache.clear();
 }
 
@@ -130,7 +131,7 @@ pub fn clear_unit_cache() {
 /// Returns the count of files currently in the extraction cache.
 #[must_use]
 pub fn unit_cache_stats() -> usize {
-    let cache = UNIT_CACHE.read().unwrap();
+    let cache = UNIT_CACHE.read();
     cache.len()
 }
 
@@ -140,7 +141,7 @@ pub fn unit_cache_stats() -> usize {
 /// the next extraction uses fresh data.
 pub fn invalidate_unit_cache(file_path: &Path) {
     if let Ok(canonical) = file_path.canonicalize() {
-        let mut cache = UNIT_CACHE.write().unwrap();
+        let mut cache = UNIT_CACHE.write();
         cache.remove(&canonical);
     }
 }
@@ -152,7 +153,7 @@ pub fn invalidate_unit_cache_matching<F>(predicate: F)
 where
     F: Fn(&Path) -> bool,
 {
-    let mut cache = UNIT_CACHE.write().unwrap();
+    let mut cache = UNIT_CACHE.write();
     cache.retain(|path, _| !predicate(path));
 }
 
@@ -515,9 +516,7 @@ fn read_file_content(path: &Path) -> std::io::Result<String> {
     if bytes.starts_with(&[0xFF, 0xFE]) {
         let utf16: Vec<u16> = bytes[2..]
             .chunks(2)
-            .map(|chunk| {
-                u16::from_le_bytes([chunk[0], chunk.get(1).copied().unwrap_or(0)])
-            })
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk.get(1).copied().unwrap_or(0)]))
             .collect();
         let content = String::from_utf16_lossy(&utf16);
         return Ok(normalize_line_endings(&content));
@@ -527,9 +526,7 @@ fn read_file_content(path: &Path) -> std::io::Result<String> {
     if bytes.starts_with(&[0xFE, 0xFF]) {
         let utf16: Vec<u16> = bytes[2..]
             .chunks(2)
-            .map(|chunk| {
-                u16::from_be_bytes([chunk[0], chunk.get(1).copied().unwrap_or(0)])
-            })
+            .map(|chunk| u16::from_be_bytes([chunk[0], chunk.get(1).copied().unwrap_or(0)]))
             .collect();
         let content = String::from_utf16_lossy(&utf16);
         return Ok(normalize_line_endings(&content));
@@ -583,7 +580,10 @@ fn scan_source_files(project_path: &Path, language: &str) -> Vec<PathBuf> {
     let ignore = match BrrrIgnore::new(project_path) {
         Ok(ig) => Some(ig),
         Err(e) => {
-            tracing::warn!("Failed to load .brrrignore patterns: {}. Proceeding without ignore filtering.", e);
+            tracing::warn!(
+                "Failed to load .brrrignore patterns: {}. Proceeding without ignore filtering.",
+                e
+            );
             None
         }
     };
@@ -771,7 +771,9 @@ pub fn extract_units(project_path: &str, language: &str) -> Result<Vec<Embedding
     // Process files in parallel with caching
     let units: Vec<EmbeddingUnit> = source_files
         .par_iter()
-        .flat_map(|file_path| process_file_cached(&project, file_path, language).unwrap_or_default())
+        .flat_map(|file_path| {
+            process_file_cached(&project, file_path, language).unwrap_or_default()
+        })
         .collect();
 
     Ok(units)
@@ -962,7 +964,10 @@ pub fn extract_units_from_file(file_path: &str) -> Result<Vec<EmbeddingUnit>> {
 /// }
 /// # Ok::<(), go_brrr::BrrrError>(())
 /// ```
-pub fn extract_units_with_callgraph(project_path: &str, language: &str) -> Result<Vec<EmbeddingUnit>> {
+pub fn extract_units_with_callgraph(
+    project_path: &str,
+    language: &str,
+) -> Result<Vec<EmbeddingUnit>> {
     let project = Path::new(project_path)
         .canonicalize()
         .map_err(BrrrError::Io)?;
@@ -982,25 +987,23 @@ pub fn extract_units_with_callgraph(project_path: &str, language: &str) -> Resul
         }
 
         // Find matching function in call graph
-        if let Some(func_ref) = find_function_in_graph(&call_graph, &project, &unit.file, &unit.name, unit.parent.as_deref()) {
+        if let Some(func_ref) = find_function_in_graph(
+            &call_graph,
+            &project,
+            &unit.file,
+            &unit.name,
+            unit.parent.as_deref(),
+        ) {
             // Get functions this unit calls (callees)
             if let Some(callees) = call_graph.callees.get(&func_ref) {
-                unit.calls = callees
-                    .iter()
-                    .map(|f| f.name.clone())
-                    .take(20)
-                    .collect();
+                unit.calls = callees.iter().map(|f| f.name.clone()).take(20).collect();
                 unit.calls.sort();
                 unit.calls.dedup();
             }
 
             // Get functions that call this unit (callers)
             if let Some(callers) = call_graph.callers.get(&func_ref) {
-                unit.called_by = callers
-                    .iter()
-                    .map(|f| f.name.clone())
-                    .take(20)
-                    .collect();
+                unit.called_by = callers.iter().map(|f| f.name.clone()).take(20).collect();
                 unit.called_by.sort();
                 unit.called_by.dedup();
             }
@@ -1101,12 +1104,15 @@ fn find_function_in_graph(
 /// information to avoid duplicating it across all chunks.
 fn propagate_call_info_to_chunks(units: &mut [EmbeddingUnit]) {
     // Build a map of parent name -> call info for non-chunk units
-    let mut call_info_map: std::collections::HashMap<String, (Vec<String>, Vec<String>)> =
-        std::collections::HashMap::new();
+    let mut call_info_map: FxHashMap<String, (Vec<String>, Vec<String>)> =
+        FxHashMap::default();
 
     for unit in units.iter() {
         if unit.kind != UnitKind::Chunk && (!unit.calls.is_empty() || !unit.called_by.is_empty()) {
-            call_info_map.insert(unit.name.clone(), (unit.calls.clone(), unit.called_by.clone()));
+            call_info_map.insert(
+                unit.name.clone(),
+                (unit.calls.clone(), unit.called_by.clone()),
+            );
         }
     }
 
@@ -1250,7 +1256,8 @@ pub fn extract_inline_comments(code: &str, language: &str) -> Vec<String> {
         if let Some(pos) = trimmed.find(line_comment) {
             // Make sure it's not inside a string (simple heuristic)
             let before_comment = &trimmed[..pos];
-            let quote_count = before_comment.matches('"').count() + before_comment.matches('\'').count();
+            let quote_count =
+                before_comment.matches('"').count() + before_comment.matches('\'').count();
 
             // Skip if odd number of quotes before comment (likely inside string)
             if quote_count % 2 != 0 {
@@ -1286,13 +1293,15 @@ fn is_valid_comment(comment: &str) -> bool {
     // Skip common noise patterns
     let lower = comment.to_lowercase();
     let noise_patterns = [
-        "todo", "fixme", "hack", "xxx", "###", "---", "===", "***",
-        "lint:", "type:", "noqa", "pylint", "pragma", "nolint",
+        "todo", "fixme", "hack", "xxx", "###", "---", "===", "***", "lint:", "type:", "noqa",
+        "pylint", "pragma", "nolint",
     ];
 
     // Skip if the comment is ONLY a noise pattern (allow "TODO: actual description")
     for pattern in noise_patterns {
-        if lower == pattern || lower.starts_with(&format!("{} ", pattern)) && lower.len() < pattern.len() + 5 {
+        if lower == pattern
+            || lower.starts_with(&format!("{} ", pattern)) && lower.len() < pattern.len() + 5
+        {
             return false;
         }
     }
@@ -1372,7 +1381,8 @@ fn extract_parameters_from_signature(signature: &str) -> Vec<String> {
         .filter_map(|p| {
             // Skip 'self', 'cls', '&self', '&mut self'
             let p_lower = p.to_lowercase();
-            if p_lower == "self" || p_lower == "cls" || p_lower == "&self" || p_lower == "&mut self" {
+            if p_lower == "self" || p_lower == "cls" || p_lower == "&self" || p_lower == "&mut self"
+            {
                 return None;
             }
 
@@ -1868,7 +1878,9 @@ fn test() {
         let comments = extract_inline_comments(code_with_noise, "rust");
         // Should filter out short/noise comments
         assert!(
-            !comments.iter().any(|c| c == "TODO" || c == "FIXME" || c == "###"),
+            !comments
+                .iter()
+                .any(|c| c == "TODO" || c == "FIXME" || c == "###"),
             "Noise comments should be filtered out, got: {:?}",
             comments
         );
@@ -2126,11 +2138,10 @@ fn test() {
 
     #[test]
     fn test_extract_dependency_summary_simple_import() {
-        use std::collections::HashMap;
         let imports = vec![crate::ast::ImportInfo {
             module: "os".to_string(),
             names: vec![],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: false,
             level: 0,
             line_number: 1,
@@ -2142,11 +2153,10 @@ fn test() {
 
     #[test]
     fn test_extract_dependency_summary_from_import() {
-        use std::collections::HashMap;
         let imports = vec![crate::ast::ImportInfo {
             module: "os.path".to_string(),
             names: vec!["join".to_string(), "dirname".to_string()],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 0,
             line_number: 1,
@@ -2158,11 +2168,10 @@ fn test() {
 
     #[test]
     fn test_extract_dependency_summary_relative_import() {
-        use std::collections::HashMap;
         let imports = vec![crate::ast::ImportInfo {
             module: "".to_string(),
             names: vec!["utils".to_string()],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 2,
             line_number: 1,
@@ -2174,11 +2183,10 @@ fn test() {
 
     #[test]
     fn test_extract_dependency_summary_relative_with_module() {
-        use std::collections::HashMap;
         let imports = vec![crate::ast::ImportInfo {
             module: "helpers".to_string(),
             names: vec!["format_date".to_string()],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 1,
             line_number: 1,
@@ -2190,12 +2198,11 @@ fn test() {
 
     #[test]
     fn test_extract_dependency_summary_multiple_imports() {
-        use std::collections::HashMap;
         let imports = vec![
             crate::ast::ImportInfo {
                 module: "os".to_string(),
                 names: vec![],
-                aliases: HashMap::new(),
+                aliases: FxHashMap::default(),
                 is_from: false,
                 level: 0,
                 line_number: 1,
@@ -2204,7 +2211,7 @@ fn test() {
             crate::ast::ImportInfo {
                 module: "sys".to_string(),
                 names: vec![],
-                aliases: HashMap::new(),
+                aliases: FxHashMap::default(),
                 is_from: false,
                 level: 0,
                 line_number: 2,
@@ -2213,7 +2220,7 @@ fn test() {
             crate::ast::ImportInfo {
                 module: "typing".to_string(),
                 names: vec!["Optional".to_string(), "List".to_string()],
-                aliases: HashMap::new(),
+                aliases: FxHashMap::default(),
                 is_from: true,
                 level: 0,
                 line_number: 3,
@@ -2226,7 +2233,6 @@ fn test() {
 
     #[test]
     fn test_extract_dependency_summary_truncates_long_names() {
-        use std::collections::HashMap;
         let imports = vec![crate::ast::ImportInfo {
             module: "typing".to_string(),
             names: vec![
@@ -2236,7 +2242,7 @@ fn test() {
                 "Set".to_string(),
                 "Tuple".to_string(),
             ],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 0,
             line_number: 1,
@@ -2249,12 +2255,11 @@ fn test() {
 
     #[test]
     fn test_extract_dependency_summary_limits_to_10() {
-        use std::collections::HashMap;
         let imports: Vec<crate::ast::ImportInfo> = (0..15)
             .map(|i| crate::ast::ImportInfo {
                 module: format!("module{}", i),
                 names: vec![],
-                aliases: HashMap::new(),
+                aliases: FxHashMap::default(),
                 is_from: false,
                 level: 0,
                 line_number: i + 1,
@@ -2516,8 +2521,7 @@ fn test() {
             1,
             "python",
         );
-        unit.signature =
-            "def processUserData(user_id: int, config: Config) -> Result".to_string();
+        unit.signature = "def processUserData(user_id: int, config: Config) -> Result".to_string();
         // No docstring set
 
         let text = build_embedding_text(&unit);
@@ -2617,11 +2621,7 @@ fn test() {
 
         // Create directory to be ignored via .brrrignore
         fs::create_dir_all(root.join("custom_ignored")).unwrap();
-        fs::write(
-            root.join("custom_ignored/hidden.py"),
-            "def hidden(): pass",
-        )
-        .unwrap();
+        fs::write(root.join("custom_ignored/hidden.py"), "def hidden(): pass").unwrap();
 
         // Create .brrrignore with custom pattern
         fs::write(root.join(".brrrignore"), "custom_ignored/\n").unwrap();
@@ -2643,7 +2643,9 @@ fn test() {
 
         // Should NOT include custom_ignored/ files
         assert!(
-            !files.iter().any(|p| p.to_string_lossy().contains("custom_ignored")),
+            !files
+                .iter()
+                .any(|p| p.to_string_lossy().contains("custom_ignored")),
             "custom_ignored/ should be excluded by .brrrignore, got {:?}",
             files
         );
@@ -2688,12 +2690,16 @@ fn test() {
 
         // Should NOT include files from default ignored directories
         assert!(
-            !files.iter().any(|p| p.to_string_lossy().contains("node_modules")),
+            !files
+                .iter()
+                .any(|p| p.to_string_lossy().contains("node_modules")),
             "node_modules/ should be ignored by default, got {:?}",
             files
         );
         assert!(
-            !files.iter().any(|p| p.to_string_lossy().contains("__pycache__")),
+            !files
+                .iter()
+                .any(|p| p.to_string_lossy().contains("__pycache__")),
             "__pycache__/ should be ignored by default, got {:?}",
             files
         );
@@ -2819,7 +2825,9 @@ fn test() {
 
         let mut file = NamedTempFile::new().unwrap();
         // Invalid UTF-8 sequence: 0x80 is not valid as a start byte
-        let data = vec![0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x80, 0x57, 0x6F, 0x72, 0x6C, 0x64];
+        let data = vec![
+            0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x80, 0x57, 0x6F, 0x72, 0x6C, 0x64,
+        ];
         file.write_all(&data).unwrap();
 
         let content = read_file_content(file.path()).unwrap();
@@ -2827,7 +2835,10 @@ fn test() {
         assert!(content.contains("Hello"));
         assert!(content.contains("World"));
         // The invalid byte (0x80) should be replaced with U+FFFD
-        assert!(content.contains('\u{FFFD}'), "Invalid bytes should be replaced with U+FFFD");
+        assert!(
+            content.contains('\u{FFFD}'),
+            "Invalid bytes should be replaced with U+FFFD"
+        );
     }
 
     #[test]
@@ -2967,7 +2978,10 @@ fn test() {
 
         let content = read_file_content(file.path()).unwrap();
         assert_eq!(content, "line1\nline2\nline3\nline4");
-        assert!(!content.contains('\r'), "All line endings should be normalized to LF");
+        assert!(
+            !content.contains('\r'),
+            "All line endings should be normalized to LF"
+        );
     }
 
     #[test]
@@ -2978,7 +2992,9 @@ fn test() {
         // Test BOM handling combined with CRLF normalization
         let mut file = NamedTempFile::new().unwrap();
         // UTF-8 BOM + CRLF content
-        let data = [0xEF, 0xBB, 0xBF, b'H', b'i', b'\r', b'\n', b'W', b'o', b'r', b'l', b'd'];
+        let data = [
+            0xEF, 0xBB, 0xBF, b'H', b'i', b'\r', b'\n', b'W', b'o', b'r', b'l', b'd',
+        ];
         file.write_all(&data).unwrap();
 
         let content = read_file_content(file.path()).unwrap();

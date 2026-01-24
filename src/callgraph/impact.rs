@@ -30,8 +30,9 @@
 //! println!("{}", result.to_llm_context());
 //! ```
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::callgraph::types::{CallGraph, FunctionRef};
@@ -184,9 +185,9 @@ pub struct ImpactResult {
     /// Total count of affected functions.
     pub total_affected: usize,
     /// Callers grouped by distance level.
-    pub by_distance: HashMap<usize, usize>,
+    pub by_distance: FxHashMap<usize, usize>,
     /// Callers grouped by file.
-    pub by_file: HashMap<String, usize>,
+    pub by_file: FxHashMap<String, usize>,
 }
 
 impl ImpactResult {
@@ -213,7 +214,7 @@ impl ImpactResult {
         ));
 
         // Group callers by distance
-        let mut by_distance: HashMap<usize, Vec<&CallerInfo>> = HashMap::new();
+        let mut by_distance: FxHashMap<usize, Vec<&CallerInfo>> = FxHashMap::default();
         for caller in &self.callers {
             by_distance.entry(caller.distance).or_default().push(caller);
         }
@@ -231,7 +232,7 @@ impl ImpactResult {
             ));
 
             // Group by file within distance level
-            let mut by_file: HashMap<&str, Vec<&CallerInfo>> = HashMap::new();
+            let mut by_file: FxHashMap<&str, Vec<&CallerInfo>> = FxHashMap::default();
             for caller in callers {
                 by_file.entry(&caller.file).or_default().push(caller);
             }
@@ -337,8 +338,8 @@ pub fn analyze_impact(graph: &CallGraph, target: &str, config: ImpactConfig) -> 
 
     // Find all functions matching the target name using O(1) name index lookup.
     // Previous implementation used O(E) scan through all_functions().
-    // Use HashSet for O(1) membership testing (BUG-018 fix: prevents O(n) linear search)
-    let target_matches: HashSet<FunctionRef> = find_matching_targets_indexed(&name_index, target)
+    // Use FxHashSet for O(1) membership testing (BUG-018 fix: prevents O(n) linear search)
+    let target_matches: FxHashSet<FunctionRef> = find_matching_targets_indexed(&name_index, target)
         .into_iter()
         .cloned()
         .collect();
@@ -350,8 +351,8 @@ pub fn analyze_impact(graph: &CallGraph, target: &str, config: ImpactConfig) -> 
             depth: 0,
             callers: Vec::new(),
             total_affected: 0,
-            by_distance: HashMap::new(),
-            by_file: HashMap::new(),
+            by_distance: FxHashMap::default(),
+            by_file: FxHashMap::default(),
         };
     }
 
@@ -395,8 +396,8 @@ pub fn analyze_impact(graph: &CallGraph, target: &str, config: ImpactConfig) -> 
     let total_affected = callers.len();
     let max_distance = callers.iter().map(|c| c.distance).max().unwrap_or(0);
 
-    let mut by_distance: HashMap<usize, usize> = HashMap::new();
-    let mut by_file: HashMap<String, usize> = HashMap::new();
+    let mut by_distance: FxHashMap<usize, usize> = FxHashMap::default();
+    let mut by_file: FxHashMap<String, usize> = FxHashMap::default();
 
     for caller in &callers {
         *by_distance.entry(caller.distance).or_insert(0) += 1;
@@ -421,14 +422,14 @@ pub fn analyze_impact(graph: &CallGraph, target: &str, config: ImpactConfig) -> 
 /// patterns.
 ///
 /// Complexity: O(V + E) where V = visited nodes, E = edges traversed.
-/// Uses O(1) HashMap lookups via reverse_index (keyed by full FunctionRef).
+/// Uses O(1) FxHashMap lookups via reverse_index (keyed by full FunctionRef).
 fn analyze_impact_bfs(
     reverse_index: &ReverseIndex,
-    target_matches: &HashSet<FunctionRef>,
+    target_matches: &FxHashSet<FunctionRef>,
     config: &ImpactConfig,
-) -> HashMap<FunctionRef, (usize, Vec<usize>)> {
-    let mut visited: HashSet<FunctionRef> = HashSet::new();
-    let mut callers_map: HashMap<FunctionRef, (usize, Vec<usize>)> = HashMap::new();
+) -> FxHashMap<FunctionRef, (usize, Vec<usize>)> {
+    let mut visited: FxHashSet<FunctionRef> = FxHashSet::default();
+    let mut callers_map: FxHashMap<FunctionRef, (usize, Vec<usize>)> = FxHashMap::default();
     let mut queue: VecDeque<(FunctionRef, usize)> = VecDeque::new();
 
     // Initialize queue with direct callers of all matching targets
@@ -494,13 +495,13 @@ fn analyze_impact_bfs(
 /// Both paths D->B->A and D->C->A are explored, and A gets the minimum distance.
 ///
 /// Complexity: O(V + E) for simple graphs, potentially O(V * paths) for diamond patterns.
-/// Uses O(1) HashMap lookups via reverse_index (keyed by full FunctionRef).
+/// Uses O(1) FxHashMap lookups via reverse_index (keyed by full FunctionRef).
 fn analyze_impact_dfs(
     reverse_index: &ReverseIndex,
-    target_matches: &HashSet<FunctionRef>,
+    target_matches: &FxHashSet<FunctionRef>,
     config: &ImpactConfig,
-) -> HashMap<FunctionRef, (usize, Vec<usize>)> {
-    let mut all_callers: HashMap<FunctionRef, (usize, Vec<usize>)> = HashMap::new();
+) -> FxHashMap<FunctionRef, (usize, Vec<usize>)> {
+    let mut all_callers: FxHashMap<FunctionRef, (usize, Vec<usize>)> = FxHashMap::default();
     let max_depth = config.max_depth;
 
     /// Recursive DFS helper with per-path visited set.
@@ -508,9 +509,9 @@ fn analyze_impact_dfs(
         func: &FunctionRef,
         distance: usize,
         max_depth: usize,
-        visited: &mut HashSet<FunctionRef>,
-        reverse_index: &HashMap<FunctionRef, Vec<(FunctionRef, usize)>>,
-        all_callers: &mut HashMap<FunctionRef, (usize, Vec<usize>)>,
+        visited: &mut FxHashSet<FunctionRef>,
+        reverse_index: &FxHashMap<FunctionRef, Vec<(FunctionRef, usize)>>,
+        all_callers: &mut FxHashMap<FunctionRef, (usize, Vec<usize>)>,
         config: &ImpactConfig,
     ) {
         // Base case: beyond max exploration depth or cycle in current path
@@ -574,7 +575,7 @@ fn analyze_impact_dfs(
                 }
 
                 // Start DFS from this direct caller with fresh per-path visited set
-                let mut visited = HashSet::new();
+                let mut visited = FxHashSet::default();
                 visited.insert(target_ref.clone()); // Don't revisit target
                 dfs_explore(
                     caller,
@@ -593,15 +594,15 @@ fn analyze_impact_dfs(
 }
 
 /// Reverse index: callee -> [(caller, call_line)].
-type ReverseIndex = HashMap<FunctionRef, Vec<(FunctionRef, usize)>>;
+type ReverseIndex = FxHashMap<FunctionRef, Vec<(FunctionRef, usize)>>;
 
 /// Name-based index for O(1) lookup of functions by name.
 /// Maps function name -> all FunctionRefs with that name.
-type NameIndex<'a> = HashMap<&'a str, Vec<&'a FunctionRef>>;
+type NameIndex<'a> = FxHashMap<&'a str, Vec<&'a FunctionRef>>;
 
 /// Build reverse index: callee -> [(caller, call_line)].
 fn build_reverse_index(graph: &CallGraph) -> ReverseIndex {
-    let mut index: ReverseIndex = HashMap::new();
+    let mut index: ReverseIndex = FxHashMap::default();
 
     for edge in &graph.edges {
         index
@@ -616,7 +617,7 @@ fn build_reverse_index(graph: &CallGraph) -> ReverseIndex {
 /// Build name index for O(1) lookup by function name.
 /// This avoids O(E) linear scans when matching by name during BFS/DFS.
 fn build_name_index(reverse_index: &ReverseIndex) -> NameIndex<'_> {
-    let mut name_index: NameIndex<'_> = HashMap::new();
+    let mut name_index: NameIndex<'_> = FxHashMap::default();
 
     for func_ref in reverse_index.keys() {
         name_index
@@ -1539,9 +1540,7 @@ mod tests {
     #[test]
     fn test_diamond_graph_dfs_all_paths() {
         let graph = create_diamond_graph();
-        let config = ImpactConfig::new()
-            .with_depth(10)
-            .explore_all_paths(); // deduplicate_paths = false
+        let config = ImpactConfig::new().with_depth(10).explore_all_paths(); // deduplicate_paths = false
 
         let result = analyze_impact(&graph, "D", config);
 
@@ -1581,18 +1580,26 @@ mod tests {
 
         // A should have call site info from both paths (lines 5 and 6 where it calls B and C)
         // Note: The call sites recorded are where A calls B/C, not where B/C call D
-        assert_eq!(a.call_sites.len(), 2, "A should have 2 call sites (via B and C)");
-        assert!(a.call_sites.contains(&5), "Should include call site line 5 (A->B)");
-        assert!(a.call_sites.contains(&6), "Should include call site line 6 (A->C)");
+        assert_eq!(
+            a.call_sites.len(),
+            2,
+            "A should have 2 call sites (via B and C)"
+        );
+        assert!(
+            a.call_sites.contains(&5),
+            "Should include call site line 5 (A->B)"
+        );
+        assert!(
+            a.call_sites.contains(&6),
+            "Should include call site line 6 (A->C)"
+        );
     }
 
     /// Test that BFS mode may miss some call sites in diamond patterns.
     #[test]
     fn test_diamond_graph_bfs_call_sites() {
         let graph = create_diamond_graph();
-        let config = ImpactConfig::new()
-            .with_depth(10)
-            .with_call_sites(); // Default: deduplicate_paths = true
+        let config = ImpactConfig::new().with_depth(10).with_call_sites(); // Default: deduplicate_paths = true
 
         let result = analyze_impact(&graph, "D", config);
 

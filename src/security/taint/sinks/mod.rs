@@ -54,6 +54,7 @@
 //! }
 //! ```
 
+pub mod common;
 pub mod go;
 pub mod python;
 pub mod rust_lang;
@@ -65,12 +66,15 @@ pub use python::get_python_sinks;
 pub use rust_lang::get_rust_sinks;
 pub use typescript::get_typescript_sinks;
 
+// Re-export common types and utilities
+pub use common::{Severity, TaintSinkDef, default_sanitizers_for, is_effective_sanitizer};
+
 /// Type alias for backward compatibility.
 pub type TaintSink = Sink;
 
 use crate::security::taint::types::{Location, TaintLabel};
+use fxhash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // =============================================================================
 // Sink Categories
@@ -255,58 +259,59 @@ impl SinkCategory {
     pub const fn recommended_sanitizers(&self) -> &'static [&'static str] {
         match self {
             Self::SqlInjection | Self::NoSqlInjection => &[
-                "parameterized_query", "prepared_statement", "sqlalchemy_text",
-                "django_orm", "escape_string", "quote_literal",
+                "parameterized_query",
+                "prepared_statement",
+                "sqlalchemy_text",
+                "django_orm",
+                "escape_string",
+                "quote_literal",
             ],
             Self::CommandInjection => &[
-                "shlex_quote", "shlex_split", "subprocess_list", "shell_escape",
-                "escapeshellarg", "escapeshellcmd",
+                "shlex_quote",
+                "shlex_split",
+                "subprocess_list",
+                "shell_escape",
+                "escapeshellarg",
+                "escapeshellcmd",
             ],
             Self::XSS => &[
-                "html_escape", "escape", "sanitize_html", "DOMPurify",
-                "bleach_clean", "markupsafe_escape", "cgi_escape",
+                "html_escape",
+                "escape",
+                "sanitize_html",
+                "DOMPurify",
+                "bleach_clean",
+                "markupsafe_escape",
+                "cgi_escape",
             ],
             Self::PathTraversal => &[
-                "path_join", "realpath", "abspath", "normpath",
-                "secure_filename", "basename", "safe_join",
+                "path_join",
+                "realpath",
+                "abspath",
+                "normpath",
+                "secure_filename",
+                "basename",
+                "safe_join",
             ],
-            Self::CodeExecution => &[
-                "ast_literal_eval", "json_parse", "safe_eval",
-            ],
+            Self::CodeExecution => &["ast_literal_eval", "json_parse", "safe_eval"],
             Self::SSRF => &[
-                "url_validate", "domain_allowlist", "scheme_validate",
-                "is_private_ip", "url_parse",
+                "url_validate",
+                "domain_allowlist",
+                "scheme_validate",
+                "is_private_ip",
+                "url_parse",
             ],
-            Self::LogInjection => &[
-                "log_escape", "replace_newlines", "sanitize_log",
-            ],
-            Self::HeaderInjection => &[
-                "header_escape", "remove_crlf", "validate_header",
-            ],
-            Self::XPathInjection | Self::LdapInjection => &[
-                "escape_filter", "parameterized_xpath", "ldap_escape",
-            ],
-            Self::TemplateInjection => &[
-                "autoescape", "sandbox_template", "safe_render",
-            ],
-            Self::Deserialization => &[
-                "json_loads", "safe_load", "restricted_deserialize",
-            ],
-            Self::XmlInjection => &[
-                "defusedxml", "disable_external_entities", "lxml_safe_parse",
-            ],
-            Self::OpenRedirect => &[
-                "url_for", "is_safe_url", "validate_redirect",
-            ],
-            Self::RegexInjection => &[
-                "re_escape", "regex_escape", "literal_pattern",
-            ],
-            Self::MemoryCorruption => &[
-                "bounds_check", "safe_alloc", "size_validate",
-            ],
-            Self::EmailHeaderInjection => &[
-                "email_escape", "validate_email", "header_encode",
-            ],
+            Self::LogInjection => &["log_escape", "replace_newlines", "sanitize_log"],
+            Self::HeaderInjection => &["header_escape", "remove_crlf", "validate_header"],
+            Self::XPathInjection | Self::LdapInjection => {
+                &["escape_filter", "parameterized_xpath", "ldap_escape"]
+            }
+            Self::TemplateInjection => &["autoescape", "sandbox_template", "safe_render"],
+            Self::Deserialization => &["json_loads", "safe_load", "restricted_deserialize"],
+            Self::XmlInjection => &["defusedxml", "disable_external_entities", "lxml_safe_parse"],
+            Self::OpenRedirect => &["url_for", "is_safe_url", "validate_redirect"],
+            Self::RegexInjection => &["re_escape", "regex_escape", "literal_pattern"],
+            Self::MemoryCorruption => &["bounds_check", "safe_alloc", "size_validate"],
+            Self::EmailHeaderInjection => &["email_escape", "validate_email", "header_encode"],
         }
     }
 }
@@ -470,9 +475,10 @@ impl SanitizerContext {
             Self::CssEscape => &[SinkCategory::XSS],
 
             // Path sanitizers
-            Self::PathCanonicalize | Self::PathBasename | Self::PathAllowlist | Self::PathSafeJoin => {
-                &[SinkCategory::PathTraversal]
-            }
+            Self::PathCanonicalize
+            | Self::PathBasename
+            | Self::PathAllowlist
+            | Self::PathSafeJoin => &[SinkCategory::PathTraversal],
 
             // LDAP sanitizers
             Self::LdapDnEscape | Self::LdapFilterEscape => &[SinkCategory::LdapInjection],
@@ -630,7 +636,7 @@ impl Sink {
             category,
             function_pattern: pattern.into(),
             dangerous_params: Vec::new(),
-            sanitizers: get_default_sanitizers(category),
+            sanitizers: common::default_sanitizers_for(category),
             description: category.description().to_string(),
             severity_override: None,
             confidence: 1.0,
@@ -804,7 +810,8 @@ impl Sink {
     /// Get the effective severity level.
     #[inline]
     pub fn severity(&self) -> u8 {
-        self.severity_override.unwrap_or_else(|| self.category.base_severity())
+        self.severity_override
+            .unwrap_or_else(|| self.category.base_severity())
     }
 
     /// Check if a parameter position is dangerous.
@@ -943,9 +950,11 @@ pub struct SinkRegistry {
     /// All registered sinks
     sinks: Vec<Sink>,
     /// Index by category for faster lookups
-    by_category: HashMap<SinkCategory, Vec<usize>>,
+    /// Uses FxHashMap for faster lookups
+    by_category: FxHashMap<SinkCategory, Vec<usize>>,
     /// Index by pattern prefix for faster matching
-    by_pattern: HashMap<String, Vec<usize>>,
+    /// Uses FxHashMap for faster string-keyed lookups
+    by_pattern: FxHashMap<String, Vec<usize>>,
 }
 
 impl SinkRegistry {
@@ -1141,7 +1150,7 @@ pub fn check_sanitization(
     let is_sanitized = !effective_sanitizers.is_empty();
 
     // Find sanitizers that weren't applied but would help
-    let default_sanitizers = get_default_sanitizers(target_sink);
+    let default_sanitizers = common::default_sanitizers_for(target_sink);
     let missing: Vec<SanitizerContext> = default_sanitizers
         .iter()
         .copied()
@@ -1202,86 +1211,6 @@ pub fn get_sinks_for_language(language: &str) -> SinkRegistry {
     }
 }
 
-/// Get default sanitizers for a sink category.
-fn get_default_sanitizers(category: SinkCategory) -> Vec<SanitizerContext> {
-    match category {
-        SinkCategory::SqlInjection => vec![
-            SanitizerContext::SqlParameterized,
-            SanitizerContext::SqlOrm,
-            SanitizerContext::SqlEscape,
-        ],
-        SinkCategory::CommandInjection => vec![
-            SanitizerContext::CommandList,
-            SanitizerContext::ShellEscape,
-            SanitizerContext::CommandAllowlist,
-        ],
-        SinkCategory::XSS => vec![
-            SanitizerContext::HtmlEscape,
-            SanitizerContext::DomSanitize,
-            SanitizerContext::ContentSecurityPolicy,
-            SanitizerContext::JavaScriptEscape,
-        ],
-        SinkCategory::PathTraversal => vec![
-            SanitizerContext::PathCanonicalize,
-            SanitizerContext::PathAllowlist,
-            SanitizerContext::PathBasename,
-            SanitizerContext::PathSafeJoin,
-        ],
-        SinkCategory::CodeExecution => vec![SanitizerContext::InputAllowlist],
-        SinkCategory::SSRF => vec![
-            SanitizerContext::UrlDomainAllowlist,
-            SanitizerContext::UrlSchemeValidation,
-            SanitizerContext::UrlPrivateIpBlock,
-        ],
-        SinkCategory::LogInjection => vec![
-            SanitizerContext::LogNewlineRemove,
-            SanitizerContext::LogEncode,
-        ],
-        SinkCategory::HeaderInjection => vec![
-            SanitizerContext::HeaderCrlfRemove,
-            SanitizerContext::HeaderEncode,
-        ],
-        SinkCategory::XPathInjection => vec![
-            SanitizerContext::XPathParameterized,
-            SanitizerContext::XPathEscape,
-        ],
-        SinkCategory::LdapInjection => vec![
-            SanitizerContext::LdapDnEscape,
-            SanitizerContext::LdapFilterEscape,
-        ],
-        SinkCategory::TemplateInjection => vec![
-            SanitizerContext::TemplateSandbox,
-            SanitizerContext::TemplateAutoescape,
-        ],
-        SinkCategory::Deserialization => vec![
-            SanitizerContext::DeserializeSafeFormat,
-            SanitizerContext::DeserializeTypeAllowlist,
-            SanitizerContext::DeserializeSignatureVerify,
-        ],
-        SinkCategory::XmlInjection => vec![
-            SanitizerContext::XmlDisableExternalEntities,
-            SanitizerContext::XmlEntityEncode,
-        ],
-        SinkCategory::OpenRedirect => vec![
-            SanitizerContext::UrlDomainAllowlist,
-            SanitizerContext::UrlSchemeValidation,
-        ],
-        SinkCategory::RegexInjection => vec![
-            SanitizerContext::RegexEscape,
-            SanitizerContext::RegexTimeout,
-            SanitizerContext::LengthLimit,
-        ],
-        SinkCategory::MemoryCorruption => vec![
-            SanitizerContext::TypeValidation,
-            SanitizerContext::LengthLimit,
-        ],
-        SinkCategory::EmailHeaderInjection => vec![SanitizerContext::EmailHeaderSanitize],
-        SinkCategory::NoSqlInjection => vec![
-            SanitizerContext::InputAllowlist,
-            SanitizerContext::TypeValidation,
-        ],
-    }
-}
 
 /// Map function names to their sanitizer contexts.
 ///
@@ -1497,7 +1426,9 @@ mod tests {
         let sinks = find_sinks(&call, "python");
 
         assert!(!sinks.is_empty());
-        assert!(sinks.iter().any(|s| s.category == SinkCategory::SqlInjection));
+        assert!(sinks
+            .iter()
+            .any(|s| s.category == SinkCategory::SqlInjection));
     }
 
     #[test]
@@ -1537,7 +1468,10 @@ mod tests {
         let applied = vec![SanitizerContext::HtmlEscape];
 
         assert!(is_sanitized_for_context(&applied, SinkCategory::XSS));
-        assert!(!is_sanitized_for_context(&applied, SinkCategory::SqlInjection));
+        assert!(!is_sanitized_for_context(
+            &applied,
+            SinkCategory::SqlInjection
+        ));
     }
 
     #[test]

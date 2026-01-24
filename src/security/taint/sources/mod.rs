@@ -47,6 +47,9 @@
 //! }
 //! ```
 
+// Common types and infrastructure for taint source detection
+pub mod common;
+
 // Pattern-based source registry (original implementation)
 pub mod registry;
 
@@ -69,10 +72,14 @@ pub use registry::{
 };
 
 // Re-export AST-based detectors
-pub use go::GoSourceDetector;
 pub use python::PythonSourceDetector;
-pub use rust::RustSourceDetector;
 pub use typescript::TypeScriptSourceDetector;
+
+// Re-export common types for use in language-specific detectors
+pub use common::{
+    AstHelpers, ImportAliases, ParameterTypeMap, ResponseMethodPatterns, ScanContextBase,
+    SourceCategory, TaintSourceDef, TaintedVariables,
+};
 
 use crate::security::taint::types::{Location, TaintLabel};
 use serde::{Deserialize, Serialize};
@@ -512,8 +519,13 @@ mod tests {
 
     #[test]
     fn test_source_kind_severity() {
-        assert!(SourceKind::RequestParam.severity_weight() > SourceKind::Environment.severity_weight());
-        assert!(SourceKind::ProcessArgs.severity_weight() > SourceKind::DatabaseResult.severity_weight());
+        assert!(
+            SourceKind::RequestParam.severity_weight() > SourceKind::Environment.severity_weight()
+        );
+        assert!(
+            SourceKind::ProcessArgs.severity_weight()
+                > SourceKind::DatabaseResult.severity_weight()
+        );
     }
 
     #[test]

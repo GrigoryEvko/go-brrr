@@ -28,14 +28,14 @@
 //! - Preprocessor conditional compilation blocks
 //! - Anonymous struct/union members in composite types
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::ast::types::{ClassInfo, FunctionInfo, ImportInfo};
 use crate::cfg::types::{BlockId, BlockType, CFGBlock, CFGEdge, CFGInfo};
 use crate::dfg::types::{DFGInfo, DataflowEdge, DataflowKind};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::traits::Language;
 
 /// Detect if a `.h` header file contains C++ code.
@@ -175,7 +175,8 @@ fn is_cpp_header(content: &[u8]) -> bool {
 
     // C++ access specifiers (public:, private:, protected:)
     // These inside struct/class definitions indicate C++
-    if content.contains("public:") || content.contains("private:") || content.contains("protected:") {
+    if content.contains("public:") || content.contains("private:") || content.contains("protected:")
+    {
         return true;
     }
 
@@ -190,7 +191,9 @@ fn is_cpp_header(content: &[u8]) -> bool {
 
     // References with & in type declarations (tricky - avoid function address-of)
     // Look for patterns like "Type& name" or "const Type&"
-    if content.contains("& ") && (content.contains("const ") || content.contains("int&") || content.contains("char&")) {
+    if content.contains("& ")
+        && (content.contains("const ") || content.contains("int&") || content.contains("char&"))
+    {
         // Additional check - C++ style reference in parameter/return
         for pattern in ["int& ", "char& ", "void& ", "bool& ", "auto& "] {
             if content.contains(pattern) {
@@ -452,12 +455,16 @@ impl C {
                     for child in current.children(&mut cursor) {
                         match child.kind() {
                             // Skip pointer symbols and type qualifiers
-                            "*" | "type_qualifier" | "const" | "volatile" | "restrict" | "_Atomic" => {
+                            "*" | "type_qualifier" | "const" | "volatile" | "restrict"
+                            | "_Atomic" => {
                                 continue;
                             }
                             // Found a declarator or identifier - use it
-                            "identifier" | "field_identifier" | "pointer_declarator"
-                            | "array_declarator" | "function_declarator" => {
+                            "identifier"
+                            | "field_identifier"
+                            | "pointer_declarator"
+                            | "array_declarator"
+                            | "function_declarator" => {
                                 current = child;
                                 found = true;
                                 break;
@@ -861,7 +868,11 @@ impl C {
     /// - Bitfield fields: `unsigned int flag : 1;`
     ///
     /// Bitfield width is stored in the field's annotations as "bitfield:N".
-    fn extract_struct_fields(&self, node: Node, source: &[u8]) -> Vec<crate::ast::types::FieldInfo> {
+    fn extract_struct_fields(
+        &self,
+        node: Node,
+        source: &[u8],
+    ) -> Vec<crate::ast::types::FieldInfo> {
         use crate::ast::types::FieldInfo;
 
         let mut fields = Vec::new();
@@ -946,7 +957,12 @@ impl C {
             let type_str = if type_parts.is_empty() {
                 None
             } else {
-                Some(format!("{}{}{}", type_parts.join(" "), pointers, array_suffix))
+                Some(format!(
+                    "{}{}{}",
+                    type_parts.join(" "),
+                    pointers,
+                    array_suffix
+                ))
             };
 
             // Build annotations including bitfield info
@@ -982,8 +998,12 @@ impl C {
     /// ```
     ///
     /// Returns a map from parameter name to its full type string.
-    fn extract_knr_params(&self, node: Node, source: &[u8]) -> std::collections::HashMap<String, String> {
-        let mut type_map = std::collections::HashMap::new();
+    fn extract_knr_params(
+        &self,
+        node: Node,
+        source: &[u8],
+    ) -> FxHashMap<String, String> {
+        let mut type_map = FxHashMap::default();
 
         // K&R declarations are direct children of function_definition,
         // appearing between the declarator and the body
@@ -1318,7 +1338,9 @@ impl C {
             return None;
         }
 
-        let call_expr = node.children(&mut node.walk()).find(|c| c.kind() == "call_expression")?;
+        let call_expr = node
+            .children(&mut node.walk())
+            .find(|c| c.kind() == "call_expression")?;
 
         // Check if function name is _Static_assert or static_assert
         let func_node = self.child_by_field(call_expr, "function")?;
@@ -1355,7 +1377,10 @@ impl C {
         };
 
         Some(FunctionInfo {
-            name: format!("static_assert({})", params.first().unwrap_or(&String::new())),
+            name: format!(
+                "static_assert({})",
+                params.first().unwrap_or(&String::new())
+            ),
             params: Vec::new(),
             return_type: None,
             docstring,
@@ -1500,11 +1525,7 @@ impl C {
     ///
     /// For code like `struct { int x; } my_var;`, extracts "my_var" from the declaration.
     /// Returns None if parent is not a declaration or no identifier found.
-    fn extract_name_from_declaration_parent(
-        &self,
-        node: Node,
-        source: &[u8],
-    ) -> Option<String> {
+    fn extract_name_from_declaration_parent(&self, node: Node, source: &[u8]) -> Option<String> {
         let parent = node.parent()?;
         if parent.kind() != "declaration" {
             return None;
@@ -1548,13 +1569,13 @@ impl C {
     /// Supports goto/label control flow: creates proper CFG edges from goto
     /// statements to their target labels, handling both forward and backward jumps.
     fn build_c_cfg(&self, node: Node, source: &[u8], func_name: &str) -> CFGInfo {
-        let mut blocks = HashMap::new();
+        let mut blocks = FxHashMap::default();
         let mut edges = Vec::new();
         let mut block_id = 0;
         let mut exits = Vec::new();
 
         // Label tracking for goto support
-        let mut label_blocks: HashMap<String, BlockId> = HashMap::new();
+        let mut label_blocks: FxHashMap<String, BlockId> = FxHashMap::default();
         let mut pending_gotos: Vec<(BlockId, String)> = Vec::new();
 
         // Entry block
@@ -1593,7 +1614,11 @@ impl C {
         // Resolve pending goto edges (forward references to labels)
         for (from_block, target_label) in pending_gotos {
             if let Some(&target_block) = label_blocks.get(&target_label) {
-                edges.push(CFGEdge::from_label(from_block, target_block, Some(format!("goto {}", target_label))));
+                edges.push(CFGEdge::from_label(
+                    from_block,
+                    target_block,
+                    Some(format!("goto {}", target_label)),
+                ));
             }
         }
 
@@ -1604,16 +1629,16 @@ impl C {
 
         CFGInfo {
             function_name: func_name.to_string(),
-            blocks,
+            blocks: blocks.into_iter().collect(), // Convert FxHashMap to HashMap
             edges,
             entry,
             exits,
-            decision_points: 0,               // TODO: Count decision points for accurate cyclomatic complexity
+            decision_points: 0, // TODO: Count decision points for accurate cyclomatic complexity
             comprehension_decision_points: 0, // C doesn't have comprehensions
-            nested_cfgs: HashMap::new(),      // C doesn't have closures but may have nested functions via GCC extension
-            is_async: false,                  // C doesn't have async/await
-            await_points: 0,                  // C doesn't have await
-            blocking_calls: Vec::new(),       // C doesn't have async context
+            nested_cfgs: FxHashMap::default(), // C doesn't have closures but may have nested functions via GCC extension
+            is_async: false,             // C doesn't have async/await
+            await_points: 0,             // C doesn't have await
+            blocking_calls: Vec::new(),  // C doesn't have async context
             ..Default::default()
         }
     }
@@ -1629,14 +1654,14 @@ impl C {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
         exits: &mut Vec<BlockId>,
         loop_headers: &mut Vec<BlockId>,
         loop_exits: &mut Vec<BlockId>,
-        label_blocks: &mut HashMap<String, BlockId>,
+        label_blocks: &mut FxHashMap<String, BlockId>,
         pending_gotos: &mut Vec<(BlockId, String)>,
     ) -> BlockId {
         // Handle the case where a single statement is passed directly (not a block-like construct)
@@ -1686,14 +1711,14 @@ impl C {
                     blocks.insert(
                         ret_block,
                         CFGBlock {
-                id: ret_block,
-                label: "return".to_string(),
-                block_type: BlockType::Body,
-                statements: vec![stmt],
-                func_calls: Vec::new(),
-                start_line: child.start_position().row + 1,
-                end_line: child.end_position().row + 1,
-            },
+                            id: ret_block,
+                            label: "return".to_string(),
+                            block_type: BlockType::Body,
+                            statements: vec![stmt],
+                            func_calls: Vec::new(),
+                            start_line: child.start_position().row + 1,
+                            end_line: child.end_position().row + 1,
+                        },
                     );
 
                     edges.push(CFGEdge::from_label(last_block, ret_block, None));
@@ -1783,7 +1808,11 @@ impl C {
                     // Create edge to target label
                     if let Some(&target_block) = label_blocks.get(&target_label) {
                         // Label already seen (backward goto)
-                        edges.push(CFGEdge::from_label(last_block, target_block, Some(format!("goto {}", target_label))));
+                        edges.push(CFGEdge::from_label(
+                            last_block,
+                            target_block,
+                            Some(format!("goto {}", target_label)),
+                        ));
                     } else {
                         // Label not yet seen (forward goto) - queue for later resolution
                         pending_gotos.push((last_block, target_label));
@@ -1887,7 +1916,11 @@ impl C {
                         continue;
                     }
                     if let Some(&exit_block) = loop_exits.last() {
-                        edges.push(CFGEdge::from_label(last_block, exit_block, Some("break".to_string())));
+                        edges.push(CFGEdge::from_label(
+                            last_block,
+                            exit_block,
+                            Some("break".to_string()),
+                        ));
                     }
                     unreachable = true;
                 }
@@ -1896,7 +1929,11 @@ impl C {
                         continue;
                     }
                     if let Some(&header) = loop_headers.last() {
-                        edges.push(CFGEdge::from_label(last_block, header, Some("continue".to_string())));
+                        edges.push(CFGEdge::from_label(
+                            last_block,
+                            header,
+                            Some("continue".to_string()),
+                        ));
                     }
                     unreachable = true;
                 }
@@ -1943,14 +1980,14 @@ impl C {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
         exits: &mut Vec<BlockId>,
         loop_headers: &mut Vec<BlockId>,
         loop_exits: &mut Vec<BlockId>,
-        label_blocks: &mut HashMap<String, BlockId>,
+        label_blocks: &mut FxHashMap<String, BlockId>,
         pending_gotos: &mut Vec<(BlockId, String)>,
         unreachable: &mut bool,
     ) -> BlockId {
@@ -2046,7 +2083,11 @@ impl C {
                 }
 
                 if let Some(&target_block) = label_blocks.get(&target_label) {
-                    edges.push(CFGEdge::from_label(current_block, target_block, Some(format!("goto {}", target_label))));
+                    edges.push(CFGEdge::from_label(
+                        current_block,
+                        target_block,
+                        Some(format!("goto {}", target_label)),
+                    ));
                 } else {
                     pending_gotos.push((current_block, target_label));
                 }
@@ -2062,14 +2103,14 @@ impl C {
                 blocks.insert(
                     ret_block,
                     CFGBlock {
-                id: ret_block,
-                label: "return".to_string(),
-                block_type: BlockType::Body,
-                statements: vec![stmt],
-                func_calls: Vec::new(),
-                start_line: node.start_position().row + 1,
-                end_line: node.end_position().row + 1,
-            },
+                        id: ret_block,
+                        label: "return".to_string(),
+                        block_type: BlockType::Body,
+                        statements: vec![stmt],
+                        func_calls: Vec::new(),
+                        start_line: node.start_position().row + 1,
+                        end_line: node.end_position().row + 1,
+                    },
                 );
 
                 edges.push(CFGEdge::from_label(current_block, ret_block, None));
@@ -2080,14 +2121,22 @@ impl C {
             }
             "break_statement" => {
                 if let Some(&exit_block) = loop_exits.last() {
-                    edges.push(CFGEdge::from_label(current_block, exit_block, Some("break".to_string())));
+                    edges.push(CFGEdge::from_label(
+                        current_block,
+                        exit_block,
+                        Some("break".to_string()),
+                    ));
                 }
                 *unreachable = true;
                 current_block
             }
             "continue_statement" => {
                 if let Some(&header) = loop_headers.last() {
-                    edges.push(CFGEdge::from_label(current_block, header, Some("continue".to_string())));
+                    edges.push(CFGEdge::from_label(
+                        current_block,
+                        header,
+                        Some("continue".to_string()),
+                    ));
                 }
                 *unreachable = true;
                 current_block
@@ -2110,14 +2159,14 @@ impl C {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
         exits: &mut Vec<BlockId>,
         loop_headers: &mut Vec<BlockId>,
         loop_exits: &mut Vec<BlockId>,
-        label_blocks: &mut HashMap<String, BlockId>,
+        label_blocks: &mut FxHashMap<String, BlockId>,
         pending_gotos: &mut Vec<(BlockId, String)>,
     ) -> BlockId {
         *block_id += 1;
@@ -2165,17 +2214,21 @@ impl C {
             blocks.insert(
                 true_block,
                 CFGBlock {
-                id: true_block,
-                label: "then".to_string(),
-                block_type: BlockType::Body,
-                statements: Vec::new(),
-                func_calls: Vec::new(),
-                start_line: consequence.start_position().row + 1,
-                end_line: consequence.end_position().row + 1,
-            },
+                    id: true_block,
+                    label: "then".to_string(),
+                    block_type: BlockType::Body,
+                    statements: Vec::new(),
+                    func_calls: Vec::new(),
+                    start_line: consequence.start_position().row + 1,
+                    end_line: consequence.end_position().row + 1,
+                },
             );
 
-            edges.push(CFGEdge::from_label(cond_block, true_block, Some("true".to_string())));
+            edges.push(CFGEdge::from_label(
+                cond_block,
+                true_block,
+                Some("true".to_string()),
+            ));
 
             let true_end = self.process_cfg_block(
                 consequence,
@@ -2203,17 +2256,21 @@ impl C {
             blocks.insert(
                 false_block,
                 CFGBlock {
-                id: false_block,
-                label: "else".to_string(),
-                block_type: BlockType::Body,
-                statements: Vec::new(),
-                func_calls: Vec::new(),
-                start_line: alternative.start_position().row + 1,
-                end_line: alternative.end_position().row + 1,
-            },
+                    id: false_block,
+                    label: "else".to_string(),
+                    block_type: BlockType::Body,
+                    statements: Vec::new(),
+                    func_calls: Vec::new(),
+                    start_line: alternative.start_position().row + 1,
+                    end_line: alternative.end_position().row + 1,
+                },
             );
 
-            edges.push(CFGEdge::from_label(cond_block, false_block, Some("false".to_string())));
+            edges.push(CFGEdge::from_label(
+                cond_block,
+                false_block,
+                Some("false".to_string()),
+            ));
 
             let false_end = self.process_cfg_block(
                 alternative,
@@ -2234,7 +2291,11 @@ impl C {
             }
         } else {
             // No else branch
-            edges.push(CFGEdge::from_label(cond_block, merge_block, Some("false".to_string())));
+            edges.push(CFGEdge::from_label(
+                cond_block,
+                merge_block,
+                Some("false".to_string()),
+            ));
         }
 
         merge_block
@@ -2246,14 +2307,14 @@ impl C {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
         exits: &mut Vec<BlockId>,
         loop_headers: &mut Vec<BlockId>,
         loop_exits: &mut Vec<BlockId>,
-        label_blocks: &mut HashMap<String, BlockId>,
+        label_blocks: &mut FxHashMap<String, BlockId>,
         pending_gotos: &mut Vec<(BlockId, String)>,
     ) -> BlockId {
         *block_id += 1;
@@ -2304,17 +2365,21 @@ impl C {
             blocks.insert(
                 body_block,
                 CFGBlock {
-                id: body_block,
-                label: "loop_body".to_string(),
-                block_type: BlockType::Body,
-                statements: Vec::new(),
-                func_calls: Vec::new(),
-                start_line: body.start_position().row + 1,
-                end_line: body.end_position().row + 1,
-            },
+                    id: body_block,
+                    label: "loop_body".to_string(),
+                    block_type: BlockType::Body,
+                    statements: Vec::new(),
+                    func_calls: Vec::new(),
+                    start_line: body.start_position().row + 1,
+                    end_line: body.end_position().row + 1,
+                },
             );
 
-            edges.push(CFGEdge::from_label(header_block, body_block, Some("true".to_string())));
+            edges.push(CFGEdge::from_label(
+                header_block,
+                body_block,
+                Some("true".to_string()),
+            ));
 
             let body_end = self.process_cfg_block(
                 body,
@@ -2331,11 +2396,19 @@ impl C {
             );
 
             if !exits.contains(&body_end) {
-                edges.push(CFGEdge::from_label(body_end, header_block, Some("back_edge".to_string())));
+                edges.push(CFGEdge::from_label(
+                    body_end,
+                    header_block,
+                    Some("back_edge".to_string()),
+                ));
             }
         }
 
-        edges.push(CFGEdge::from_label(header_block, exit_block, Some("false".to_string())));
+        edges.push(CFGEdge::from_label(
+            header_block,
+            exit_block,
+            Some("false".to_string()),
+        ));
 
         loop_headers.pop();
         loop_exits.pop();
@@ -2349,14 +2422,14 @@ impl C {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
         exits: &mut Vec<BlockId>,
         loop_headers: &mut Vec<BlockId>,
         loop_exits: &mut Vec<BlockId>,
-        label_blocks: &mut HashMap<String, BlockId>,
+        label_blocks: &mut FxHashMap<String, BlockId>,
         pending_gotos: &mut Vec<(BlockId, String)>,
     ) -> BlockId {
         // For loop: for (init; cond; update) body
@@ -2410,17 +2483,21 @@ impl C {
             blocks.insert(
                 body_block,
                 CFGBlock {
-                id: body_block,
-                label: "loop_body".to_string(),
-                block_type: BlockType::Body,
-                statements: Vec::new(),
-                func_calls: Vec::new(),
-                start_line: body.start_position().row + 1,
-                end_line: body.end_position().row + 1,
-            },
+                    id: body_block,
+                    label: "loop_body".to_string(),
+                    block_type: BlockType::Body,
+                    statements: Vec::new(),
+                    func_calls: Vec::new(),
+                    start_line: body.start_position().row + 1,
+                    end_line: body.end_position().row + 1,
+                },
             );
 
-            edges.push(CFGEdge::from_label(header_block, body_block, Some("iterate".to_string())));
+            edges.push(CFGEdge::from_label(
+                header_block,
+                body_block,
+                Some("iterate".to_string()),
+            ));
 
             let body_end = self.process_cfg_block(
                 body,
@@ -2437,11 +2514,19 @@ impl C {
             );
 
             if !exits.contains(&body_end) {
-                edges.push(CFGEdge::from_label(body_end, header_block, Some("back_edge".to_string())));
+                edges.push(CFGEdge::from_label(
+                    body_end,
+                    header_block,
+                    Some("back_edge".to_string()),
+                ));
             }
         }
 
-        edges.push(CFGEdge::from_label(header_block, exit_block, Some("done".to_string())));
+        edges.push(CFGEdge::from_label(
+            header_block,
+            exit_block,
+            Some("done".to_string()),
+        ));
 
         loop_headers.pop();
         loop_exits.pop();
@@ -2455,14 +2540,14 @@ impl C {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
         exits: &mut Vec<BlockId>,
         loop_headers: &mut Vec<BlockId>,
         loop_exits: &mut Vec<BlockId>,
-        label_blocks: &mut HashMap<String, BlockId>,
+        label_blocks: &mut FxHashMap<String, BlockId>,
         pending_gotos: &mut Vec<(BlockId, String)>,
     ) -> BlockId {
         // Body block (executes at least once)
@@ -2545,8 +2630,16 @@ impl C {
         }
 
         // Condition edges
-        edges.push(CFGEdge::from_label(cond_block, body_block, Some("true".to_string())));
-        edges.push(CFGEdge::from_label(cond_block, exit_block, Some("false".to_string())));
+        edges.push(CFGEdge::from_label(
+            cond_block,
+            body_block,
+            Some("true".to_string()),
+        ));
+        edges.push(CFGEdge::from_label(
+            cond_block,
+            exit_block,
+            Some("false".to_string()),
+        ));
 
         loop_headers.pop();
         loop_exits.pop();
@@ -2560,14 +2653,14 @@ impl C {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
         exits: &mut Vec<BlockId>,
         loop_headers: &mut Vec<BlockId>,
         loop_exits: &mut Vec<BlockId>,
-        label_blocks: &mut HashMap<String, BlockId>,
+        label_blocks: &mut FxHashMap<String, BlockId>,
         pending_gotos: &mut Vec<(BlockId, String)>,
     ) -> BlockId {
         *block_id += 1;
@@ -2628,14 +2721,14 @@ impl C {
                     blocks.insert(
                         case_block,
                         CFGBlock {
-                id: case_block,
-                label: case_label,
-                block_type: BlockType::Body,
-                statements: Vec::new(),
-                func_calls: Vec::new(),
-                start_line: child.start_position().row + 1,
-                end_line: child.end_position().row + 1,
-            },
+                            id: case_block,
+                            label: case_label,
+                            block_type: BlockType::Body,
+                            statements: Vec::new(),
+                            func_calls: Vec::new(),
+                            start_line: child.start_position().row + 1,
+                            end_line: child.end_position().row + 1,
+                        },
                     );
 
                     edges.push(CFGEdge::from_label(switch_block, case_block, None));
@@ -2669,8 +2762,8 @@ impl C {
     /// Build DFG for a C function.
     fn build_c_dfg(&self, node: Node, source: &[u8], func_name: &str) -> DFGInfo {
         let mut edges = Vec::new();
-        let mut definitions: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut uses: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut definitions: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+        let mut uses: FxHashMap<String, Vec<usize>> = FxHashMap::default();
 
         // Extract parameters as initial definitions
         if let Some(declarator) = self.child_by_field(node, "declarator") {
@@ -2697,7 +2790,13 @@ impl C {
             self.extract_dfg_from_block(body, source, &mut edges, &mut definitions, &mut uses);
         }
 
-        DFGInfo::new(func_name.to_string(), edges, definitions, uses)
+        // Convert FxHashMap to HashMap for DFGInfo API compatibility
+        DFGInfo::new(
+            func_name.to_string(),
+            edges,
+            definitions.into_iter().collect(),
+            uses.into_iter().collect(),
+        )
     }
 
     /// Extract parameter definitions for DFG.
@@ -2707,7 +2806,7 @@ impl C {
         source: &[u8],
         line: usize,
         edges: &mut Vec<DataflowEdge>,
-        definitions: &mut HashMap<String, Vec<usize>>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
     ) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -2747,8 +2846,8 @@ impl C {
         node: Node,
         source: &[u8],
         edges: &mut Vec<DataflowEdge>,
-        definitions: &mut HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         let mut cursor = node.walk();
 
@@ -2784,8 +2883,8 @@ impl C {
         source: &[u8],
         line: usize,
         edges: &mut Vec<DataflowEdge>,
-        definitions: &mut HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -2830,8 +2929,8 @@ impl C {
         source: &[u8],
         line: usize,
         edges: &mut Vec<DataflowEdge>,
-        definitions: &mut HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -2869,8 +2968,8 @@ impl C {
         source: &[u8],
         line: usize,
         edges: &mut Vec<DataflowEdge>,
-        definitions: &HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -2887,8 +2986,8 @@ impl C {
         source: &[u8],
         line: usize,
         edges: &mut Vec<DataflowEdge>,
-        definitions: &HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         if node.kind() == "identifier" {
             let name = self.node_text(node, source);
@@ -2922,8 +3021,8 @@ impl C {
         source: &[u8],
         line: usize,
         edges: &mut Vec<DataflowEdge>,
-        definitions: &HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         if node.kind() == "identifier" {
             let name = self.node_text(node, source);
@@ -3162,7 +3261,7 @@ impl Language for C {
                                 line_number: node.start_position().row + 1,
                                 end_line_number: Some(node.end_position().row + 1),
                                 language: "c".to_string(),
-                        });
+                            });
                         }
                     }
                 }
@@ -3519,12 +3618,7 @@ impl C {
     /// Recursively traverse AST to find all preproc_include nodes.
     /// This handles includes nested inside preprocessor conditionals:
     /// #ifdef, #ifndef, #if, #else, #elif blocks.
-    fn collect_includes_recursive(
-        &self,
-        node: Node,
-        source: &[u8],
-        imports: &mut Vec<ImportInfo>,
-    ) {
+    fn collect_includes_recursive(&self, node: Node, source: &[u8], imports: &mut Vec<ImportInfo>) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             match child.kind() {
@@ -3581,7 +3675,7 @@ impl C {
             return None;
         }
 
-        let mut aliases = HashMap::new();
+        let mut aliases = FxHashMap::default();
         if is_system {
             aliases.insert(path.clone(), "system".to_string());
         } else {
@@ -4046,7 +4140,9 @@ typedef void (*callback_t)(int status, void* data);
         assert_eq!(fn_ptrs.len(), 2);
 
         let comparator = fn_ptrs.iter().find(|f| f.name == "comparator_fn").unwrap();
-        assert!(comparator.decorators.contains(&"function_pointer".to_string()));
+        assert!(comparator
+            .decorators
+            .contains(&"function_pointer".to_string()));
         assert!(comparator.decorators.contains(&"typedef".to_string()));
         assert_eq!(comparator.return_type, Some("int".to_string()));
         assert_eq!(comparator.params.len(), 2);
@@ -4056,7 +4152,9 @@ typedef void (*callback_t)(int status, void* data);
         assert!(comparator.docstring.is_some());
 
         let callback = fn_ptrs.iter().find(|f| f.name == "callback_t").unwrap();
-        assert!(callback.decorators.contains(&"function_pointer".to_string()));
+        assert!(callback
+            .decorators
+            .contains(&"function_pointer".to_string()));
         assert_eq!(callback.return_type, Some("void".to_string()));
         // Verify mixed named and pointer parameters
         assert_eq!(callback.params.len(), 2);
@@ -4090,7 +4188,9 @@ int (*operation)(int, int);
         assert_eq!(fn_ptrs.len(), 2);
 
         let signal_h = fn_ptrs.iter().find(|f| f.name == "signal_handler").unwrap();
-        assert!(signal_h.decorators.contains(&"function_pointer".to_string()));
+        assert!(signal_h
+            .decorators
+            .contains(&"function_pointer".to_string()));
         assert!(!signal_h.decorators.contains(&"typedef".to_string()));
         assert_eq!(signal_h.return_type, Some("void".to_string()));
         assert_eq!(signal_h.params.len(), 1);
@@ -4167,7 +4267,10 @@ typedef int (*triple_ptr_fn)(char***, void****);
             language: "c".to_string(),
         };
 
-        assert_eq!(func.signature(), "int comparator_fn(const void*, const void*)");
+        assert_eq!(
+            func.signature(),
+            "int comparator_fn(const void*, const void*)"
+        );
     }
 
     #[test]
@@ -4447,12 +4550,16 @@ struct outer {
                 // Should have anonymous struct
                 assert_eq!(cls.inner_classes.len(), 1);
                 let anon_struct = &cls.inner_classes[0];
-                assert!(anon_struct.decorators.contains(&"anonymous_struct".to_string()));
+                assert!(anon_struct
+                    .decorators
+                    .contains(&"anonymous_struct".to_string()));
 
                 // Anonymous struct should have nested anonymous union
                 assert_eq!(anon_struct.inner_classes.len(), 1);
                 let nested_union = &anon_struct.inner_classes[0];
-                assert!(nested_union.decorators.contains(&"anonymous_union".to_string()));
+                assert!(nested_union
+                    .decorators
+                    .contains(&"anonymous_union".to_string()));
             }
         }
     }
@@ -4523,9 +4630,14 @@ int normal_function(int x) {
         assert_eq!(functions.len(), 3);
 
         // enable_interrupts should have inline_assembly decorator
-        let enable_ints = functions.iter().find(|f| f.name == "enable_interrupts").unwrap();
+        let enable_ints = functions
+            .iter()
+            .find(|f| f.name == "enable_interrupts")
+            .unwrap();
         assert!(
-            enable_ints.decorators.contains(&"inline_assembly".to_string()),
+            enable_ints
+                .decorators
+                .contains(&"inline_assembly".to_string()),
             "enable_interrupts should have inline_assembly decorator"
         );
 
@@ -4537,9 +4649,14 @@ int normal_function(int x) {
         );
 
         // normal_function should NOT have inline_assembly decorator
-        let normal_fn = functions.iter().find(|f| f.name == "normal_function").unwrap();
+        let normal_fn = functions
+            .iter()
+            .find(|f| f.name == "normal_function")
+            .unwrap();
         assert!(
-            !normal_fn.decorators.contains(&"inline_assembly".to_string()),
+            !normal_fn
+                .decorators
+                .contains(&"inline_assembly".to_string()),
             "normal_function should NOT have inline_assembly decorator"
         );
     }
@@ -4607,15 +4724,25 @@ extern __thread void* thread_data;
         assert_eq!(variables.len(), 3);
 
         // Check thread_counter
-        let counter = variables.iter().find(|v| v.name == "thread_counter").unwrap();
+        let counter = variables
+            .iter()
+            .find(|v| v.name == "thread_counter")
+            .unwrap();
         assert!(counter.decorators.contains(&"thread_local".to_string()));
         assert!(counter.decorators.contains(&"variable".to_string()));
         assert_eq!(counter.return_type, Some("int".to_string()));
         assert!(counter.docstring.is_some());
-        assert!(counter.docstring.as_ref().unwrap().contains("Thread-local counter"));
+        assert!(counter
+            .docstring
+            .as_ref()
+            .unwrap()
+            .contains("Thread-local counter"));
 
         // Check static_thread_local
-        let static_tl = variables.iter().find(|v| v.name == "static_thread_local").unwrap();
+        let static_tl = variables
+            .iter()
+            .find(|v| v.name == "static_thread_local")
+            .unwrap();
         assert!(static_tl.decorators.contains(&"thread_local".to_string()));
         assert!(static_tl.decorators.contains(&"static".to_string()));
         assert_eq!(static_tl.return_type, Some("int".to_string()));
@@ -4697,7 +4824,10 @@ start:
 
                 // Verify the goto edge points to the start block
                 if let (Some(start), Some(edge)) = (start_block, goto_edge) {
-                    assert_eq!(edge.to, start.id, "Goto edge should point to start label block");
+                    assert_eq!(
+                        edge.to, start.id,
+                        "Goto edge should point to start label block"
+                    );
                 }
             }
         }
@@ -4734,14 +4864,18 @@ end:
 
                 // Count edges targeting the end label
                 if let Some(end) = end_block {
-                    let goto_edges_to_end: Vec<_> = cfg.edges.iter()
+                    let goto_edges_to_end: Vec<_> = cfg
+                        .edges
+                        .iter()
                         .filter(|e| e.to == end.id && e.label().contains("goto"))
                         .collect();
 
                     // Should have at least 2 goto edges to end (from the two if branches)
-                    assert!(goto_edges_to_end.len() >= 2,
+                    assert!(
+                        goto_edges_to_end.len() >= 2,
                         "Should have at least 2 goto edges to end label, found {}",
-                        goto_edges_to_end.len());
+                        goto_edges_to_end.len()
+                    );
                 }
             }
         }
@@ -4911,12 +5045,18 @@ struct { char name[32]; int age; } person_arr[10];
         // Check complex_ptr
         let complex = structs.iter().find(|s| s.name == "complex_ptr");
         assert!(complex.is_some(), "Should extract complex_ptr");
-        assert!(complex.unwrap().decorators.contains(&"anonymous_struct".to_string()));
+        assert!(complex
+            .unwrap()
+            .decorators
+            .contains(&"anonymous_struct".to_string()));
 
         // Check person_arr
         let person = structs.iter().find(|s| s.name == "person_arr");
         assert!(person.is_some(), "Should extract person_arr");
-        assert!(person.unwrap().decorators.contains(&"anonymous_struct".to_string()));
+        assert!(person
+            .unwrap()
+            .decorators
+            .contains(&"anonymous_struct".to_string()));
     }
 
     #[test]

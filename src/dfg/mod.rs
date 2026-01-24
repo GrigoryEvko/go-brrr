@@ -42,7 +42,7 @@ pub use slice::{
     forward_slice, forward_slice_variable, ChopResult, SliceCriteria, SliceMetrics, SliceResult,
 };
 
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 
 /// Extract DFG for a function with explicit language specification.
 ///
@@ -67,7 +67,11 @@ use crate::error::{Result, BrrrError};
 /// - The language is not supported
 /// - The function is not found
 /// - Parsing fails
-pub fn extract_with_language(file: &str, function: &str, language: Option<&str>) -> Result<DFGInfo> {
+pub fn extract_with_language(
+    file: &str,
+    function: &str,
+    language: Option<&str>,
+) -> Result<DFGInfo> {
     DfgBuilder::extract_from_file_with_language(file, function, language)
 }
 

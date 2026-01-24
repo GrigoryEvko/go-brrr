@@ -39,8 +39,10 @@ use tree_sitter::{Node, Tree};
 
 use crate::ast::AstExtractor;
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
+
+use super::common;
 
 // =============================================================================
 // TYPES
@@ -90,10 +92,10 @@ impl CognitiveRiskLevel {
     #[must_use]
     pub const fn color_code(&self) -> &'static str {
         match self {
-            Self::Low => "\x1b[32m",       // Green
-            Self::Medium => "\x1b[33m",    // Yellow
-            Self::High => "\x1b[31m",      // Red
-            Self::Critical => "\x1b[35m",  // Magenta
+            Self::Low => "\x1b[32m",      // Green
+            Self::Medium => "\x1b[33m",   // Yellow
+            Self::High => "\x1b[31m",     // Red
+            Self::Critical => "\x1b[35m", // Magenta
         }
     }
 }
@@ -801,7 +803,7 @@ impl<'a> CognitiveCalculator<'a> {
                 self.process_children_flat(node);
                 true
             }
-            _ => false
+            _ => false,
         }
     }
 
@@ -888,7 +890,7 @@ impl<'a> CognitiveCalculator<'a> {
                 self.exit_nesting();
                 true
             }
-            _ => false
+            _ => false,
         }
     }
 
@@ -967,7 +969,7 @@ impl<'a> CognitiveCalculator<'a> {
                 self.process_children_flat(node);
                 true
             }
-            _ => false
+            _ => false,
         }
     }
 
@@ -1062,7 +1064,7 @@ impl<'a> CognitiveCalculator<'a> {
                 self.process_children_flat(node);
                 true
             }
-            _ => false
+            _ => false,
         }
     }
 
@@ -1153,7 +1155,7 @@ impl<'a> CognitiveCalculator<'a> {
                 self.add_contribution(line, ConstructType::Goto, true);
                 false
             }
-            _ => false
+            _ => false,
         }
     }
 
@@ -1225,10 +1227,7 @@ impl<'a> CognitiveCalculator<'a> {
 
     /// Check if a ternary is nested inside another ternary.
     fn is_nested_ternary(&self, node: Node) -> bool {
-        let ternary_kinds = [
-            "conditional_expression",
-            "ternary_expression",
-        ];
+        let ternary_kinds = ["conditional_expression", "ternary_expression"];
 
         let mut current = node.parent();
         while let Some(parent) = current {
@@ -1316,9 +1315,9 @@ pub fn analyze_cognitive_complexity(
     }
 
     // Directory analysis
-    let path_str = path.to_str().ok_or_else(|| {
-        BrrrError::InvalidArgument("Invalid path encoding".to_string())
-    })?;
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| BrrrError::InvalidArgument("Invalid path encoding".to_string()))?;
 
     let scanner = ProjectScanner::new(path_str)?;
 
@@ -1416,9 +1415,7 @@ pub fn analyze_file_cognitive_complexity(
     });
 
     let registry = LanguageRegistry::global();
-    let language = registry
-        .detect_language(file)
-        .map(|l| l.name().to_string());
+    let language = registry.detect_language(file).map(|l| l.name().to_string());
 
     Ok(CognitiveAnalysis {
         path: file.to_path_buf(),
@@ -1598,7 +1595,13 @@ fn analyze_function_cognitive(
     language: &str,
 ) -> CognitiveComplexity {
     // Find the function node in the tree
-    let func_node = find_function_node(tree.root_node(), function_name, start_line, source, language);
+    let func_node = find_function_node(
+        tree.root_node(),
+        function_name,
+        start_line,
+        source,
+        language,
+    );
 
     if let Some(node) = func_node {
         // Get the simple function name for recursion detection
@@ -1612,7 +1615,7 @@ fn analyze_function_cognitive(
         let mut calculator = CognitiveCalculator::new(source, simple_name, language);
 
         // Find and process the function body (skip the function signature)
-        let body_node = find_function_body(node, language);
+        let body_node = common::find_function_body(node, language);
         if let Some(body) = body_node {
             calculator.process_function_body(body);
         } else {
@@ -1620,7 +1623,7 @@ fn analyze_function_cognitive(
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 // Skip non-body parts like parameters, return type, decorators
-                if !is_function_signature_part(child.kind(), language) {
+                if !common::is_function_signature_part(child.kind()) {
                     calculator.process_node(child);
                 }
             }
@@ -1653,50 +1656,7 @@ fn analyze_function_cognitive(
     }
 }
 
-/// Find the body node of a function.
-fn find_function_body<'a>(node: Node<'a>, language: &str) -> Option<Node<'a>> {
-    let body_field = match language {
-        "python" => "body",
-        "typescript" | "javascript" | "tsx" | "jsx" => "body",
-        "rust" => "body",
-        "go" => "body",
-        "java" => "body",
-        "c" | "cpp" => "body",
-        _ => "body",
-    };
-
-    node.child_by_field_name(body_field)
-}
-
-/// Check if a node kind is part of the function signature (not body).
-fn is_function_signature_part(kind: &str, _language: &str) -> bool {
-    matches!(
-        kind,
-        "parameters"
-            | "formal_parameters"
-            | "parameter_list"
-            | "type_parameters"
-            | "return_type"
-            | "type_annotation"
-            | "type"
-            | "decorator"
-            | "modifiers"
-            | "visibility_modifier"
-            | "identifier"
-            | "name"
-            | "def"
-            | "fn"
-            | "func"
-            | "function"
-            | "async"
-            | "("
-            | ")"
-            | "{"
-            | "}"
-            | ":"
-            | "->"
-    )
-}
+// Note: find_function_body and is_function_signature_part are now in common.rs
 
 /// Find a function node by name and line number.
 fn find_function_node<'a>(
@@ -1712,9 +1672,11 @@ fn find_function_node<'a>(
     // Define function node kinds per language
     let function_kinds: &[&str] = match language {
         "python" => &["function_definition"],
-        "typescript" | "javascript" | "tsx" | "jsx" => {
-            &["function_declaration", "method_definition", "arrow_function"]
-        }
+        "typescript" | "javascript" | "tsx" | "jsx" => &[
+            "function_declaration",
+            "method_definition",
+            "arrow_function",
+        ],
         "rust" => &["function_item"],
         "go" => &["function_declaration", "method_declaration"],
         "java" => &["method_declaration", "constructor_declaration"],
@@ -1753,7 +1715,9 @@ fn find_node_recursive<'a>(
     // Search children
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if let Some(found) = find_node_recursive(child, target_name, target_line, source, function_kinds) {
+        if let Some(found) =
+            find_node_recursive(child, target_name, target_line, source, function_kinds)
+        {
             return Some(found);
         }
     }
@@ -1783,13 +1747,34 @@ mod tests {
 
     #[test]
     fn test_risk_level_classification() {
-        assert_eq!(CognitiveRiskLevel::from_complexity(0), CognitiveRiskLevel::Low);
-        assert_eq!(CognitiveRiskLevel::from_complexity(5), CognitiveRiskLevel::Low);
-        assert_eq!(CognitiveRiskLevel::from_complexity(6), CognitiveRiskLevel::Medium);
-        assert_eq!(CognitiveRiskLevel::from_complexity(10), CognitiveRiskLevel::Medium);
-        assert_eq!(CognitiveRiskLevel::from_complexity(11), CognitiveRiskLevel::High);
-        assert_eq!(CognitiveRiskLevel::from_complexity(15), CognitiveRiskLevel::High);
-        assert_eq!(CognitiveRiskLevel::from_complexity(16), CognitiveRiskLevel::Critical);
+        assert_eq!(
+            CognitiveRiskLevel::from_complexity(0),
+            CognitiveRiskLevel::Low
+        );
+        assert_eq!(
+            CognitiveRiskLevel::from_complexity(5),
+            CognitiveRiskLevel::Low
+        );
+        assert_eq!(
+            CognitiveRiskLevel::from_complexity(6),
+            CognitiveRiskLevel::Medium
+        );
+        assert_eq!(
+            CognitiveRiskLevel::from_complexity(10),
+            CognitiveRiskLevel::Medium
+        );
+        assert_eq!(
+            CognitiveRiskLevel::from_complexity(11),
+            CognitiveRiskLevel::High
+        );
+        assert_eq!(
+            CognitiveRiskLevel::from_complexity(15),
+            CognitiveRiskLevel::High
+        );
+        assert_eq!(
+            CognitiveRiskLevel::from_complexity(16),
+            CognitiveRiskLevel::Critical
+        );
     }
 
     #[test]

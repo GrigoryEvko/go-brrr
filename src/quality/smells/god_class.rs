@@ -51,6 +51,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
+use rustc_hash::{FxHashMap, FxHashSet};
+
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -60,6 +62,9 @@ use tree_sitter::Node;
 use crate::ast::AstExtractor;
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
 use crate::lang::LanguageRegistry;
+use crate::metrics::common::{
+    extract_attribute_accesses, extract_method_calls, find_class_node, find_method_node,
+};
 
 // =============================================================================
 // ERROR TYPE
@@ -259,10 +264,10 @@ impl GodClassSeverity {
     #[must_use]
     pub const fn color_code(&self) -> &'static str {
         match self {
-            Self::Low => "\x1b[33m",       // Yellow
+            Self::Low => "\x1b[33m",          // Yellow
             Self::Medium => "\x1b[38;5;208m", // Orange
-            Self::High => "\x1b[31m",      // Red
-            Self::Critical => "\x1b[35m",  // Magenta
+            Self::High => "\x1b[31m",         // Red
+            Self::Critical => "\x1b[35m",     // Magenta
         }
     }
 }
@@ -437,12 +442,14 @@ impl GodClassStats {
         }
 
         let mut severity_dist: HashMap<String, usize> = HashMap::new();
-        let mut affected_files: HashSet<PathBuf> = HashSet::new();
+        let mut affected_files: FxHashSet<PathBuf> = FxHashSet::default();
         let mut score_sum = 0.0;
         let mut max_score = 0.0f64;
 
         for finding in findings {
-            *severity_dist.entry(finding.severity.to_string()).or_insert(0) += 1;
+            *severity_dist
+                .entry(finding.severity.to_string())
+                .or_insert(0) += 1;
             affected_files.insert(finding.file.clone());
             score_sum += finding.score;
             max_score = max_score.max(finding.score);
@@ -540,12 +547,12 @@ pub fn detect_with_config(
     }
 
     // Directory analysis
-    let path_str = path.to_str().ok_or_else(|| {
-        GodClassError::ScanError("Invalid path encoding".to_string())
-    })?;
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| GodClassError::ScanError("Invalid path encoding".to_string()))?;
 
-    let scanner = ProjectScanner::new(path_str)
-        .map_err(|e| GodClassError::ScanError(e.to_string()))?;
+    let scanner =
+        ProjectScanner::new(path_str).map_err(|e| GodClassError::ScanError(e.to_string()))?;
 
     let scan_config = if let Some(ref lang) = config.language {
         ScanConfig::for_language(lang)
@@ -553,7 +560,8 @@ pub fn detect_with_config(
         ScanConfig::default()
     };
 
-    let scan_result = scanner.scan_with_config(&scan_config)
+    let scan_result = scanner
+        .scan_with_config(&scan_config)
         .map_err(|e| GodClassError::ScanError(e.to_string()))?;
 
     if scan_result.files.is_empty() {
@@ -564,7 +572,10 @@ pub fn detect_with_config(
         )));
     }
 
-    debug!("Analyzing {} files for God classes", scan_result.files.len());
+    debug!(
+        "Analyzing {} files for God classes",
+        scan_result.files.len()
+    );
 
     // Analyze files in parallel
     let results: Vec<(Vec<GodClassFinding>, Vec<FileError>, usize, usize)> = scan_result
@@ -593,7 +604,11 @@ pub fn detect_with_config(
     }
 
     // Sort findings by score (highest first)
-    all_findings.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    all_findings.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Calculate statistics
     let stats = GodClassStats::from_findings(&all_findings, total_analyzed, total_excluded);
@@ -609,18 +624,13 @@ pub fn detect_with_config(
 }
 
 /// Analyze a single file for God classes.
-fn detect_in_file(
-    file: &Path,
-    config: &GodClassConfig,
-) -> Result<GodClassAnalysis, GodClassError> {
+fn detect_in_file(file: &Path, config: &GodClassConfig) -> Result<GodClassAnalysis, GodClassError> {
     let (findings, errors, analyzed, excluded) = analyze_file_for_god_classes(file, config);
     let stats = GodClassStats::from_findings(&findings, analyzed, excluded);
 
     // Detect language
     let registry = LanguageRegistry::global();
-    let language = registry
-        .detect_language(file)
-        .map(|l| l.name().to_string());
+    let language = registry.detect_language(file).map(|l| l.name().to_string());
 
     Ok(GodClassAnalysis {
         path: file.to_path_buf(),
@@ -721,14 +731,9 @@ fn analyze_file_for_god_classes(
         }
 
         // Analyze the class
-        if let Some(finding) = analyze_class_for_god_class(
-            file,
-            class,
-            &tree,
-            &source,
-            language,
-            config,
-        ) {
+        if let Some(finding) =
+            analyze_class_for_god_class(file, class, &tree, &source, language, config)
+        {
             // Only include if score exceeds threshold
             if finding.score >= config.score_threshold {
                 findings.push(finding);
@@ -745,14 +750,9 @@ fn analyze_file_for_god_classes(
                 continue;
             }
 
-            if let Some(finding) = analyze_class_for_god_class(
-                file,
-                inner,
-                &tree,
-                &source,
-                language,
-                config,
-            ) {
+            if let Some(finding) =
+                analyze_class_for_god_class(file, inner, &tree, &source, language, config)
+            {
                 if finding.score >= config.score_threshold {
                     findings.push(finding);
                 }
@@ -814,20 +814,23 @@ fn analyze_class_for_god_class(
         return None;
     }
 
-    let line_count = class.end_line_number
+    let line_count = class
+        .end_line_number
         .unwrap_or(class.line_number)
-        .saturating_sub(class.line_number) + 1;
+        .saturating_sub(class.line_number)
+        + 1;
 
     // Build method-attribute graph for cohesion and responsibility analysis
-    let mut method_attributes: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut all_attributes: HashSet<String> = HashSet::new();
-    let mut method_calls: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut method_attributes: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
+    let mut all_attributes: FxHashSet<String> = FxHashSet::default();
+    let mut method_calls: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
     let mut complexity_sum = 0u32;
     let mut public_methods = 0u32;
     let mut private_methods = 0u32;
 
-    // Collect method names for analysis
-    let method_names: HashSet<String> = class.methods
+    // Collect method names for analysis (using std HashSet for extract_method_calls compatibility)
+    let method_names: HashSet<String> = class
+        .methods
         .iter()
         .filter(|m| !is_static_method(m))
         .map(|m| m.name.clone())
@@ -849,14 +852,22 @@ fn analyze_class_for_god_class(
             }
 
             // Find method node
-            if let Some(method_node) = find_method_node(class_node, &method.name, method.line_number, language) {
-                // Extract attributes accessed
-                let attrs = extract_attribute_accesses(method_node, source, language);
-                all_attributes.extend(attrs.clone());
+            if let Some(method_node) =
+                find_method_node(class_node, &method.name, method.line_number, language)
+            {
+                // Extract attributes accessed (using shared utility)
+                let attrs: FxHashSet<String> =
+                    extract_attribute_accesses(method_node, source, language)
+                        .into_iter()
+                        .collect();
+                all_attributes.extend(attrs.iter().cloned());
                 method_attributes.insert(method.name.clone(), attrs);
 
-                // Extract method calls (for LCOM4-style analysis)
-                let calls = extract_method_calls_internal(method_node, source, language, &method_names);
+                // Extract method calls (for LCOM4-style analysis, using shared utility)
+                let calls: FxHashSet<String> =
+                    extract_method_calls(method_node, source, language, &method_names)
+                        .into_iter()
+                        .collect();
                 method_calls.insert(method.name.clone(), calls);
 
                 // Estimate complexity (simplified: count decision points)
@@ -899,15 +910,18 @@ fn analyze_class_for_god_class(
     // Build score breakdown
     let mut score_breakdown = HashMap::new();
     if indicators.method_count > config.method_threshold {
-        let penalty = f64::from(indicators.method_count - config.method_threshold) * METHOD_PENALTY_WEIGHT;
+        let penalty =
+            f64::from(indicators.method_count - config.method_threshold) * METHOD_PENALTY_WEIGHT;
         score_breakdown.insert("methods".to_string(), penalty);
     }
     if indicators.attribute_count > config.attribute_threshold {
-        let penalty = f64::from(indicators.attribute_count - config.attribute_threshold) * ATTRIBUTE_PENALTY_WEIGHT;
+        let penalty = f64::from(indicators.attribute_count - config.attribute_threshold)
+            * ATTRIBUTE_PENALTY_WEIGHT;
         score_breakdown.insert("attributes".to_string(), penalty);
     }
     if indicators.line_count > config.line_threshold {
-        let penalty = (f64::from(indicators.line_count - config.line_threshold) / 100.0) * LINE_PENALTY_WEIGHT;
+        let penalty = (f64::from(indicators.line_count - config.line_threshold) / 100.0)
+            * LINE_PENALTY_WEIGHT;
         score_breakdown.insert("lines".to_string(), penalty);
     }
     if indicators.lcom > config.lcom_threshold {
@@ -940,216 +954,33 @@ fn analyze_class_for_god_class(
 
 /// Check if a method is static.
 fn is_static_method(method: &crate::ast::types::FunctionInfo) -> bool {
-    method.decorators.iter().any(|d| {
-        d.contains("staticmethod") || d.contains("static") || d == "@staticmethod"
-    })
+    method
+        .decorators
+        .iter()
+        .any(|d| d.contains("staticmethod") || d.contains("static") || d == "@staticmethod")
 }
 
 /// Check if a method is private based on naming convention.
 fn is_private_method(name: &str, language: &str) -> bool {
     match language {
         "python" => name.starts_with('_') && !name.starts_with("__"),
-        "typescript" | "javascript" | "tsx" | "jsx" => name.starts_with('#') || name.starts_with('_'),
+        "typescript" | "javascript" | "tsx" | "jsx" => {
+            name.starts_with('#') || name.starts_with('_')
+        }
         "rust" => false, // Rust uses pub/not pub, not naming convention
         "java" | "kotlin" | "csharp" => false, // Uses access modifiers
         _ => name.starts_with('_'),
     }
 }
 
-/// Extract attribute accesses from a method body.
-fn extract_attribute_accesses(
-    node: Node,
-    source: &[u8],
-    language: &str,
-) -> HashSet<String> {
-    let mut attributes = HashSet::new();
-    extract_attrs_recursive(node, source, language, &mut attributes);
-    attributes
-}
+// extract_attribute_accesses moved to crate::metrics::common
 
-fn extract_attrs_recursive(
-    node: Node,
-    source: &[u8],
-    language: &str,
-    attributes: &mut HashSet<String>,
-) {
-    let node_kind = node.kind();
-
-    match language {
-        "python" => {
-            if node_kind == "attribute" {
-                if let Some(object) = node.child_by_field_name("object") {
-                    let obj_text = node_text(object, source);
-                    if obj_text == "self" {
-                        if let Some(attr) = node.child_by_field_name("attribute") {
-                            let attr_name = node_text(attr, source);
-                            if !attr_name.starts_with("__") || !attr_name.ends_with("__") {
-                                attributes.insert(attr_name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        "typescript" | "javascript" | "tsx" | "jsx" => {
-            if node_kind == "member_expression" {
-                if let Some(object) = node.child_by_field_name("object") {
-                    let obj_text = node_text(object, source);
-                    if obj_text == "this" {
-                        if let Some(prop) = node.child_by_field_name("property") {
-                            attributes.insert(node_text(prop, source).to_string());
-                        }
-                    }
-                }
-            }
-        }
-        "rust" => {
-            if node_kind == "field_expression" {
-                if let Some(value) = node.child_by_field_name("value") {
-                    if node_text(value, source) == "self" {
-                        if let Some(field) = node.child_by_field_name("field") {
-                            attributes.insert(node_text(field, source).to_string());
-                        }
-                    }
-                }
-            }
-        }
-        "go" => {
-            if node_kind == "selector_expression" {
-                if let Some(operand) = node.child_by_field_name("operand") {
-                    if operand.kind() == "identifier" {
-                        let var_name = node_text(operand, source);
-                        if var_name.len() <= 3 {
-                            if let Some(field) = node.child_by_field_name("field") {
-                                attributes.insert(node_text(field, source).to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        "java" | "kotlin" | "csharp" => {
-            if node_kind == "field_access" || node_kind == "member_access_expression" {
-                if let Some(object) = node.child_by_field_name("object") {
-                    if node_text(object, source) == "this" {
-                        if let Some(field) = node.child_by_field_name("field")
-                            .or_else(|| node.child_by_field_name("name"))
-                        {
-                            attributes.insert(node_text(field, source).to_string());
-                        }
-                    }
-                }
-            }
-        }
-        "cpp" | "c" => {
-            if node_kind == "field_expression" {
-                if let Some(argument) = node.child_by_field_name("argument") {
-                    if node_text(argument, source) == "this" {
-                        if let Some(field) = node.child_by_field_name("field") {
-                            attributes.insert(node_text(field, source).to_string());
-                        }
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        extract_attrs_recursive(child, source, language, attributes);
-    }
-}
-
-/// Extract method calls within a method body.
-fn extract_method_calls_internal(
-    node: Node,
-    source: &[u8],
-    language: &str,
-    class_methods: &HashSet<String>,
-) -> HashSet<String> {
-    let mut calls = HashSet::new();
-    extract_calls_recursive(node, source, language, class_methods, &mut calls);
-    calls
-}
-
-fn extract_calls_recursive(
-    node: Node,
-    source: &[u8],
-    language: &str,
-    class_methods: &HashSet<String>,
-    calls: &mut HashSet<String>,
-) {
-    let node_kind = node.kind();
-
-    match language {
-        "python" => {
-            if node_kind == "call" {
-                if let Some(func) = node.child_by_field_name("function") {
-                    if func.kind() == "attribute" {
-                        if let Some(obj) = func.child_by_field_name("object") {
-                            if node_text(obj, source) == "self" {
-                                if let Some(attr) = func.child_by_field_name("attribute") {
-                                    let method_name = node_text(attr, source);
-                                    if class_methods.contains(method_name) {
-                                        calls.insert(method_name.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        "typescript" | "javascript" | "tsx" | "jsx" => {
-            if node_kind == "call_expression" {
-                if let Some(func) = node.child_by_field_name("function") {
-                    if func.kind() == "member_expression" {
-                        if let Some(obj) = func.child_by_field_name("object") {
-                            if node_text(obj, source) == "this" {
-                                if let Some(prop) = func.child_by_field_name("property") {
-                                    let method_name = node_text(prop, source);
-                                    if class_methods.contains(method_name) {
-                                        calls.insert(method_name.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        "rust" => {
-            if node_kind == "call_expression" {
-                if let Some(func) = node.child_by_field_name("function") {
-                    if func.kind() == "field_expression" {
-                        if let Some(val) = func.child_by_field_name("value") {
-                            if node_text(val, source) == "self" {
-                                if let Some(field) = func.child_by_field_name("field") {
-                                    let method_name = node_text(field, source);
-                                    if class_methods.contains(method_name) {
-                                        calls.insert(method_name.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        extract_calls_recursive(child, source, language, class_methods, calls);
-    }
-}
+// extract_method_calls moved to crate::metrics::common
 
 /// Calculate LCOM (number of connected components) from method-attribute relationships.
 fn calculate_lcom(
-    method_attributes: &HashMap<String, HashSet<String>>,
-    method_calls: &HashMap<String, HashSet<String>>,
+    method_attributes: &FxHashMap<String, FxHashSet<String>>,
+    method_calls: &FxHashMap<String, FxHashSet<String>>,
 ) -> u32 {
     let methods: Vec<&String> = method_attributes.keys().collect();
     if methods.is_empty() {
@@ -1157,15 +988,17 @@ fn calculate_lcom(
     }
 
     // Build adjacency: methods connected if they share attributes or call each other
-    let mut adjacency: HashMap<&String, HashSet<&String>> = HashMap::new();
+    let mut adjacency: FxHashMap<&String, FxHashSet<&String>> = FxHashMap::default();
     for m in &methods {
-        adjacency.insert(m, HashSet::new());
+        adjacency.insert(m, FxHashSet::default());
     }
 
     // Connect methods sharing attributes
     for (i, m1) in methods.iter().enumerate() {
         for m2 in methods.iter().skip(i + 1) {
-            if let (Some(attrs1), Some(attrs2)) = (method_attributes.get(*m1), method_attributes.get(*m2)) {
+            if let (Some(attrs1), Some(attrs2)) =
+                (method_attributes.get(*m1), method_attributes.get(*m2))
+            {
                 if !attrs1.is_disjoint(attrs2) {
                     adjacency.get_mut(m1).unwrap().insert(m2);
                     adjacency.get_mut(m2).unwrap().insert(m1);
@@ -1192,7 +1025,7 @@ fn calculate_lcom(
     }
 
     // BFS to count connected components
-    let mut visited: HashSet<&String> = HashSet::new();
+    let mut visited: FxHashSet<&String> = FxHashSet::default();
     let mut components = 0u32;
 
     for method in &methods {
@@ -1222,7 +1055,7 @@ fn calculate_lcom(
 
 /// Estimate coupling based on base classes and return type annotations.
 fn estimate_coupling(class: &crate::ast::types::ClassInfo) -> u32 {
-    let mut unique_types: HashSet<String> = HashSet::new();
+    let mut unique_types: FxHashSet<String> = FxHashSet::default();
 
     // Base classes
     for base in &class.bases {
@@ -1255,10 +1088,9 @@ fn estimate_coupling(class: &crate::ast::types::ClassInfo) -> u32 {
 /// Check if a type is a built-in type.
 fn is_builtin_type(type_name: &str) -> bool {
     let builtins = [
-        "int", "str", "float", "bool", "list", "dict", "set", "tuple",
-        "None", "any", "Any", "void", "number", "string", "boolean",
-        "i32", "i64", "u32", "u64", "f32", "f64", "usize", "isize",
-        "String", "Vec", "Option", "Result",
+        "int", "str", "float", "bool", "list", "dict", "set", "tuple", "None", "any", "Any",
+        "void", "number", "string", "boolean", "i32", "i64", "u32", "u64", "f32", "f64", "usize",
+        "isize", "String", "Vec", "Option", "Result",
     ];
     builtins.iter().any(|b| type_name.starts_with(b))
 }
@@ -1268,20 +1100,60 @@ fn estimate_complexity(node: Node, language: &str) -> u32 {
     let mut complexity = 1u32; // Base complexity
 
     let decision_kinds = match language {
-        "python" => vec!["if_statement", "elif_clause", "while_statement", "for_statement",
-                         "except_clause", "with_statement", "and", "or", "match_statement",
-                         "case_clause", "list_comprehension", "dictionary_comprehension"],
+        "python" => vec![
+            "if_statement",
+            "elif_clause",
+            "while_statement",
+            "for_statement",
+            "except_clause",
+            "with_statement",
+            "and",
+            "or",
+            "match_statement",
+            "case_clause",
+            "list_comprehension",
+            "dictionary_comprehension",
+        ],
         "typescript" | "javascript" | "tsx" | "jsx" => vec![
-            "if_statement", "while_statement", "for_statement", "for_in_statement",
-            "switch_case", "catch_clause", "ternary_expression", "&&", "||",
-            "optional_chain_expression"],
-        "rust" => vec!["if_expression", "while_expression", "for_expression",
-                       "match_arm", "&&", "||", "?"],
-        "go" => vec!["if_statement", "for_statement", "switch_case", "select_case",
-                     "&&", "||"],
+            "if_statement",
+            "while_statement",
+            "for_statement",
+            "for_in_statement",
+            "switch_case",
+            "catch_clause",
+            "ternary_expression",
+            "&&",
+            "||",
+            "optional_chain_expression",
+        ],
+        "rust" => vec![
+            "if_expression",
+            "while_expression",
+            "for_expression",
+            "match_arm",
+            "&&",
+            "||",
+            "?",
+        ],
+        "go" => vec![
+            "if_statement",
+            "for_statement",
+            "switch_case",
+            "select_case",
+            "&&",
+            "||",
+        ],
         "java" | "kotlin" | "csharp" => vec![
-            "if_statement", "while_statement", "for_statement", "enhanced_for_statement",
-            "switch_case", "catch_clause", "&&", "||", "ternary_expression"],
+            "if_statement",
+            "while_statement",
+            "for_statement",
+            "enhanced_for_statement",
+            "switch_case",
+            "catch_clause",
+            "&&",
+            "||",
+            "ternary_expression",
+        ],
         _ => vec!["if_statement", "while_statement", "for_statement", "case"],
     };
 
@@ -1302,8 +1174,8 @@ fn count_decision_points(node: Node, kinds: &[&str], complexity: &mut u32) {
 
 /// Suggest class splits based on method groupings that share attributes.
 fn suggest_class_splits(
-    method_attributes: &HashMap<String, HashSet<String>>,
-    method_calls: &HashMap<String, HashSet<String>>,
+    method_attributes: &FxHashMap<String, FxHashSet<String>>,
+    method_calls: &FxHashMap<String, FxHashSet<String>>,
 ) -> Vec<SuggestedClass> {
     // Find connected components (same as LCOM calculation)
     let methods: Vec<&String> = method_attributes.keys().collect();
@@ -1312,14 +1184,16 @@ fn suggest_class_splits(
     }
 
     // Build adjacency
-    let mut adjacency: HashMap<&String, HashSet<&String>> = HashMap::new();
+    let mut adjacency: FxHashMap<&String, FxHashSet<&String>> = FxHashMap::default();
     for m in &methods {
-        adjacency.insert(m, HashSet::new());
+        adjacency.insert(m, FxHashSet::default());
     }
 
     for (i, m1) in methods.iter().enumerate() {
         for m2 in methods.iter().skip(i + 1) {
-            if let (Some(attrs1), Some(attrs2)) = (method_attributes.get(*m1), method_attributes.get(*m2)) {
+            if let (Some(attrs1), Some(attrs2)) =
+                (method_attributes.get(*m1), method_attributes.get(*m2))
+            {
                 if !attrs1.is_disjoint(attrs2) {
                     adjacency.get_mut(m1).unwrap().insert(m2);
                     adjacency.get_mut(m2).unwrap().insert(m1);
@@ -1341,7 +1215,7 @@ fn suggest_class_splits(
     }
 
     // Find components
-    let mut visited: HashSet<&String> = HashSet::new();
+    let mut visited: FxHashSet<&String> = FxHashSet::default();
     let mut components: Vec<Vec<String>> = Vec::new();
 
     for method in &methods {
@@ -1383,10 +1257,10 @@ fn suggest_class_splits(
         .enumerate()
         .map(|(i, methods_vec)| {
             // Collect all attributes used by this component
-            let mut attrs: HashSet<String> = HashSet::new();
+            let mut attrs: FxHashSet<String> = FxHashSet::default();
             for method in &methods_vec {
                 if let Some(method_attrs) = method_attributes.get(method) {
-                    attrs.extend(method_attrs.clone());
+                    attrs.extend(method_attrs.iter().cloned());
                 }
             }
 
@@ -1399,7 +1273,9 @@ fn suggest_class_splits(
                 let mut sharing_pairs = 0;
                 for (j, m1) in methods_vec.iter().enumerate() {
                     for m2 in methods_vec.iter().skip(j + 1) {
-                        if let (Some(a1), Some(a2)) = (method_attributes.get(m1), method_attributes.get(m2)) {
+                        if let (Some(a1), Some(a2)) =
+                            (method_attributes.get(m1), method_attributes.get(m2))
+                        {
                             if !a1.is_disjoint(a2) {
                                 sharing_pairs += 1;
                             }
@@ -1426,7 +1302,7 @@ fn suggest_class_splits(
 }
 
 /// Generate a meaningful name hint for a suggested class.
-fn generate_name_hint(methods: &[String], attributes: &HashSet<String>, index: usize) -> String {
+fn generate_name_hint(methods: &[String], attributes: &FxHashSet<String>, index: usize) -> String {
     // Try to find common prefixes in method names
     let prefixes: Vec<&str> = methods
         .iter()
@@ -1441,7 +1317,7 @@ fn generate_name_hint(methods: &[String], attributes: &HashSet<String>, index: u
         .collect();
 
     // Count prefix occurrences
-    let mut prefix_counts: HashMap<&str, usize> = HashMap::new();
+    let mut prefix_counts: FxHashMap<&str, usize> = FxHashMap::default();
     for prefix in &prefixes {
         *prefix_counts.entry(prefix).or_insert(0) += 1;
     }
@@ -1477,79 +1353,7 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-/// Find a class node by line number.
-fn find_class_node<'a>(node: Node<'a>, _class_name: &str, line: usize) -> Option<Node<'a>> {
-    let node_kind = node.kind();
-
-    let is_class = matches!(
-        node_kind,
-        "class_definition" | "class_declaration" | "class" |
-        "impl_item" | "struct_item" | "type_declaration"
-    );
-
-    if is_class {
-        let node_line = node.start_position().row + 1;
-        if node_line == line {
-            return Some(node);
-        }
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if let Some(found) = find_class_node(child, _class_name, line) {
-            return Some(found);
-        }
-    }
-
-    None
-}
-
-/// Find a method node within a class.
-fn find_method_node<'a>(
-    class_node: Node<'a>,
-    _method_name: &str,
-    line: usize,
-    language: &str,
-) -> Option<Node<'a>> {
-    let method_kinds = match language {
-        "python" => vec!["function_definition"],
-        "typescript" | "javascript" | "tsx" | "jsx" => vec!["method_definition", "function_declaration"],
-        "rust" => vec!["function_item"],
-        "go" => vec!["function_declaration", "method_declaration"],
-        "java" | "kotlin" | "csharp" => vec!["method_declaration", "function_declaration"],
-        "cpp" | "c" => vec!["function_definition"],
-        _ => vec!["function_definition", "method_definition"],
-    };
-
-    find_method_recursive(class_node, &method_kinds, line)
-}
-
-fn find_method_recursive<'a>(
-    node: Node<'a>,
-    method_kinds: &[&str],
-    line: usize,
-) -> Option<Node<'a>> {
-    if method_kinds.contains(&node.kind()) {
-        let node_line = node.start_position().row + 1;
-        if node_line == line {
-            return Some(node);
-        }
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if let Some(found) = find_method_recursive(child, method_kinds, line) {
-            return Some(found);
-        }
-    }
-
-    None
-}
-
-/// Helper to get node text safely.
-fn node_text<'a>(node: Node<'a>, source: &'a [u8]) -> &'a str {
-    std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).unwrap_or("")
-}
+// find_class_node, find_method_node, find_method_recursive, node_text moved to crate::metrics::common
 
 // =============================================================================
 // FORMATTING
@@ -1569,13 +1373,22 @@ pub fn format_god_class_summary(analysis: &GodClassAnalysis) -> String {
 
     // Statistics
     output.push_str("Summary:\n");
-    output.push_str(&format!("  Total classes analyzed: {}\n", analysis.stats.total_classes));
-    output.push_str(&format!("  God classes detected:   {} ({:.1}%)\n",
-        analysis.stats.god_classes,
-        analysis.stats.god_class_percentage
+    output.push_str(&format!(
+        "  Total classes analyzed: {}\n",
+        analysis.stats.total_classes
     ));
-    output.push_str(&format!("  Excluded classes:       {}\n", analysis.stats.excluded_classes));
-    output.push_str(&format!("  Affected files:         {}\n", analysis.stats.affected_files));
+    output.push_str(&format!(
+        "  God classes detected:   {} ({:.1}%)\n",
+        analysis.stats.god_classes, analysis.stats.god_class_percentage
+    ));
+    output.push_str(&format!(
+        "  Excluded classes:       {}\n",
+        analysis.stats.excluded_classes
+    ));
+    output.push_str(&format!(
+        "  Affected files:         {}\n",
+        analysis.stats.affected_files
+    ));
 
     if !analysis.stats.severity_distribution.is_empty() {
         output.push_str("\nSeverity Distribution:\n");
@@ -1585,7 +1398,10 @@ pub fn format_god_class_summary(analysis: &GodClassAnalysis) -> String {
     }
 
     if analysis.stats.god_classes > 0 {
-        output.push_str(&format!("\nAverage score: {:.1}\n", analysis.stats.average_score));
+        output.push_str(&format!(
+            "\nAverage score: {:.1}\n",
+            analysis.stats.average_score
+        ));
         output.push_str(&format!("Maximum score: {:.1}\n", analysis.stats.max_score));
     }
 
@@ -1595,7 +1411,10 @@ pub fn format_god_class_summary(analysis: &GodClassAnalysis) -> String {
     if analysis.findings.is_empty() {
         output.push_str("No God classes detected.\n");
     } else {
-        output.push_str(&format!("Findings ({} God classes):\n\n", analysis.findings.len()));
+        output.push_str(&format!(
+            "Findings ({} God classes):\n\n",
+            analysis.findings.len()
+        ));
 
         for finding in &analysis.findings {
             let color = finding.severity.color_code();
@@ -1603,7 +1422,9 @@ pub fn format_god_class_summary(analysis: &GodClassAnalysis) -> String {
 
             output.push_str(&format!(
                 "{}{}{} [{}]: {}\n",
-                color, finding.class_name, reset,
+                color,
+                finding.class_name,
+                reset,
                 finding.severity,
                 finding.file.display()
             ));
@@ -1680,7 +1501,10 @@ mod tests {
         assert_eq!(GodClassSeverity::from_score(15.0), GodClassSeverity::Low);
         assert_eq!(GodClassSeverity::from_score(25.0), GodClassSeverity::Medium);
         assert_eq!(GodClassSeverity::from_score(40.0), GodClassSeverity::High);
-        assert_eq!(GodClassSeverity::from_score(60.0), GodClassSeverity::Critical);
+        assert_eq!(
+            GodClassSeverity::from_score(60.0),
+            GodClassSeverity::Critical
+        );
     }
 
     #[test]
@@ -1703,10 +1527,10 @@ mod tests {
 
         // God class - multiple penalties
         let god = GodClassIndicators {
-            method_count: 30, // 10 over threshold -> +20
+            method_count: 30,    // 10 over threshold -> +20
             attribute_count: 20, // 5 over threshold -> +5
-            line_count: 800, // 300 over threshold -> +3
-            lcom: 5, // 3 over threshold -> +15
+            line_count: 800,     // 300 over threshold -> +3
+            lcom: 5,             // 3 over threshold -> +15
             coupling: 10,
             complexity_sum: 150, // 60 over expected (30*3=90) -> +6
             avg_complexity: 5.0,
@@ -1714,7 +1538,11 @@ mod tests {
             private_methods: 5,
         };
         let score = god.calculate_score(&config);
-        assert!(score > 40.0, "Expected high score for god class, got {}", score);
+        assert!(
+            score > 40.0,
+            "Expected high score for god class, got {}",
+            score
+        );
     }
 
     #[test]
@@ -1746,7 +1574,10 @@ class SmallClass:
 
         assert!(result.is_ok());
         let analysis = result.unwrap();
-        assert!(analysis.findings.is_empty(), "Small class should not be flagged");
+        assert!(
+            analysis.findings.is_empty(),
+            "Small class should not be flagged"
+        );
     }
 
     #[test]
@@ -1768,7 +1599,10 @@ class SmallClass:
         let analysis = result.unwrap();
 
         // Should detect the large class
-        assert!(!analysis.findings.is_empty(), "Large class should be flagged as God class");
+        assert!(
+            !analysis.findings.is_empty(),
+            "Large class should be flagged as God class"
+        );
 
         let finding = &analysis.findings[0];
         assert_eq!(finding.class_name, "LargeClass");
@@ -1803,7 +1637,10 @@ class TestUserHandler:
 
         let analysis = result.unwrap();
         // Test class should be excluded
-        assert!(analysis.findings.is_empty(), "Test class should be excluded");
+        assert!(
+            analysis.findings.is_empty(),
+            "Test class should be excluded"
+        );
         assert!(analysis.stats.excluded_classes > 0);
     }
 
@@ -1856,23 +1693,29 @@ class UserOrderService:
     #[test]
     fn test_lcom_calculation() {
         // Methods sharing same attribute = high cohesion
-        let mut method_attrs1: HashMap<String, HashSet<String>> = HashMap::new();
-        method_attrs1.insert("m1".to_string(), ["attr".to_string()].into());
-        method_attrs1.insert("m2".to_string(), ["attr".to_string()].into());
-        method_attrs1.insert("m3".to_string(), ["attr".to_string()].into());
+        let mut method_attrs1: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
+        method_attrs1.insert("m1".to_string(), ["attr".to_string()].into_iter().collect());
+        method_attrs1.insert("m2".to_string(), ["attr".to_string()].into_iter().collect());
+        method_attrs1.insert("m3".to_string(), ["attr".to_string()].into_iter().collect());
 
-        let calls1: HashMap<String, HashSet<String>> = HashMap::new();
+        let calls1: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
         let lcom1 = calculate_lcom(&method_attrs1, &calls1);
-        assert_eq!(lcom1, 1, "All methods sharing attribute should be 1 component");
+        assert_eq!(
+            lcom1, 1,
+            "All methods sharing attribute should be 1 component"
+        );
 
         // Methods using different attributes = low cohesion
-        let mut method_attrs2: HashMap<String, HashSet<String>> = HashMap::new();
-        method_attrs2.insert("m1".to_string(), ["a".to_string()].into());
-        method_attrs2.insert("m2".to_string(), ["b".to_string()].into());
-        method_attrs2.insert("m3".to_string(), ["c".to_string()].into());
+        let mut method_attrs2: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
+        method_attrs2.insert("m1".to_string(), ["a".to_string()].into_iter().collect());
+        method_attrs2.insert("m2".to_string(), ["b".to_string()].into_iter().collect());
+        method_attrs2.insert("m3".to_string(), ["c".to_string()].into_iter().collect());
 
         let lcom2 = calculate_lcom(&method_attrs2, &calls1);
-        assert_eq!(lcom2, 3, "Methods not sharing attributes should be separate components");
+        assert_eq!(
+            lcom2, 3,
+            "Methods not sharing attributes should be separate components"
+        );
     }
 
     #[test]

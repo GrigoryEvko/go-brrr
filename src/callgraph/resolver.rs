@@ -6,9 +6,10 @@
 //! 3. Handling different call patterns (direct, method, qualified)
 //! 4. Using import context to narrow candidate matches
 
-use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use rayon::prelude::*;
 use smallvec::SmallVec;
@@ -17,7 +18,7 @@ use tree_sitter::Node;
 use crate::ast::types::ImportInfo;
 use crate::callgraph::indexer::FunctionIndex;
 use crate::callgraph::types::{CallEdge, CallGraph, FunctionRef};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
 
 // =============================================================================
@@ -41,6 +42,16 @@ const MIN_FILES_FOR_PARALLEL: usize = 10;
 
 /// Maximum tree depth to prevent stack overflow on pathological inputs.
 const MAX_TREE_DEPTH: usize = 500;
+
+// =============================================================================
+// Static String Constants (avoid repeated allocations)
+// =============================================================================
+
+/// Constant for "this" keyword in TypeScript/JavaScript
+const THIS_KEYWORD: &str = "this";
+
+/// Constant for module-level caller name
+const MODULE_CALLER: &str = "<module>";
 
 // =============================================================================
 // Relative Import Resolution
@@ -152,14 +163,14 @@ struct FileContext {
     file_path: String,
     /// Source language (python, typescript, rust, etc.)
     language: String,
-    /// Functions defined in this file
-    defined_functions: HashSet<String>,
-    /// Classes defined in this file
-    defined_classes: HashSet<String>,
-    /// Module imports: alias -> module_path
-    module_imports: HashMap<String, String>,
-    /// From imports: name -> (module, original_name)
-    from_imports: HashMap<String, (String, String)>,
+    /// Functions defined in this file (FxHashSet for faster lookups)
+    defined_functions: FxHashSet<String>,
+    /// Classes defined in this file (FxHashSet for faster lookups)
+    defined_classes: FxHashSet<String>,
+    /// Module imports: alias -> module_path (FxHashMap for faster string hashing)
+    module_imports: FxHashMap<String, String>,
+    /// From imports: name -> (module, original_name) (FxHashMap for faster string hashing)
+    from_imports: FxHashMap<String, (String, String)>,
     /// Star imports: list of modules imported with `from module import *`.
     /// While star imports are discouraged, they are valid Python and must be handled
     /// as a fallback during call resolution.
@@ -256,12 +267,20 @@ pub fn resolve_calls(
     let file_infos: Vec<FileCallInfo> = if files.len() >= MIN_FILES_FOR_PARALLEL {
         files
             .par_iter()
-            .filter_map(|path| extract_file_calls(path, registry, project_root).ok().flatten())
+            .filter_map(|path| {
+                extract_file_calls(path, registry, project_root)
+                    .ok()
+                    .flatten()
+            })
             .collect()
     } else {
         files
             .iter()
-            .filter_map(|path| extract_file_calls(path, registry, project_root).ok().flatten())
+            .filter_map(|path| {
+                extract_file_calls(path, registry, project_root)
+                    .ok()
+                    .flatten()
+            })
             .collect()
     };
 
@@ -301,10 +320,11 @@ fn extract_file_calls(
         })?;
 
     // Build file context with language information
-    let language_name = lang.name().to_string();
+    // Store file path once to avoid repeated path.display().to_string() allocations
+    let file_path = path.display().to_string();
     let mut context = FileContext {
-        file_path: path.display().to_string(),
-        language: language_name.clone(),
+        file_path: file_path.clone(),
+        language: lang.name().to_string(),
         ..Default::default()
     };
 
@@ -313,7 +333,8 @@ fn extract_file_calls(
     build_import_map(&imports, &mut context, path, project_root);
 
     // Collect definitions and calls based on language
-    let call_sites = match language_name.as_str() {
+    // Use context.language directly to avoid cloning language_name
+    let call_sites = match context.language.as_str() {
         "python" => extract_python_calls(&tree, &source, &mut context),
         "typescript" => extract_typescript_calls(&tree, &source, &mut context),
         "go" => extract_go_calls(&tree, &source, &mut context),
@@ -324,7 +345,7 @@ fn extract_file_calls(
     };
 
     Ok(Some(FileCallInfo {
-        file_path: path.display().to_string(),
+        file_path,
         call_sites,
         context,
     }))
@@ -1387,7 +1408,11 @@ fn extract_java_field_access_parts(node: Node, source: &[u8]) -> AttributeChain 
 }
 
 /// Recursive helper for extracting Java field access parts.
-fn extract_java_field_access_parts_recursive(node: Node, source: &[u8], parts: &mut AttributeChain) {
+fn extract_java_field_access_parts_recursive(
+    node: Node,
+    source: &[u8],
+    parts: &mut AttributeChain,
+) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
@@ -1534,7 +1559,8 @@ fn extract_c_call_target(node: Node, source: &[u8]) -> Option<CallTarget> {
                 // Fallback: try to get qualified_identifier for Namespace::func<T>()
                 if let Some(qid) = child_by_kind(child, "qualified_identifier") {
                     let full_name = node_text(qid, source);
-                    let parts: AttributeChain = full_name.split("::").map(|s| s.to_string()).collect();
+                    let parts: AttributeChain =
+                        full_name.split("::").map(|s| s.to_string()).collect();
                     if parts.len() == 1 {
                         return Some(CallTarget::Direct(parts[0].clone()));
                     }
@@ -1651,7 +1677,10 @@ fn score_candidate(candidate: &FunctionRef, context: &FileContext) -> i32 {
 ///
 /// This ensures consistent resolution across runs, avoiding non-deterministic
 /// HashMap iteration order issues.
-fn select_best_candidate(candidates: &[&FunctionRef], context: &FileContext) -> Option<FunctionRef> {
+fn select_best_candidate(
+    candidates: &[&FunctionRef],
+    context: &FileContext,
+) -> Option<FunctionRef> {
     if candidates.is_empty() {
         return None;
     }
@@ -1696,7 +1725,7 @@ fn resolve_file_calls(info: &FileCallInfo, index: &FunctionIndex) -> Vec<CallEdg
             name: call_site
                 .caller_name
                 .clone()
-                .unwrap_or_else(|| "<module>".to_string()),
+                .unwrap_or_else(|| MODULE_CALLER.to_owned()),
             qualified_name: None,
         };
 
@@ -1834,7 +1863,8 @@ fn resolve_call_target(
             // Check from_imports for classes/objects imported with 'from'
             // e.g., `from clients import http_client; http_client.get("/api")`
             if let Some((module, original)) = context.from_imports.get(obj) {
-                let qname = format_method_qualified_name(module, original, method, &context.language);
+                let qname =
+                    format_method_qualified_name(module, original, method, &context.language);
                 if let Some(func) = index.lookup_qualified(&qname) {
                     return Some(func.clone());
                 }
@@ -1911,7 +1941,8 @@ fn resolve_call_target(
                 // Also try with original prefix if different
                 if resolved_parts[..] != parts[..] && parts.len() > 1 {
                     let orig_prefix_parts: Vec<String> = parts[..parts.len() - 1].to_vec();
-                    let original_prefix = format_qualified_name(&orig_prefix_parts, &context.language);
+                    let original_prefix =
+                        format_qualified_name(&orig_prefix_parts, &context.language);
                     for candidate in &candidates {
                         if candidate
                             .qualified_name
@@ -2097,7 +2128,11 @@ fn extract_member_expression_chain(node: Node, source: &[u8]) -> AttributeChain 
 }
 
 /// Recursive helper for extracting TypeScript member expression chains.
-fn extract_member_expression_chain_recursive(node: Node, source: &[u8], parts: &mut AttributeChain) {
+fn extract_member_expression_chain_recursive(
+    node: Node,
+    source: &[u8],
+    parts: &mut AttributeChain,
+) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
@@ -2108,7 +2143,7 @@ fn extract_member_expression_chain_recursive(node: Node, source: &[u8], parts: &
                 extract_member_expression_chain_recursive(child, source, parts);
             }
             "this" => {
-                parts.push("this".to_string());
+                parts.push(THIS_KEYWORD.to_owned());
             }
             _ => {}
         }
@@ -2308,7 +2343,7 @@ fn extract_ts_chain_recursive(node: Node, source: &[u8], chain: &mut MethodChain
                         extract_ts_chain_recursive(child, source, chain);
                     }
                     "this" => {
-                        chain.push("this".to_string());
+                        chain.push(THIS_KEYWORD.to_owned());
                     }
                     _ => {}
                 }
@@ -2526,6 +2561,7 @@ fn is_c_chained_call(node: Node) -> bool {
 mod tests {
     use super::*;
     use smallvec::smallvec;
+    use std::collections::HashMap;
     use std::fs::File;
     use std::io::Write;
     use tempfile::TempDir;
@@ -2868,10 +2904,10 @@ def caller():
         let context = FileContext {
             file_path: "/project/src/api/routes.py".to_string(),
             language: "python".to_string(),
-            from_imports: HashMap::new(),
-            module_imports: HashMap::new(),
-            defined_functions: HashSet::new(),
-            defined_classes: HashSet::new(),
+            from_imports: FxHashMap::default(),
+            module_imports: FxHashMap::default(),
+            defined_functions: FxHashSet::default(),
+            defined_classes: FxHashSet::default(),
             ..Default::default()
         };
 
@@ -2902,7 +2938,7 @@ def caller():
     #[test]
     fn test_score_candidate_explicit_import() {
         // Unit test: explicitly imported functions should score highest
-        let mut from_imports = HashMap::new();
+        let mut from_imports = FxHashMap::default();
         from_imports.insert(
             "helper".to_string(),
             ("mymodule".to_string(), "helper".to_string()),
@@ -2912,9 +2948,9 @@ def caller():
             file_path: "/project/main.py".to_string(),
             language: "python".to_string(),
             from_imports,
-            module_imports: HashMap::new(),
-            defined_functions: HashSet::new(),
-            defined_classes: HashSet::new(),
+            module_imports: FxHashMap::default(),
+            defined_functions: FxHashSet::default(),
+            defined_classes: FxHashSet::default(),
             ..Default::default()
         };
 
@@ -2948,8 +2984,15 @@ def caller():
         // Test that qualified names are formatted correctly for each language
 
         // Python uses dots
-        let parts = vec!["module".to_string(), "Class".to_string(), "method".to_string()];
-        assert_eq!(format_qualified_name(&parts, "python"), "module.Class.method");
+        let parts = vec![
+            "module".to_string(),
+            "Class".to_string(),
+            "method".to_string(),
+        ];
+        assert_eq!(
+            format_qualified_name(&parts, "python"),
+            "module.Class.method"
+        );
 
         // Java uses dots
         assert_eq!(format_qualified_name(&parts, "java"), "module.Class.method");
@@ -2958,19 +3001,31 @@ def caller():
         assert_eq!(format_qualified_name(&parts, "go"), "module.Class.method");
 
         // TypeScript uses slash after module, then dots
-        assert_eq!(format_qualified_name(&parts, "typescript"), "module/Class.method");
+        assert_eq!(
+            format_qualified_name(&parts, "typescript"),
+            "module/Class.method"
+        );
 
         // JavaScript uses slash after module, then dots
-        assert_eq!(format_qualified_name(&parts, "javascript"), "module/Class.method");
+        assert_eq!(
+            format_qualified_name(&parts, "javascript"),
+            "module/Class.method"
+        );
 
         // Rust uses double colons
-        assert_eq!(format_qualified_name(&parts, "rust"), "module::Class::method");
+        assert_eq!(
+            format_qualified_name(&parts, "rust"),
+            "module::Class::method"
+        );
 
         // C uses double colons
         assert_eq!(format_qualified_name(&parts, "c"), "module::Class::method");
 
         // C++ uses double colons
-        assert_eq!(format_qualified_name(&parts, "cpp"), "module::Class::method");
+        assert_eq!(
+            format_qualified_name(&parts, "cpp"),
+            "module::Class::method"
+        );
 
         // Single part should work for all languages
         let single = vec!["func".to_string()];
@@ -3073,7 +3128,11 @@ def create_model():
             for edge in &graph.edges {
                 eprintln!(
                     "[iter {}] Edge: {} ({}) -> {} ({})",
-                    iteration, edge.caller.name, edge.caller.file, edge.callee.name, edge.callee.file
+                    iteration,
+                    edge.caller.name,
+                    edge.caller.file,
+                    edge.callee.name,
+                    edge.callee.file
                 );
             }
 
@@ -3213,10 +3272,7 @@ def process_data():
 
         // The test passes if we find at least the simple DataFrame() constructor call
         // or any of the chained method calls
-        let has_any_call = graph
-            .edges
-            .iter()
-            .any(|e| e.caller.name == "process_data");
+        let has_any_call = graph.edges.iter().any(|e| e.caller.name == "process_data");
         assert!(
             has_any_call,
             "Should detect at least one call from process_data"
@@ -3348,7 +3404,11 @@ def main():
         assert!(
             has_get_config || has_validate_config,
             "Star import should allow function resolution. Edges: {:?}",
-            graph.edges.iter().map(|e| format!("{} -> {}", e.caller.name, e.callee.name)).collect::<Vec<_>>()
+            graph
+                .edges
+                .iter()
+                .map(|e| format!("{} -> {}", e.caller.name, e.callee.name))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -3363,7 +3423,7 @@ def main():
         let import = ImportInfo {
             module: "config".to_string(),
             names: vec!["*".to_string()],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 0,
             line_number: 1,
@@ -3395,7 +3455,7 @@ def main():
         let import = ImportInfo {
             module: "".to_string(),
             names: vec!["sibling".to_string()],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 1,
             line_number: 1,
@@ -3416,7 +3476,7 @@ def main():
         let import = ImportInfo {
             module: "utils".to_string(),
             names: vec!["helper".to_string()],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 1,
             line_number: 1,
@@ -3437,7 +3497,7 @@ def main():
         let import = ImportInfo {
             module: "".to_string(),
             names: vec!["utils".to_string()],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 2,
             line_number: 1,
@@ -3458,7 +3518,7 @@ def main():
         let import = ImportInfo {
             module: "sibling".to_string(),
             names: vec!["func".to_string()],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 2,
             line_number: 1,
@@ -3479,7 +3539,7 @@ def main():
         let import = ImportInfo {
             module: "other.module".to_string(),
             names: vec!["func".to_string()],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 3,
             line_number: 1,
@@ -3500,7 +3560,7 @@ def main():
         let import = ImportInfo {
             module: "".to_string(),
             names: vec!["x".to_string()],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 4,
             line_number: 1,
@@ -3519,7 +3579,7 @@ def main():
         let import = ImportInfo {
             module: "os.path".to_string(),
             names: vec!["join".to_string()],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 0,
             line_number: 1,
@@ -3544,7 +3604,7 @@ def main():
         let import = ImportInfo {
             module: "utils".to_string(),
             names: vec!["helper".to_string()],
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 2,
             line_number: 1,

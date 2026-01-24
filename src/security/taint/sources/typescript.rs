@@ -64,7 +64,7 @@ use tree_sitter::{Node, Parser, Tree};
 use super::{
     DetectedSource, HandlerInfo, SourceKind, SourcePattern, SourceScanResult, TaintedParameter,
 };
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::security::taint::types::Location;
 
 // =============================================================================
@@ -275,13 +275,7 @@ const NODEJS_SOURCES: &[SourcePattern] = &[
         "env",
         None,
     ),
-    SourcePattern::property_access(
-        "process_stdin",
-        SourceKind::Stdin,
-        "process",
-        "stdin",
-        None,
-    ),
+    SourcePattern::property_access("process_stdin", SourceKind::Stdin, "process", "stdin", None),
 ];
 
 /// Browser DOM taint sources.
@@ -387,7 +381,13 @@ const NETWORK_SOURCES: &[SourcePattern] = &[
     SourcePattern::function_call("fetch", SourceKind::HttpResponse, "fetch", 0.85),
     // Axios
     SourcePattern::method_call("axios_get", SourceKind::HttpResponse, "axios", "get", None),
-    SourcePattern::method_call("axios_post", SourceKind::HttpResponse, "axios", "post", None),
+    SourcePattern::method_call(
+        "axios_post",
+        SourceKind::HttpResponse,
+        "axios",
+        "post",
+        None,
+    ),
     SourcePattern::method_call("axios_put", SourceKind::HttpResponse, "axios", "put", None),
     SourcePattern::method_call(
         "axios_delete",
@@ -490,17 +490,18 @@ const FILE_SOURCES: &[SourcePattern] = &[
 /// User input taint sources (form elements).
 const USER_INPUT_SOURCES: &[SourcePattern] = &[
     // These match on any object with .value property (lower confidence)
-    SourcePattern::function_call(
-        "prompt",
-        SourceKind::GenericUserInput,
-        "prompt",
-        1.0,
-    ),
+    SourcePattern::function_call("prompt", SourceKind::GenericUserInput, "prompt", 1.0),
 ];
 
 /// Deserialization taint sources.
 const DESERIALIZATION_SOURCES: &[SourcePattern] = &[
-    SourcePattern::method_call("JSON_parse", SourceKind::Deserialized, "JSON", "parse", None),
+    SourcePattern::method_call(
+        "JSON_parse",
+        SourceKind::Deserialized,
+        "JSON",
+        "parse",
+        None,
+    ),
     SourcePattern::function_call("eval", SourceKind::Deserialized, "eval", 1.0),
 ];
 
@@ -513,13 +514,7 @@ const POSTMESSAGE_SOURCES: &[SourcePattern] = &[
         "data",
         None,
     ),
-    SourcePattern::property_access(
-        "e_data",
-        SourceKind::WebSocketMessage,
-        "e",
-        "data",
-        None,
-    ),
+    SourcePattern::property_access("e_data", SourceKind::WebSocketMessage, "e", "data", None),
     SourcePattern::property_access(
         "evt_data",
         SourceKind::WebSocketMessage,
@@ -672,10 +667,12 @@ impl TypeScriptSourceDetector {
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
         };
 
-        parser.set_language(&language).map_err(|e| BrrrError::Parse {
-            file: file_name.to_string(),
-            message: format!("Failed to set TypeScript language: {}", e),
-        })?;
+        parser
+            .set_language(&language)
+            .map_err(|e| BrrrError::Parse {
+                file: file_name.to_string(),
+                message: format!("Failed to set TypeScript language: {}", e),
+            })?;
 
         let tree = parser.parse(source, None).ok_or_else(|| BrrrError::Parse {
             file: file_name.to_string(),
@@ -1148,7 +1145,8 @@ impl TypeScriptSourceDetector {
             }
 
             // Classify parameter based on position and annotation
-            let (kind, ann) = self.classify_handler_param(&name, param_index, annotation.as_deref(), framework);
+            let (kind, ann) =
+                self.classify_handler_param(&name, param_index, annotation.as_deref(), framework);
 
             params.push(TaintedParameter {
                 name,
@@ -1636,10 +1634,24 @@ impl TypeScriptSourceDetector {
 
             match pattern.kind() {
                 "object_pattern" => {
-                    self.extract_object_pattern_vars(pattern, source_kind, framework.as_deref(), line, ctx, result);
+                    self.extract_object_pattern_vars(
+                        pattern,
+                        source_kind,
+                        framework.as_deref(),
+                        line,
+                        ctx,
+                        result,
+                    );
                 }
                 "array_pattern" => {
-                    self.extract_array_pattern_vars(pattern, source_kind, framework.as_deref(), line, ctx, result);
+                    self.extract_array_pattern_vars(
+                        pattern,
+                        source_kind,
+                        framework.as_deref(),
+                        line,
+                        ctx,
+                        result,
+                    );
                 }
                 _ => {}
             }
@@ -1719,9 +1731,10 @@ impl TypeScriptSourceDetector {
                     ctx.destructured_taint.insert(name.clone(), kind);
 
                     let loc = Location::new(ctx.file_name, line, 0);
-                    let mut source = DetectedSource::new(kind, loc, format!("destructured:{}", name))
-                        .with_assignment(&name)
-                        .with_confidence(0.9);
+                    let mut source =
+                        DetectedSource::new(kind, loc, format!("destructured:{}", name))
+                            .with_assignment(&name)
+                            .with_confidence(0.9);
 
                     if let Some(fw) = framework {
                         source = source.with_framework(fw);
@@ -1741,10 +1754,13 @@ impl TypeScriptSourceDetector {
                         ctx.destructured_taint.insert(var_name.clone(), kind);
 
                         let loc = Location::new(ctx.file_name, line, 0);
-                        let mut source =
-                            DetectedSource::new(kind, loc, format!("destructured:{}={}", key_name, var_name))
-                                .with_assignment(&var_name)
-                                .with_confidence(0.9);
+                        let mut source = DetectedSource::new(
+                            kind,
+                            loc,
+                            format!("destructured:{}={}", key_name, var_name),
+                        )
+                        .with_assignment(&var_name)
+                        .with_confidence(0.9);
 
                         if let Some(fw) = framework {
                             source = source.with_framework(fw);
@@ -1760,10 +1776,13 @@ impl TypeScriptSourceDetector {
                         ctx.destructured_taint.insert(name.clone(), source_kind);
 
                         let loc = Location::new(ctx.file_name, line, 0);
-                        let mut source =
-                            DetectedSource::new(source_kind, loc, format!("destructured:...{}", name))
-                                .with_assignment(&name)
-                                .with_confidence(0.85);
+                        let mut source = DetectedSource::new(
+                            source_kind,
+                            loc,
+                            format!("destructured:...{}", name),
+                        )
+                        .with_assignment(&name)
+                        .with_confidence(0.85);
 
                         if let Some(fw) = framework {
                             source = source.with_framework(fw);
@@ -1797,10 +1816,13 @@ impl TypeScriptSourceDetector {
                     ctx.destructured_taint.insert(name.clone(), source_kind);
 
                     let loc = Location::new(ctx.file_name, line, 0);
-                    let mut source =
-                        DetectedSource::new(source_kind, loc, format!("destructured:[{}]={}", index, name))
-                            .with_assignment(&name)
-                            .with_confidence(0.85);
+                    let mut source = DetectedSource::new(
+                        source_kind,
+                        loc,
+                        format!("destructured:[{}]={}", index, name),
+                    )
+                    .with_assignment(&name)
+                    .with_confidence(0.85);
 
                     if let Some(fw) = framework {
                         source = source.with_framework(fw);
@@ -1816,10 +1838,13 @@ impl TypeScriptSourceDetector {
                         ctx.destructured_taint.insert(name.clone(), source_kind);
 
                         let loc = Location::new(ctx.file_name, line, 0);
-                        let mut source =
-                            DetectedSource::new(source_kind, loc, format!("destructured:...{}", name))
-                                .with_assignment(&name)
-                                .with_confidence(0.8);
+                        let mut source = DetectedSource::new(
+                            source_kind,
+                            loc,
+                            format!("destructured:...{}", name),
+                        )
+                        .with_assignment(&name)
+                        .with_confidence(0.8);
 
                         if let Some(fw) = framework {
                             source = source.with_framework(fw);
@@ -2003,12 +2028,7 @@ impl TypeScriptSourceDetector {
     }
 
     /// Scan identifier for known tainted variables.
-    fn scan_identifier(
-        &self,
-        node: Node,
-        ctx: &mut ScanContext,
-        _result: &mut SourceScanResult,
-    ) {
+    fn scan_identifier(&self, node: Node, ctx: &mut ScanContext, _result: &mut SourceScanResult) {
         let name = self.node_text(node, ctx.source);
 
         // Check if this identifier is a destructured taint source
@@ -2175,7 +2195,10 @@ app.post('/user', (req, res) => {
 });
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestBody));
     }
 
     #[test]
@@ -2199,7 +2222,10 @@ app.get('/search', (req, res) => {
 });
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestParam));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestParam));
     }
 
     #[test]
@@ -2211,7 +2237,10 @@ app.get('/api', (req, res) => {
 });
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::HttpHeader));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::HttpHeader));
     }
 
     #[test]
@@ -2256,15 +2285,18 @@ app.post('/api', (req, res) => {
 });
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| {
-            s.kind == SourceKind::RequestBody && s.expression.contains("body")
-        }));
-        assert!(result.sources.iter().any(|s| {
-            s.kind == SourceKind::UrlPath && s.expression.contains("params")
-        }));
-        assert!(result.sources.iter().any(|s| {
-            s.kind == SourceKind::RequestParam && s.expression.contains("query")
-        }));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| { s.kind == SourceKind::RequestBody && s.expression.contains("body") }));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| { s.kind == SourceKind::UrlPath && s.expression.contains("params") }));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| { s.kind == SourceKind::RequestParam && s.expression.contains("query") }));
     }
 
     #[test]
@@ -2275,7 +2307,10 @@ console.log(first, second);
 "#;
         let result = scan(source);
         // process.argv is detected
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::ProcessArgs));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::ProcessArgs));
     }
 
     #[test]
@@ -2287,9 +2322,10 @@ app.post('/api', (req, res) => {
 });
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| {
-            s.kind == SourceKind::RequestBody && s.expression.contains("data")
-        }));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| { s.kind == SourceKind::RequestBody && s.expression.contains("data") }));
     }
 
     // =========================================================================
@@ -2383,7 +2419,10 @@ const response = await fetch('/api/data');
 const data = await response.json();
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::HttpResponse));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::HttpResponse));
     }
 
     #[test]
@@ -2393,7 +2432,10 @@ const response = await axios.get('/api/data');
 const data = response.data;
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::HttpResponse));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::HttpResponse));
     }
 
     #[test]
@@ -2405,7 +2447,10 @@ xhr.onload = function() {
 };
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::HttpResponse));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::HttpResponse));
     }
 
     // =========================================================================
@@ -2420,7 +2465,10 @@ ws.onmessage = function(event) {
 };
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::WebSocketMessage));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::WebSocketMessage));
     }
 
     // =========================================================================
@@ -2452,7 +2500,10 @@ fs.readFile('/path', (err, data) => {});
 const data = JSON.parse(userInput);
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::Deserialized));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::Deserialized));
     }
 
     #[test]
@@ -2461,7 +2512,10 @@ const data = JSON.parse(userInput);
 const result = eval(userCode);
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::Deserialized));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::Deserialized));
     }
 
     // =========================================================================
@@ -2474,7 +2528,10 @@ const result = eval(userCode);
 const name = prompt('Enter your name:');
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::GenericUserInput));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::GenericUserInput));
     }
 
     #[test]
@@ -2483,7 +2540,10 @@ const name = prompt('Enter your name:');
 const username = document.getElementById('username').value;
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::GenericUserInput));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::GenericUserInput));
     }
 
     // =========================================================================
@@ -2503,17 +2563,23 @@ async function getData() {
         let result = scan(source);
         // Should detect fetch as a network/response source
         // fetch returns a Promise<Response>, which is detected as an HTTP response source
-        let has_http_source = result.sources.iter().any(|s| {
-            s.kind == SourceKind::HttpResponse || s.expression.contains("fetch")
-        });
+        let has_http_source = result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::HttpResponse || s.expression.contains("fetch"));
         // The .json() call on response should also be detected
-        let has_json_call = result.sources.iter().any(|s| {
-            s.expression.contains(".json") || s.expression.contains("response")
-        });
+        let has_json_call = result
+            .sources
+            .iter()
+            .any(|s| s.expression.contains(".json") || s.expression.contains("response"));
         assert!(
             has_http_source || has_json_call,
             "Expected to find fetch-related or response.json() source, found: {:?}",
-            result.sources.iter().map(|s| &s.expression).collect::<Vec<_>>()
+            result
+                .sources
+                .iter()
+                .map(|s| &s.expression)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -2567,7 +2633,10 @@ app.get('/api', (request, response) => {
 });
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestBody));
     }
 
     #[test]
@@ -2583,8 +2652,14 @@ app.post('/process', (req, res) => {
 "#;
         let result = scan(source);
         assert!(result.sources.iter().any(|s| s.kind == SourceKind::UrlPath));
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestBody));
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::HttpHeader));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::HttpHeader));
         assert!(result.sources.iter().any(|s| s.kind == SourceKind::Cookie));
     }
 
@@ -2631,7 +2706,10 @@ router.post('/users', (req, res) => {
 const contentType = req.headers['content-type'];
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::HttpHeader));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::HttpHeader));
     }
 
     #[test]
@@ -2640,6 +2718,9 @@ const contentType = req.headers['content-type'];
 const dbUrl = process.env['DATABASE_URL'];
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::Environment));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::Environment));
     }
 }

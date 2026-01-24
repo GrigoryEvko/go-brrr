@@ -56,12 +56,15 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
-use tree_sitter::Node;
 
 use crate::ast::AstExtractor;
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
+use crate::metrics::common::{
+    extract_attribute_accesses, extract_method_calls, find_class_node, find_method_node,
+    MetricStats,
+};
 
 // =============================================================================
 // TYPES
@@ -108,10 +111,10 @@ impl CohesionLevel {
     #[must_use]
     pub const fn color_code(&self) -> &'static str {
         match self {
-            Self::High => "\x1b[32m",      // Green
-            Self::Medium => "\x1b[33m",    // Yellow
-            Self::Low => "\x1b[31m",       // Red
-            Self::VeryLow => "\x1b[35m",   // Magenta
+            Self::High => "\x1b[32m",    // Green
+            Self::Medium => "\x1b[33m",  // Yellow
+            Self::Low => "\x1b[31m",     // Red
+            Self::VeryLow => "\x1b[35m", // Magenta
         }
     }
 }
@@ -213,7 +216,9 @@ impl CohesionStats {
 
         let mut cohesion_distribution = HashMap::new();
         for m in metrics {
-            *cohesion_distribution.entry(m.cohesion_level.to_string()).or_insert(0) += 1;
+            *cohesion_distribution
+                .entry(m.cohesion_level.to_string())
+                .or_insert(0) += 1;
         }
 
         Self {
@@ -226,6 +231,30 @@ impl CohesionStats {
             average_methods: methods_sum as f64 / total as f64,
             average_attributes: attrs_sum as f64 / total as f64,
         }
+    }
+}
+
+impl MetricStats for CohesionStats {
+    fn count(&self) -> usize {
+        self.total_classes
+    }
+
+    fn total(&self) -> f64 {
+        // Total is sum of all LCOM3 values; approximated from average * count
+        self.average_lcom3 * self.total_classes as f64
+    }
+
+    fn average(&self) -> f64 {
+        self.average_lcom3
+    }
+
+    fn max(&self) -> f64 {
+        f64::from(self.max_lcom3)
+    }
+
+    fn min(&self) -> f64 {
+        // LCOM3 minimum is always 0 or 1 for analyzed classes
+        0.0
     }
 }
 
@@ -311,7 +340,11 @@ impl MethodAttributeGraph {
     /// Q = pairs that share at least one attribute
     fn calculate_lcom1(&self) -> u32 {
         let (p, q) = self.count_sharing_pairs();
-        if p > q { (p - q) as u32 } else { 0 }
+        if p > q {
+            (p - q) as u32
+        } else {
+            0
+        }
     }
 
     /// Calculate LCOM2: P - Q (can be negative)
@@ -409,8 +442,14 @@ impl MethodAttributeGraph {
                 }
                 for callee in callees {
                     if self.methods.contains(callee) {
-                        adjacency.get_mut(caller.as_str()).unwrap().insert(callee.as_str());
-                        adjacency.get_mut(callee.as_str()).unwrap().insert(caller.as_str());
+                        adjacency
+                            .get_mut(caller.as_str())
+                            .unwrap()
+                            .insert(callee.as_str());
+                        adjacency
+                            .get_mut(callee.as_str())
+                            .unwrap()
+                            .insert(caller.as_str());
                     }
                 }
             }
@@ -450,241 +489,7 @@ impl MethodAttributeGraph {
     }
 }
 
-// =============================================================================
-// ATTRIBUTE EXTRACTION
-// =============================================================================
-
-/// Extract instance attribute accesses from a method body.
-///
-/// Language-specific patterns:
-/// - Python: `self.attr`
-/// - TypeScript/JavaScript: `this.attr`
-/// - Rust: `self.field`
-/// - Go: receiver.field (where receiver is the struct type)
-fn extract_attribute_accesses(
-    node: Node,
-    source: &[u8],
-    language: &str,
-) -> HashSet<String> {
-    let mut attributes = HashSet::new();
-    extract_attributes_recursive(node, source, language, &mut attributes);
-    attributes
-}
-
-fn extract_attributes_recursive(
-    node: Node,
-    source: &[u8],
-    language: &str,
-    attributes: &mut HashSet<String>,
-) {
-    let node_kind = node.kind();
-
-    // Check for attribute access patterns based on language
-    match language {
-        "python" => {
-            // Python: self.attr as attribute access
-            if node_kind == "attribute" {
-                if let Some(object) = node.child_by_field_name("object") {
-                    let obj_text = node_text(object, source);
-                    if obj_text == "self" {
-                        if let Some(attr) = node.child_by_field_name("attribute") {
-                            let attr_name = node_text(attr, source);
-                            // Exclude methods (will be handled separately)
-                            if !attr_name.starts_with('_') || attr_name.starts_with("__") && attr_name.ends_with("__") {
-                                // Include private attrs but filter dunder methods
-                                if !(attr_name.starts_with("__") && attr_name.ends_with("__")) {
-                                    attributes.insert(attr_name.to_string());
-                                }
-                            } else {
-                                attributes.insert(attr_name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        "typescript" | "javascript" | "tsx" | "jsx" => {
-            // TypeScript/JavaScript: this.attr
-            if node_kind == "member_expression" {
-                if let Some(object) = node.child_by_field_name("object") {
-                    let obj_text = node_text(object, source);
-                    if obj_text == "this" {
-                        if let Some(prop) = node.child_by_field_name("property") {
-                            let attr_name = node_text(prop, source);
-                            attributes.insert(attr_name.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        "rust" => {
-            // Rust: self.field
-            if node_kind == "field_expression" {
-                if let Some(value) = node.child_by_field_name("value") {
-                    let val_text = node_text(value, source);
-                    if val_text == "self" {
-                        if let Some(field) = node.child_by_field_name("field") {
-                            let field_name = node_text(field, source);
-                            attributes.insert(field_name.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        "go" => {
-            // Go: receiver.field - first parameter of method
-            // We detect selector_expression where the object matches receiver pattern
-            if node_kind == "selector_expression" {
-                // In Go, methods access struct fields via the receiver parameter
-                // This is more complex to detect accurately without full type info
-                // For now, we'll check for single-letter identifiers (common Go pattern)
-                // or identifiers matching common receiver names
-                if let Some(operand) = node.child_by_field_name("operand") {
-                    let operand_kind = operand.kind();
-                    if operand_kind == "identifier" {
-                        let var_name = node_text(operand, source);
-                        // Common Go receiver patterns: single letter, or common names
-                        if var_name.len() <= 3 || var_name.starts_with("this") || var_name.starts_with("self") {
-                            if let Some(field) = node.child_by_field_name("field") {
-                                let field_name = node_text(field, source);
-                                attributes.insert(field_name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        "java" | "kotlin" | "csharp" => {
-            // Java/Kotlin/C#: this.field or implicit field access
-            if node_kind == "field_access" || node_kind == "member_access_expression" {
-                if let Some(object) = node.child_by_field_name("object") {
-                    let obj_text = node_text(object, source);
-                    if obj_text == "this" {
-                        if let Some(field) = node.child_by_field_name("field").or_else(|| node.child_by_field_name("name")) {
-                            let field_name = node_text(field, source);
-                            attributes.insert(field_name.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        "cpp" | "c" => {
-            // C++: this->field
-            if node_kind == "field_expression" {
-                if let Some(argument) = node.child_by_field_name("argument") {
-                    let arg_text = node_text(argument, source);
-                    if arg_text == "this" {
-                        if let Some(field) = node.child_by_field_name("field") {
-                            let field_name = node_text(field, source);
-                            attributes.insert(field_name.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-
-    // Recurse into children
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        extract_attributes_recursive(child, source, language, attributes);
-    }
-}
-
-/// Extract method calls within a method body (for LCOM4).
-fn extract_method_calls(
-    node: Node,
-    source: &[u8],
-    language: &str,
-    class_methods: &HashSet<String>,
-) -> HashSet<String> {
-    let mut calls = HashSet::new();
-    extract_calls_recursive(node, source, language, class_methods, &mut calls);
-    calls
-}
-
-fn extract_calls_recursive(
-    node: Node,
-    source: &[u8],
-    language: &str,
-    class_methods: &HashSet<String>,
-    calls: &mut HashSet<String>,
-) {
-    let node_kind = node.kind();
-
-    match language {
-        "python" => {
-            // Python: self.method() calls
-            if node_kind == "call" {
-                if let Some(func) = node.child_by_field_name("function") {
-                    if func.kind() == "attribute" {
-                        if let Some(obj) = func.child_by_field_name("object") {
-                            if node_text(obj, source) == "self" {
-                                if let Some(attr) = func.child_by_field_name("attribute") {
-                                    let method_name = node_text(attr, source);
-                                    if class_methods.contains(method_name) {
-                                        calls.insert(method_name.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        "typescript" | "javascript" | "tsx" | "jsx" => {
-            // this.method() calls
-            if node_kind == "call_expression" {
-                if let Some(func) = node.child_by_field_name("function") {
-                    if func.kind() == "member_expression" {
-                        if let Some(obj) = func.child_by_field_name("object") {
-                            if node_text(obj, source) == "this" {
-                                if let Some(prop) = func.child_by_field_name("property") {
-                                    let method_name = node_text(prop, source);
-                                    if class_methods.contains(method_name) {
-                                        calls.insert(method_name.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        "rust" => {
-            // self.method() calls
-            if node_kind == "call_expression" {
-                if let Some(func) = node.child_by_field_name("function") {
-                    if func.kind() == "field_expression" {
-                        if let Some(val) = func.child_by_field_name("value") {
-                            if node_text(val, source) == "self" {
-                                if let Some(field) = func.child_by_field_name("field") {
-                                    let method_name = node_text(field, source);
-                                    if class_methods.contains(method_name) {
-                                        calls.insert(method_name.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-
-    // Recurse
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        extract_calls_recursive(child, source, language, class_methods, calls);
-    }
-}
-
-/// Helper to get node text safely.
-fn node_text<'a>(node: Node<'a>, source: &'a [u8]) -> &'a str {
-    std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).unwrap_or("")
-}
+// Attribute extraction and method call extraction moved to crate::metrics::common
 
 // =============================================================================
 // ANALYSIS FUNCTIONS
@@ -720,9 +525,9 @@ pub fn analyze_cohesion(
     }
 
     // Directory analysis
-    let path_str = path.to_str().ok_or_else(|| {
-        BrrrError::InvalidArgument("Invalid path encoding".to_string())
-    })?;
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| BrrrError::InvalidArgument("Invalid path encoding".to_string()))?;
 
     let scanner = ProjectScanner::new(path_str)?;
 
@@ -817,9 +622,7 @@ pub fn analyze_file_cohesion(
 
     // Detect language
     let registry = LanguageRegistry::global();
-    let language = registry
-        .detect_language(file)
-        .map(|l| l.name().to_string());
+    let language = registry.detect_language(file).map(|l| l.name().to_string());
 
     Ok(CohesionAnalysis {
         path: file.to_path_buf(),
@@ -903,25 +706,13 @@ fn analyze_file_classes(
 
     // Analyze each class
     for class in &module.classes {
-        if let Some(metrics) = analyze_class_cohesion(
-            file,
-            class,
-            &tree,
-            &source,
-            language,
-        ) {
+        if let Some(metrics) = analyze_class_cohesion(file, class, &tree, &source, language) {
             results.push(metrics);
         }
 
         // Also analyze nested classes
         for inner in &class.inner_classes {
-            if let Some(metrics) = analyze_class_cohesion(
-                file,
-                inner,
-                &tree,
-                &source,
-                language,
-            ) {
+            if let Some(metrics) = analyze_class_cohesion(file, inner, &tree, &source, language) {
                 results.push(metrics);
             }
         }
@@ -951,14 +742,16 @@ fn analyze_class_cohesion(
 
     for method in &class.methods {
         // Skip static methods (they don't use instance state)
-        let is_static = method.decorators.iter().any(|d| {
-            d == "staticmethod" || d == "static" || d.contains("@staticmethod")
-        });
+        let is_static = method
+            .decorators
+            .iter()
+            .any(|d| d == "staticmethod" || d == "static" || d.contains("@staticmethod"));
 
         // For Python, skip if first param is not self/cls
-        let is_class_method = method.decorators.iter().any(|d| {
-            d == "classmethod" || d.contains("@classmethod")
-        });
+        let is_class_method = method
+            .decorators
+            .iter()
+            .any(|d| d == "classmethod" || d.contains("@classmethod"));
 
         if is_static || is_class_method {
             continue;
@@ -989,7 +782,9 @@ fn analyze_class_cohesion(
             }
 
             // Find method node within class
-            if let Some(method_node) = find_method_node(class_node, &method.name, method.line_number, language) {
+            if let Some(method_node) =
+                find_method_node(class_node, &method.name, method.line_number, language)
+            {
                 // Extract attribute accesses
                 let attrs = extract_attribute_accesses(method_node, source, language);
                 for attr in &attrs {
@@ -997,7 +792,8 @@ fn analyze_class_cohesion(
                 }
 
                 // Extract method calls for LCOM4
-                let calls = extract_method_calls(method_node, source, language, &class_method_names);
+                let calls =
+                    extract_method_calls(method_node, source, language, &class_method_names);
                 for callee in &calls {
                     graph.add_method_call(&method.name, callee);
                 }
@@ -1041,93 +837,7 @@ fn analyze_class_cohesion(
     })
 }
 
-/// Find a class node by name and line number.
-fn find_class_node<'a>(node: Node<'a>, class_name: &str, line: usize) -> Option<Node<'a>> {
-    let node_kind = node.kind();
-
-    // Check if this is a class definition
-    let is_class = matches!(
-        node_kind,
-        "class_definition" | "class_declaration" | "class" |
-        "impl_item" | "struct_item" | "type_declaration"
-    );
-
-    if is_class {
-        // Try to get name from various field names
-        let name = node.child_by_field_name("name")
-            .or_else(|| {
-                // For Python class_definition, name is direct child
-                let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    if child.kind() == "identifier" || child.kind() == "type_identifier" {
-                        return Some(child);
-                    }
-                }
-                None
-            });
-
-        if name.is_some() {
-            // We need access to source for name comparison
-            // Since we don't have it here, check by line number instead
-            let node_line = node.start_position().row + 1;
-            if node_line == line {
-                return Some(node);
-            }
-        }
-    }
-
-    // Recurse into children
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if let Some(found) = find_class_node(child, class_name, line) {
-            return Some(found);
-        }
-    }
-
-    None
-}
-
-/// Find a method node within a class.
-fn find_method_node<'a>(
-    class_node: Node<'a>,
-    _method_name: &str,
-    line: usize,
-    language: &str,
-) -> Option<Node<'a>> {
-    let method_kinds = match language {
-        "python" => vec!["function_definition"],
-        "typescript" | "javascript" | "tsx" | "jsx" => vec!["method_definition", "function_declaration", "function"],
-        "rust" => vec!["function_item"],
-        "go" => vec!["function_declaration", "method_declaration"],
-        "java" | "kotlin" | "csharp" => vec!["method_declaration", "function_declaration"],
-        "cpp" | "c" => vec!["function_definition", "function_declarator"],
-        _ => vec!["function_definition", "method_definition"],
-    };
-
-    find_method_recursive(class_node, &method_kinds, line)
-}
-
-fn find_method_recursive<'a>(
-    node: Node<'a>,
-    method_kinds: &[&str],
-    line: usize,
-) -> Option<Node<'a>> {
-    if method_kinds.contains(&node.kind()) {
-        let node_line = node.start_position().row + 1;
-        if node_line == line {
-            return Some(node);
-        }
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if let Some(found) = find_method_recursive(child, method_kinds, line) {
-            return Some(found);
-        }
-    }
-
-    None
-}
+// find_class_node, find_method_node, find_method_recursive moved to crate::metrics::common
 
 // =============================================================================
 // TESTS
@@ -1283,7 +993,11 @@ class Calculator:
         let metrics = &analysis.classes[0];
         assert_eq!(metrics.class_name, "Calculator");
         // All methods share 'value' or 'history' attributes
-        assert!(metrics.lcom3 <= 2, "Expected cohesive class, got LCOM3 = {}", metrics.lcom3);
+        assert!(
+            metrics.lcom3 <= 2,
+            "Expected cohesive class, got LCOM3 = {}",
+            metrics.lcom3
+        );
     }
 
     #[test]
@@ -1316,7 +1030,11 @@ class GodObject:
         let metrics = &analysis.classes[0];
         assert_eq!(metrics.class_name, "GodObject");
         // Each method uses different attributes - no sharing
-        assert!(metrics.lcom3 >= 3, "Expected low cohesion, got LCOM3 = {}", metrics.lcom3);
+        assert!(
+            metrics.lcom3 >= 3,
+            "Expected low cohesion, got LCOM3 = {}",
+            metrics.lcom3
+        );
         assert!(metrics.is_low_cohesion);
     }
 

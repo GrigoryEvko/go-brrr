@@ -3,15 +3,14 @@
 //! Implements the Language trait for Python using tree-sitter-python.
 //! Extracts functions, classes, imports, and builds CFG/DFG.
 
-use std::collections::HashMap;
-
 use phf::phf_set;
+use rustc_hash::FxHashMap;
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::ast::types::{ClassInfo, FunctionInfo, ImportInfo};
 use crate::cfg::types::{BlockId, BlockType, CFGBlock, CFGEdge, CFGInfo, EdgeType};
 use crate::dfg::types::{DFGInfo, DataflowEdge, DataflowKind};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::traits::Language;
 
 /// All Python augmented assignment operators.
@@ -669,6 +668,57 @@ impl Python {
         None
     }
 
+    /// Check if a function contains yield or yield from expressions (is a generator).
+    ///
+    /// Recursively scans the function body for yield/yield_from nodes.
+    /// Stops at nested function boundaries to avoid false positives from inner generators.
+    ///
+    /// # Returns
+    /// `true` if the function body contains yield or yield_from at the top level,
+    /// `false` otherwise.
+    fn contains_yield(node: Node) -> bool {
+        // Get the function body
+        let function_node = match node.kind() {
+            "decorated_definition" => Self::find_inner_function(node),
+            "function_definition" => Some(node),
+            _ => None,
+        };
+
+        if let Some(func) = function_node {
+            if let Some(body) = Self::child_by_kind(func, "block") {
+                return Self::contains_yield_recursive(body, 0);
+            }
+        }
+        false
+    }
+
+    /// Recursively check for yield/yield_from in a node tree.
+    ///
+    /// # Arguments
+    /// * `node` - Current node to check
+    /// * `depth` - Current nesting depth (0 = in main function, >0 = in nested function)
+    ///
+    /// Stops recursion into nested functions/lambdas to avoid counting their yields.
+    fn contains_yield_recursive(node: Node, depth: usize) -> bool {
+        match node.kind() {
+            // Found yield/yield_from - only count if at depth 0 (not in nested function)
+            "yield" | "yield_from" => depth == 0,
+            // Nested function boundaries - don't recurse into these
+            // Their yields belong to them, not the outer function
+            "function_definition" | "lambda" => false,
+            // Recurse into other nodes
+            _ => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if Self::contains_yield_recursive(child, depth) {
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+    }
+
     /// Extract base classes from a class definition.
     fn extract_bases(node: Node, source: &[u8]) -> Vec<String> {
         let mut bases = Vec::new();
@@ -929,7 +979,9 @@ impl Python {
 
         // Get return type annotation (field-based lookup, not kind-based)
         // tree-sitter-python stores return type in "return_type" field
-        let return_type = node.child_by_field_name("return_type").map(|n| Self::extract_type(n, source));
+        let return_type = node
+            .child_by_field_name("return_type")
+            .map(|n| Self::extract_type(n, source));
 
         // Get docstring from block
         let docstring = Self::child_by_kind(node, "block")
@@ -1649,7 +1701,7 @@ impl Python {
                     imports.push(ImportInfo {
                         module,
                         names: Vec::new(),
-                        aliases: HashMap::new(),
+                        aliases: FxHashMap::default(),
                         is_from: false,
                         level: 0,
                         line_number: inner.start_position().row + 1,
@@ -1675,7 +1727,7 @@ impl Python {
                         }
                     }
 
-                    let mut aliases = HashMap::new();
+                    let mut aliases = FxHashMap::default();
                     if !alias_name.is_empty() {
                         aliases.insert(module.clone(), alias_name);
                     }
@@ -1704,7 +1756,7 @@ impl Python {
     ) {
         let mut module = String::new();
         let mut names = Vec::new();
-        let mut aliases = HashMap::new();
+        let mut aliases = FxHashMap::default();
         let mut level = 0usize;
 
         let mut inner_cursor = node.walk();
@@ -1760,19 +1812,19 @@ impl Python {
                         match alias_child.kind() {
                             "dotted_name" | "identifier" => {
                                 if import_name.is_empty() {
-                                    import_name =
-                                        Self::node_text(alias_child, source).to_string();
+                                    import_name = Self::node_text(alias_child, source).to_string();
                                 } else {
-                                    alias_name =
-                                        Self::node_text(alias_child, source).to_string();
+                                    alias_name = Self::node_text(alias_child, source).to_string();
                                 }
                             }
                             _ => {}
                         }
                     }
 
-                    names.push(import_name.clone());
-                    if !alias_name.is_empty() {
+                    if alias_name.is_empty() {
+                        names.push(import_name);
+                    } else {
+                        names.push(import_name.clone());
                         aliases.insert(import_name, alias_name);
                     }
                 }
@@ -1851,7 +1903,12 @@ impl ExceptionContext {
     }
 
     /// Add an exception handler to this context.
-    fn add_handler(&mut self, handler_block: BlockId, exception_types: Vec<String>, is_exception_group: bool) {
+    fn add_handler(
+        &mut self,
+        handler_block: BlockId,
+        exception_types: Vec<String>,
+        is_exception_group: bool,
+    ) {
         self.handlers.push(ExceptionHandler {
             handler_block,
             exception_types,
@@ -1879,7 +1936,11 @@ impl ExceptionContext {
             }
             // Check if handler catches this type
             if let Some(exc_type) = exception_type {
-                if handler.exception_types.iter().any(|t| t == exc_type || t == "Exception" || t == "BaseException") {
+                if handler
+                    .exception_types
+                    .iter()
+                    .any(|t| t == exc_type || t == "Exception" || t == "BaseException")
+                {
                     return Some(handler);
                 }
             }
@@ -1900,7 +1961,7 @@ impl ExceptionContext {
 /// Builds control flow graphs from Python AST nodes.
 struct PythonCFGBuilder<'a> {
     source: &'a [u8],
-    blocks: HashMap<BlockId, CFGBlock>,
+    blocks: FxHashMap<BlockId, CFGBlock>,
     edges: Vec<CFGEdge>,
     next_block_id: usize,
     exits: Vec<BlockId>,
@@ -1926,7 +1987,7 @@ struct PythonCFGBuilder<'a> {
     comprehension_decision_points: usize,
     /// Nested function/closure CFGs (name -> CFG).
     /// Stores control flow graphs for inner functions defined within this function.
-    nested_cfgs: HashMap<String, Box<CFGInfo>>,
+    nested_cfgs: FxHashMap<String, Box<CFGInfo>>,
     // =========================================================================
     // Async/await tracking
     // =========================================================================
@@ -1937,13 +1998,22 @@ struct PythonCFGBuilder<'a> {
     /// Detected blocking calls in async context.
     /// Format: (function_name, line_number)
     blocking_calls: Vec<(String, usize)>,
+    // =========================================================================
+    // Generator tracking
+    // =========================================================================
+    /// Whether this is a generator function (contains yield).
+    is_generator: bool,
+    /// Whether this is an async generator (async def with yield).
+    is_async_generator: bool,
+    /// Number of yield points in this generator.
+    yield_count: usize,
 }
 
 impl<'a> PythonCFGBuilder<'a> {
     fn new(source: &'a [u8], is_async: bool) -> Self {
         Self {
             source,
-            blocks: HashMap::new(),
+            blocks: FxHashMap::default(),
             edges: Vec::new(),
             next_block_id: 0,
             exits: Vec::new(),
@@ -1952,10 +2022,13 @@ impl<'a> PythonCFGBuilder<'a> {
             exception_contexts: Vec::new(),
             decision_points: 0,
             comprehension_decision_points: 0,
-            nested_cfgs: HashMap::new(),
+            nested_cfgs: FxHashMap::default(),
             is_async,
             await_points: 0,
             blocking_calls: Vec::new(),
+            is_generator: false,
+            is_async_generator: false,
+            yield_count: 0,
         }
     }
 
@@ -1974,7 +2047,13 @@ impl<'a> PythonCFGBuilder<'a> {
         // Check if this is an async function
         let is_async = Python::is_async_function(node);
 
+        // Check if this is a generator function (contains yield/yield from)
+        let is_generator = Python::contains_yield(node);
+        let is_async_generator = is_async && is_generator;
+
         let mut builder = PythonCFGBuilder::new(source, is_async);
+        builder.is_generator = is_generator;
+        builder.is_async_generator = is_async_generator;
 
         // Create entry block
         let entry = builder.new_block("entry".to_string(), node.start_position().row + 1);
@@ -2006,6 +2085,9 @@ impl<'a> PythonCFGBuilder<'a> {
             is_async: builder.is_async,
             await_points: builder.await_points,
             blocking_calls: builder.blocking_calls,
+            is_generator: builder.is_generator,
+            is_async_generator: builder.is_async_generator,
+            yield_count: builder.yield_count,
             ..Default::default()
         })
     }
@@ -2091,7 +2173,7 @@ impl<'a> PythonCFGBuilder<'a> {
             // Assert creates two control flow paths (pass/fail)
             "assert_statement" => self.process_assert(stmt, current),
             // Statements that may contain comprehensions with decision points
-            // Also scan for await expressions and blocking calls in async context
+            // Also scan for await expressions, blocking calls, and yield expressions
             "expression_statement" | "assignment" | "augmented_assignment" => {
                 // CFG-BUG-7 FIX: Scan for comprehensions with if_clause decision points
                 self.count_comprehension_decision_points(stmt);
@@ -2099,8 +2181,16 @@ impl<'a> PythonCFGBuilder<'a> {
                 // Track await points and blocking calls
                 let await_info = self.scan_async_patterns(stmt);
 
+                // Track yield expressions (generator patterns)
+                let yield_info = self.scan_yield_patterns(stmt);
+
                 let stmt_text = self.node_text(stmt);
                 let end_line = stmt.end_position().row + 1;
+
+                // If this statement contains yield expressions, create yield point blocks
+                if !yield_info.yield_exprs.is_empty() || !yield_info.yield_from_exprs.is_empty() {
+                    return self.process_yield_statement(stmt, current, yield_info);
+                }
 
                 // If this statement contains await expressions, create explicit await point nodes
                 if !await_info.await_exprs.is_empty() {
@@ -2554,8 +2644,7 @@ impl<'a> PythonCFGBuilder<'a> {
                         format!("except {}", exception_types.join(" | "))
                     };
 
-                    let except_block =
-                        self.new_block(label, child.start_position().row + 1);
+                    let except_block = self.new_block(label, child.start_position().row + 1);
 
                     // Add handler to exception context
                     exc_context.add_handler(except_block, exception_types.clone(), false);
@@ -2573,8 +2662,7 @@ impl<'a> PythonCFGBuilder<'a> {
                         format!("except* {}", exception_types.join(" | "))
                     };
 
-                    let except_block =
-                        self.new_block(label, child.start_position().row + 1);
+                    let except_block = self.new_block(label, child.start_position().row + 1);
 
                     // Add handler to exception context (marked as exception group)
                     exc_context.add_handler(except_block, exception_types.clone(), true);
@@ -2698,11 +2786,20 @@ impl<'a> PythonCFGBuilder<'a> {
         // Handle propagation of unhandled exceptions through finally
         // If there are handlers but also a bare except, exceptions are caught
         // If there's only typed handlers, unmatched exceptions propagate
-        if has_finally && !exc_context.handlers.iter().any(|h| h.exception_types.is_empty()) {
+        if has_finally
+            && !exc_context
+                .handlers
+                .iter()
+                .any(|h| h.exception_types.is_empty())
+        {
             // Create a propagation path through finally for unhandled exceptions
             let propagate_block = self.new_block("exception_propagate".to_string(), end_line);
             self.add_edge(try_block, propagate_block, EdgeType::Propagate);
-            self.add_edge(propagate_block, finally_block_id.unwrap(), EdgeType::Finally);
+            self.add_edge(
+                propagate_block,
+                finally_block_id.unwrap(),
+                EdgeType::Finally,
+            );
             // After finally, exception continues to propagate
             let reraise_block = self.new_block("reraise_after_finally".to_string(), end_line);
             self.exits.push(reraise_block);
@@ -2875,7 +2972,10 @@ impl<'a> PythonCFGBuilder<'a> {
         let label = if !has_exception {
             "raise (reraise)".to_string()
         } else if has_from {
-            format!("raise {} from ...", exception_type.as_deref().unwrap_or("Exception"))
+            format!(
+                "raise {} from ...",
+                exception_type.as_deref().unwrap_or("Exception")
+            )
         } else {
             format!("raise {}", exception_type.as_deref().unwrap_or("Exception"))
         };
@@ -2958,7 +3058,8 @@ impl<'a> PythonCFGBuilder<'a> {
         if let Some(exc_ctx) = self.exception_contexts.last() {
             if let Some(finally_block) = exc_ctx.finally_block {
                 // Continue must go through finally first
-                let continue_via_finally = self.new_block("continue_via_finally".to_string(), end_line);
+                let continue_via_finally =
+                    self.new_block("continue_via_finally".to_string(), end_line);
                 self.add_edge(current, continue_via_finally, EdgeType::Continue);
                 self.add_edge(continue_via_finally, finally_block, EdgeType::Finally);
 
@@ -3289,7 +3390,8 @@ impl<'a> PythonCFGBuilder<'a> {
             "await" => {
                 // Found an await expression
                 let line = node.start_position().row + 1;
-                let awaited = node.child(1)
+                let awaited = node
+                    .child(1)
                     .map(|n| Python::node_text(n, self.source).to_string())
                     .unwrap_or_else(|| "<expr>".to_string());
                 info.await_exprs.push((awaited, line));
@@ -3488,6 +3590,222 @@ fn truncate_expr(expr: &str, max_len: usize) -> String {
     }
 }
 
+/// Information collected about yield patterns in an AST node.
+#[derive(Default)]
+struct YieldPatternInfo {
+    /// Yield expressions: (yielded expression text, line number)
+    yield_exprs: Vec<(String, usize)>,
+    /// Yield from expressions: (delegated iterable text, line number)
+    yield_from_exprs: Vec<(String, usize)>,
+}
+
+impl<'a> PythonCFGBuilder<'a> {
+    /// Scan a statement for yield and yield from expressions.
+    ///
+    /// This is analogous to `scan_async_patterns` for generators.
+    /// Detects:
+    /// - `yield expr` - generator yield point
+    /// - `yield from iterable` - generator delegation
+    fn scan_yield_patterns(&self, node: Node) -> YieldPatternInfo {
+        let mut info = YieldPatternInfo::default();
+        self.scan_yield_patterns_recursive(node, &mut info);
+        info
+    }
+
+    /// Recursively scan an AST node for yield patterns.
+    ///
+    /// Note: tree-sitter-python parses both `yield value` and `yield from iterable`
+    /// as the same "yield" node type. We distinguish them by checking if the
+    /// second child is the keyword "from".
+    fn scan_yield_patterns_recursive(&self, node: Node, info: &mut YieldPatternInfo) {
+        match node.kind() {
+            "yield" => {
+                let line = node.start_position().row + 1;
+
+                // Check if this is a "yield from" by looking at the children
+                // Structure for yield from: yield -> "yield", "from", expression
+                // Structure for yield: yield -> "yield", [expression]
+                let is_yield_from =
+                    node.child_count() >= 2 && node.child(1).map_or(false, |c| c.kind() == "from");
+
+                if is_yield_from {
+                    // yield from expression: yield from iterable
+                    // Get the delegated iterable (third child after "yield" and "from")
+                    let expr_text = node
+                        .child(2)
+                        .map(|n| Python::node_text(n, self.source).to_string())
+                        .unwrap_or_default();
+                    info.yield_from_exprs.push((expr_text, line));
+                } else {
+                    // Regular yield expression: yield [value]
+                    let yielded = node
+                        .child(1)
+                        .map(|n| Python::node_text(n, self.source).to_string())
+                        .unwrap_or_default();
+                    info.yield_exprs.push((yielded, line));
+                }
+            }
+            // tree-sitter-python may also have a separate yield_from node type
+            // in some versions - handle it just in case
+            "yield_from" => {
+                let line = node.start_position().row + 1;
+                // Get the delegated iterable (skip "yield" and "from" keywords)
+                let mut cursor = node.walk();
+                let mut expr_text = String::new();
+                for child in node.children(&mut cursor) {
+                    if child.kind() != "yield" && child.kind() != "from" {
+                        expr_text = Python::node_text(child, self.source).to_string();
+                        break;
+                    }
+                }
+                info.yield_from_exprs.push((expr_text, line));
+            }
+            // Don't recurse into nested functions/lambdas - their yields are their own
+            "function_definition" | "lambda" => {}
+            _ => {
+                // Recurse into children
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    self.scan_yield_patterns_recursive(child, info);
+                }
+            }
+        }
+    }
+
+    /// Process a statement containing yield expressions, creating YieldPoint blocks.
+    ///
+    /// # Generator CFG Semantics
+    ///
+    /// A yield creates a suspension point where:
+    /// 1. The generator pauses and returns the yielded value to the caller
+    /// 2. State is preserved (locals, instruction pointer)
+    /// 3. Execution resumes when next()/send() is called
+    ///
+    /// CFG modeling:
+    /// ```text
+    /// [current block] --yield--> [YieldPoint] --resume--> [GeneratorEntry] --> [next statement]
+    /// ```
+    ///
+    /// For yield from:
+    /// ```text
+    /// [current block] --yield_from--> [YieldFrom] --resume--> [next statement]
+    /// ```
+    /// The YieldFrom block represents bidirectional delegation where values,
+    /// send(), and throw() all pass through to the sub-generator.
+    fn process_yield_statement(
+        &mut self,
+        stmt: Node,
+        current: BlockId,
+        info: YieldPatternInfo,
+    ) -> BlockId {
+        let stmt_text = self.node_text(stmt);
+        let end_line = stmt.end_position().row + 1;
+
+        // Add statement text to current block first
+        if let Some(block) = self.blocks.get_mut(&current) {
+            block.statements.push(stmt_text);
+            block.end_line = end_line;
+        }
+
+        // Track total yield points
+        self.yield_count += info.yield_exprs.len() + info.yield_from_exprs.len();
+
+        let mut prev_block = current;
+
+        // Process yield expressions
+        for (i, (yielded_expr, line)) in info.yield_exprs.iter().enumerate() {
+            let yield_label = if info.yield_exprs.len() == 1 && info.yield_from_exprs.is_empty() {
+                if yielded_expr.is_empty() {
+                    "yield".to_string()
+                } else {
+                    format!("yield {}", truncate_expr(yielded_expr, 30))
+                }
+            } else {
+                format!("yield[{}] {}", i + 1, truncate_expr(yielded_expr, 25))
+            };
+
+            // Create yield point block
+            let yield_block = self.new_block(yield_label, *line);
+
+            // Set block type based on whether this is async generator
+            if let Some(block) = self.blocks.get_mut(&yield_block) {
+                block.block_type = if self.is_async_generator {
+                    BlockType::AsyncYieldPoint
+                } else {
+                    BlockType::YieldPoint
+                };
+            }
+
+            // Connect previous block to yield point with Yield edge
+            let yield_edge = if self.is_async_generator {
+                EdgeType::AsyncGeneratorYield
+            } else {
+                EdgeType::Yield
+            };
+            self.add_edge(prev_block, yield_block, yield_edge);
+
+            // Create resume point (where next()/send() continues)
+            let resume_block = self.new_block("resume".to_string(), *line);
+            if let Some(block) = self.blocks.get_mut(&resume_block) {
+                block.block_type = BlockType::GeneratorEntry;
+            }
+
+            // Connect yield to resume with GeneratorResume edge
+            let resume_edge = if self.is_async_generator {
+                EdgeType::AsyncGeneratorResume
+            } else {
+                EdgeType::GeneratorResume
+            };
+            self.add_edge(yield_block, resume_block, resume_edge);
+
+            prev_block = resume_block;
+        }
+
+        // Process yield from expressions
+        for (i, (iterable_expr, line)) in info.yield_from_exprs.iter().enumerate() {
+            let yield_from_label =
+                if info.yield_from_exprs.len() == 1 && info.yield_exprs.is_empty() {
+                    format!("yield from {}", truncate_expr(iterable_expr, 25))
+                } else {
+                    format!("yield from[{}] {}", i + 1, truncate_expr(iterable_expr, 20))
+                };
+
+            // Create yield from block
+            let yield_from_block = self.new_block(yield_from_label, *line);
+
+            // Set block type
+            if let Some(block) = self.blocks.get_mut(&yield_from_block) {
+                block.block_type = BlockType::YieldFrom;
+            }
+
+            // Connect previous block to yield from with YieldFromDelegate edge
+            self.add_edge(prev_block, yield_from_block, EdgeType::YieldFromDelegate);
+
+            // Create resume point after yield from delegation completes
+            let after_delegation = self.new_block("after_yield_from".to_string(), *line);
+            if let Some(block) = self.blocks.get_mut(&after_delegation) {
+                block.block_type = BlockType::GeneratorEntry;
+            }
+
+            // The sub-generator can be re-entered multiple times, but eventually
+            // control returns here when the sub-generator is exhausted
+            self.add_edge(
+                yield_from_block,
+                after_delegation,
+                EdgeType::GeneratorResume,
+            );
+
+            prev_block = after_delegation;
+        }
+
+        // Create continuation block after all yields
+        let after_yield = self.new_block("after_yield".to_string(), end_line);
+        self.add_edge(prev_block, after_yield, EdgeType::Unconditional);
+
+        after_yield
+    }
+}
+
 // =============================================================================
 // Python DFG Builder
 // =============================================================================
@@ -3613,6 +3931,10 @@ impl<'a> PythonDFGBuilder<'a> {
 
         // Build def-use chains using CFG information
         let (edges, definitions, uses) = builder.compute_def_use_chains_with_cfg(&cfg);
+
+        // Convert FxHashMap to std::collections::HashMap for DFGInfo API compatibility
+        let definitions: FxHashMap<String, Vec<usize>> = definitions.into_iter().collect();
+        let uses: FxHashMap<String, Vec<usize>> = uses.into_iter().collect();
 
         Ok(DFGInfo::new(function_name, edges, definitions, uses))
     }
@@ -3779,22 +4101,14 @@ impl<'a> PythonDFGBuilder<'a> {
                     if let Some(id) = id_node {
                         let name = self.node_text(id);
                         self.add_to_current_scope(&name);
-                        self.add_ref(
-                            name,
-                            id.start_position().row + 1,
-                            DataflowKind::NestedParam,
-                        );
+                        self.add_ref(name, id.start_position().row + 1, DataflowKind::NestedParam);
                     }
                 }
                 "default_parameter" | "typed_default_parameter" => {
                     if let Some(id) = Python::child_by_kind(child, "identifier") {
                         let name = self.node_text(id);
                         self.add_to_current_scope(&name);
-                        self.add_ref(
-                            name,
-                            id.start_position().row + 1,
-                            DataflowKind::NestedParam,
-                        );
+                        self.add_ref(name, id.start_position().row + 1, DataflowKind::NestedParam);
                     }
                     // Process the default value expression (uses from outer scope)
                     let mut inner_cursor = child.walk();
@@ -3814,11 +4128,7 @@ impl<'a> PythonDFGBuilder<'a> {
                     if let Some(id) = Python::child_by_kind(child, "identifier") {
                         let name = self.node_text(id);
                         self.add_to_current_scope(&name);
-                        self.add_ref(
-                            name,
-                            id.start_position().row + 1,
-                            DataflowKind::NestedParam,
-                        );
+                        self.add_ref(name, id.start_position().row + 1, DataflowKind::NestedParam);
                     }
                 }
                 "dictionary_splat_pattern" => {
@@ -3826,11 +4136,7 @@ impl<'a> PythonDFGBuilder<'a> {
                     if let Some(id) = Python::child_by_kind(child, "identifier") {
                         let name = self.node_text(id);
                         self.add_to_current_scope(&name);
-                        self.add_ref(
-                            name,
-                            id.start_position().row + 1,
-                            DataflowKind::NestedParam,
-                        );
+                        self.add_ref(name, id.start_position().row + 1, DataflowKind::NestedParam);
                     }
                 }
                 _ => {}
@@ -4608,7 +4914,11 @@ impl<'a> PythonDFGBuilder<'a> {
                 }
                 if after_as && inner.kind() == "identifier" {
                     let name = self.node_text(inner);
-                    self.add_ref(name, inner.start_position().row + 1, DataflowKind::Definition);
+                    self.add_ref(
+                        name,
+                        inner.start_position().row + 1,
+                        DataflowKind::Definition,
+                    );
                     *found_binding = true;
                     break;
                 }
@@ -4633,7 +4943,11 @@ impl<'a> PythonDFGBuilder<'a> {
                             // This identifier appears before "as", so it's the exception type
                             if !seen_as {
                                 let name = self.node_text(inner);
-                                self.add_ref(name, inner.start_position().row + 1, DataflowKind::Use);
+                                self.add_ref(
+                                    name,
+                                    inner.start_position().row + 1,
+                                    DataflowKind::Use,
+                                );
                             }
                             break;
                         }
@@ -4656,7 +4970,11 @@ impl<'a> PythonDFGBuilder<'a> {
     fn extract_binding_from_alias(&mut self, alias: Node<'a>, found_binding: &mut bool) {
         if alias.kind() == "identifier" {
             let name = self.node_text(alias);
-            self.add_ref(name, alias.start_position().row + 1, DataflowKind::Definition);
+            self.add_ref(
+                name,
+                alias.start_position().row + 1,
+                DataflowKind::Definition,
+            );
             *found_binding = true;
         } else if alias.kind() == "as_pattern_target" {
             self.extract_binding_from_target(alias, found_binding);
@@ -4671,7 +4989,11 @@ impl<'a> PythonDFGBuilder<'a> {
     fn extract_binding_from_target(&mut self, target: Node<'a>, found_binding: &mut bool) {
         if target.kind() == "identifier" {
             let name = self.node_text(target);
-            self.add_ref(name, target.start_position().row + 1, DataflowKind::Definition);
+            self.add_ref(
+                name,
+                target.start_position().row + 1,
+                DataflowKind::Definition,
+            );
             *found_binding = true;
         } else if let Some(id) = Python::child_by_kind(target, "identifier") {
             let name = self.node_text(id);
@@ -4722,7 +5044,11 @@ impl<'a> PythonDFGBuilder<'a> {
             }
             if after_as && child.kind() == "identifier" {
                 let name = self.node_text(child);
-                self.add_ref(name, child.start_position().row + 1, DataflowKind::Definition);
+                self.add_ref(
+                    name,
+                    child.start_position().row + 1,
+                    DataflowKind::Definition,
+                );
                 break;
             }
         }
@@ -4945,17 +5271,17 @@ impl<'a> PythonDFGBuilder<'a> {
         cfg: &CFGInfo,
     ) -> (
         Vec<DataflowEdge>,
-        HashMap<String, Vec<usize>>,
-        HashMap<String, Vec<usize>>,
+        FxHashMap<String, Vec<usize>>,
+        FxHashMap<String, Vec<usize>>,
     ) {
         use std::collections::HashSet;
 
         let mut edges = Vec::new();
-        let mut definitions: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut uses: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut definitions: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+        let mut uses: FxHashMap<String, Vec<usize>> = FxHashMap::default();
 
         // Map refs to their containing blocks
-        let mut refs_by_block: HashMap<BlockId, Vec<&VarRef>> = HashMap::new();
+        let mut refs_by_block: FxHashMap<BlockId, Vec<&VarRef>> = FxHashMap::default();
         for var_ref in &self.refs {
             if let Some(block_id) = cfg.block_for_line(var_ref.line) {
                 refs_by_block.entry(block_id).or_default().push(var_ref);
@@ -4968,7 +5294,7 @@ impl<'a> PythonDFGBuilder<'a> {
         }
 
         // Reaching definitions at the END of each block: block_id -> (var_name -> set of def lines)
-        let mut block_out_defs: HashMap<BlockId, HashMap<String, HashSet<usize>>> = HashMap::new();
+        let mut block_out_defs: FxHashMap<BlockId, FxHashMap<String, HashSet<usize>>> = FxHashMap::default();
 
         // Process blocks in topological order
         let topo_order = cfg.topological_order();
@@ -4976,7 +5302,7 @@ impl<'a> PythonDFGBuilder<'a> {
         for block_id in topo_order {
             // Merge reaching definitions from all predecessors
             let predecessors = cfg.predecessors(block_id);
-            let mut active_defs: HashMap<String, HashSet<usize>> = HashMap::new();
+            let mut active_defs: FxHashMap<String, HashSet<usize>> = FxHashMap::default();
 
             if predecessors.is_empty() {
                 // Entry block or unreachable - no incoming defs
@@ -5163,7 +5489,7 @@ impl<'a> PythonDFGBuilder<'a> {
         if !unassigned_refs.is_empty() {
             // Process unassigned refs with simple linear analysis
             unassigned_refs.sort_by_key(|r| r.line);
-            let mut active_defs: HashMap<String, Vec<usize>> = HashMap::new();
+            let mut active_defs: FxHashMap<String, Vec<usize>> = FxHashMap::default();
 
             // Initialize with all definitions we've seen so far
             for (var, def_lines) in &definitions {
@@ -5288,7 +5614,10 @@ async def fetch_data(url: str) -> bytes:
 
         let func = python.extract_function(decorated, code.as_bytes()).unwrap();
         assert_eq!(func.name, "fetch_data");
-        assert!(func.is_async, "Decorated async function should have is_async=true");
+        assert!(
+            func.is_async,
+            "Decorated async function should have is_async=true"
+        );
         assert_eq!(func.decorators.len(), 1);
         assert!(func.decorators.iter().any(|d| d.contains("some_decorator")));
     }
@@ -5807,7 +6136,10 @@ def example(cond):
             x_edges_to_print.len(),
             2,
             "print(x) should have edges from BOTH definitions (lines 4 and 6), got edges from {:?}",
-            x_edges_to_print.iter().map(|e| e.from_line).collect::<Vec<_>>()
+            x_edges_to_print
+                .iter()
+                .map(|e| e.from_line)
+                .collect::<Vec<_>>()
         );
 
         // Verify the edges come from both branches
@@ -5854,7 +6186,10 @@ def example():
             x_edges_to_print.len(),
             1,
             "print(x) should only have edge from the last definition (line 4), got edges from {:?}",
-            x_edges_to_print.iter().map(|e| e.from_line).collect::<Vec<_>>()
+            x_edges_to_print
+                .iter()
+                .map(|e| e.from_line)
+                .collect::<Vec<_>>()
         );
         assert_eq!(x_edges_to_print[0].from_line, 4);
     }
@@ -5898,7 +6233,10 @@ def example(a, b):
             x_edges_to_print.len(),
             3,
             "print(x) should have edges from all 3 definitions, got edges from {:?}",
-            x_edges_to_print.iter().map(|e| e.from_line).collect::<Vec<_>>()
+            x_edges_to_print
+                .iter()
+                .map(|e| e.from_line)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -6975,16 +7313,25 @@ def safe_divide(a, b):
         assert_eq!(cfg.function_name, "safe_divide");
 
         // Should have exception edge
-        let has_exception_edge = cfg.edges.iter().any(|e| {
-            matches!(e.edge_type, EdgeType::Exception | EdgeType::TypedException)
-        });
-        assert!(has_exception_edge, "Should have exception edge from try to except");
+        let has_exception_edge = cfg
+            .edges
+            .iter()
+            .any(|e| matches!(e.edge_type, EdgeType::Exception | EdgeType::TypedException));
+        assert!(
+            has_exception_edge,
+            "Should have exception edge from try to except"
+        );
 
         // Exception type should be extracted (ZeroDivisionError)
         let has_typed_exception = cfg.edges.iter().any(|e| {
-            e.condition.as_ref().map_or(false, |c| c.contains("ZeroDivisionError"))
+            e.condition
+                .as_ref()
+                .map_or(false, |c| c.contains("ZeroDivisionError"))
         });
-        assert!(has_typed_exception, "Should extract exception type 'ZeroDivisionError'");
+        assert!(
+            has_typed_exception,
+            "Should extract exception type 'ZeroDivisionError'"
+        );
     }
 
     /// Test try/except with multiple exception types.
@@ -7009,16 +7356,28 @@ def handle_multiple(x):
         let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
 
         // Should have multiple except blocks
-        let except_blocks: Vec<_> = cfg.blocks.values()
+        let except_blocks: Vec<_> = cfg
+            .blocks
+            .values()
             .filter(|b| b.label.starts_with("except"))
             .collect();
-        assert!(except_blocks.len() >= 3, "Should have at least 3 except blocks, got {}", except_blocks.len());
+        assert!(
+            except_blocks.len() >= 3,
+            "Should have at least 3 except blocks, got {}",
+            except_blocks.len()
+        );
 
         // Should have typed exception edges
-        let typed_edges = cfg.edges.iter().filter(|e| {
-            matches!(e.edge_type, EdgeType::TypedException | EdgeType::Exception)
-        }).count();
-        assert!(typed_edges >= 3, "Should have at least 3 exception edges, got {}", typed_edges);
+        let typed_edges = cfg
+            .edges
+            .iter()
+            .filter(|e| matches!(e.edge_type, EdgeType::TypedException | EdgeType::Exception))
+            .count();
+        assert!(
+            typed_edges >= 3,
+            "Should have at least 3 exception edges, got {}",
+            typed_edges
+        );
     }
 
     /// Test try/except/else structure.
@@ -7042,10 +7401,14 @@ def with_else(x):
         let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
 
         // Should have NoException edge to else block
-        let has_no_exception = cfg.edges.iter().any(|e| {
-            matches!(e.edge_type, EdgeType::NoException)
-        });
-        assert!(has_no_exception, "Should have NoException edge to else block");
+        let has_no_exception = cfg
+            .edges
+            .iter()
+            .any(|e| matches!(e.edge_type, EdgeType::NoException));
+        assert!(
+            has_no_exception,
+            "Should have NoException edge to else block"
+        );
 
         // Should have try_else block
         let has_else_block = cfg.blocks.values().any(|b| b.label.contains("else"));
@@ -7075,10 +7438,16 @@ def with_finally(f):
         assert!(has_finally_block, "Should have finally block");
 
         // Should have edges to finally
-        let finally_edges = cfg.edges.iter().filter(|e| {
-            matches!(e.edge_type, EdgeType::Finally)
-        }).count();
-        assert!(finally_edges >= 1, "Should have at least 1 Finally edge, got {}", finally_edges);
+        let finally_edges = cfg
+            .edges
+            .iter()
+            .filter(|e| matches!(e.edge_type, EdgeType::Finally))
+            .count();
+        assert!(
+            finally_edges >= 1,
+            "Should have at least 1 Finally edge, got {}",
+            finally_edges
+        );
     }
 
     /// Test raise statement with exception type extraction.
@@ -7098,10 +7467,14 @@ def validate(x):
         let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
 
         // Should have block with raise statement
-        let has_raise_block = cfg.blocks.values().any(|b| {
-            b.statements.iter().any(|s| s.contains("raise"))
-        });
-        assert!(has_raise_block, "Should have block containing raise statement");
+        let has_raise_block = cfg
+            .blocks
+            .values()
+            .any(|b| b.statements.iter().any(|s| s.contains("raise")));
+        assert!(
+            has_raise_block,
+            "Should have block containing raise statement"
+        );
     }
 
     /// Test bare raise (reraise) within except handler.
@@ -7126,7 +7499,10 @@ def log_and_reraise(func, x):
         let has_reraise = cfg.blocks.values().any(|b| {
             b.label.contains("reraise") || b.statements.iter().any(|s| s.trim() == "raise")
         });
-        assert!(has_reraise, "Should have bare raise (reraise) block or statement");
+        assert!(
+            has_reraise,
+            "Should have bare raise (reraise) block or statement"
+        );
     }
 
     /// Test exception chaining (raise from).
@@ -7147,9 +7523,10 @@ def wrap_error(x):
         let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
 
         // Should have block with raise...from
-        let has_raise_from = cfg.blocks.values().any(|b| {
-            b.statements.iter().any(|s| s.contains("from"))
-        });
+        let has_raise_from = cfg
+            .blocks
+            .values()
+            .any(|b| b.statements.iter().any(|s| s.contains("from")));
         assert!(has_raise_from, "Should have raise...from statement");
     }
 
@@ -7173,9 +7550,10 @@ def early_return_with_cleanup(f):
         let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
 
         // Should have return_via_finally block for return within try
-        let has_return_via_finally = cfg.blocks.values().any(|b| {
-            b.label.contains("return_via_finally")
-        });
+        let has_return_via_finally = cfg
+            .blocks
+            .values()
+            .any(|b| b.label.contains("return_via_finally"));
         // Note: this may not always create a separate block depending on implementation
         // Check for finally block existence instead
         let has_finally = cfg.blocks.values().any(|b| b.label == "finally");
@@ -7204,10 +7582,16 @@ def nested_handlers(x, y):
         let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
 
         // Should have multiple exception handlers
-        let except_count = cfg.edges.iter().filter(|e| {
-            matches!(e.edge_type, EdgeType::Exception | EdgeType::TypedException)
-        }).count();
-        assert!(except_count >= 2, "Should have at least 2 exception edges for nested try, got {}", except_count);
+        let except_count = cfg
+            .edges
+            .iter()
+            .filter(|e| matches!(e.edge_type, EdgeType::Exception | EdgeType::TypedException))
+            .count();
+        assert!(
+            except_count >= 2,
+            "Should have at least 2 exception edges for nested try, got {}",
+            except_count
+        );
     }
 
     /// Test context manager (with statement) exception handling.
@@ -7233,10 +7617,14 @@ def with_context(path):
         assert!(has_exit, "Should have with_exit block");
 
         // Should have exception edges for context manager
-        let has_enter_exception = cfg.edges.iter().any(|e| {
-            matches!(e.edge_type, EdgeType::EnterException)
-        });
-        assert!(has_enter_exception, "Should have EnterException edge for __enter__ failure");
+        let has_enter_exception = cfg
+            .edges
+            .iter()
+            .any(|e| matches!(e.edge_type, EdgeType::EnterException));
+        assert!(
+            has_enter_exception,
+            "Should have EnterException edge for __enter__ failure"
+        );
     }
 
     /// Test Python 3.11+ except* for ExceptionGroups.
@@ -7259,12 +7647,16 @@ def handle_group(coros):
         let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
 
         // Should have ExceptionGroup edges
-        let has_exception_group = cfg.edges.iter().any(|e| {
-            matches!(e.edge_type, EdgeType::ExceptionGroup)
-        });
+        let has_exception_group = cfg
+            .edges
+            .iter()
+            .any(|e| matches!(e.edge_type, EdgeType::ExceptionGroup));
         // Note: tree-sitter-python may not support except* yet
         // If not supported, at least no errors should occur
-        assert!(cfg.blocks.len() > 0, "CFG should be built even with except*");
+        assert!(
+            cfg.blocks.len() > 0,
+            "CFG should be built even with except*"
+        );
     }
 
     /// Test exception type extraction from as_pattern.
@@ -7286,9 +7678,14 @@ def catch_with_binding(x):
 
         // Should extract ValueError even with 'as e' binding
         let has_value_error = cfg.edges.iter().any(|e| {
-            e.condition.as_ref().map_or(false, |c| c.contains("ValueError"))
+            e.condition
+                .as_ref()
+                .map_or(false, |c| c.contains("ValueError"))
         }) || cfg.blocks.values().any(|b| b.label.contains("ValueError"));
-        assert!(has_value_error, "Should extract ValueError from 'except ValueError as e'");
+        assert!(
+            has_value_error,
+            "Should extract ValueError from 'except ValueError as e'"
+        );
     }
 
     // =========================================================================
@@ -7317,15 +7714,17 @@ async def fetch_data(url):
         assert_eq!(cfg.await_points, 1, "Should have 1 await point");
 
         // Should have AwaitPoint block type
-        let has_await_block = cfg.blocks.values().any(|b| {
-            matches!(b.block_type, BlockType::AwaitPoint)
-        });
+        let has_await_block = cfg
+            .blocks
+            .values()
+            .any(|b| matches!(b.block_type, BlockType::AwaitPoint));
         assert!(has_await_block, "Should have AwaitPoint block");
 
         // Should have Await edge type
-        let has_await_edge = cfg.edges.iter().any(|e| {
-            matches!(e.edge_type, EdgeType::Await)
-        });
+        let has_await_edge = cfg
+            .edges
+            .iter()
+            .any(|e| matches!(e.edge_type, EdgeType::Await));
         assert!(has_await_edge, "Should have Await edge");
     }
 
@@ -7347,12 +7746,17 @@ async def fetch_multiple(urls):
         let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
 
         // Should have 3 await points
-        assert_eq!(cfg.await_points, 3, "Should have 3 await points for 3 await expressions");
+        assert_eq!(
+            cfg.await_points, 3,
+            "Should have 3 await points for 3 await expressions"
+        );
 
         // Should have 3 Await edges
-        let await_edge_count = cfg.edges.iter().filter(|e| {
-            matches!(e.edge_type, EdgeType::Await)
-        }).count();
+        let await_edge_count = cfg
+            .edges
+            .iter()
+            .filter(|e| matches!(e.edge_type, EdgeType::Await))
+            .count();
         assert_eq!(await_edge_count, 3, "Should have 3 Await edges");
     }
 
@@ -7372,27 +7776,28 @@ async def process_stream(stream):
         let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
 
         // Should have async for loop block
-        let has_async_for = cfg.blocks.values().any(|b| {
-            b.label.contains("async_for")
-        });
+        let has_async_for = cfg.blocks.values().any(|b| b.label.contains("async_for"));
         assert!(has_async_for, "Should have async_for_loop block");
 
         // Should have AsyncForLoop block type
-        let has_async_for_type = cfg.blocks.values().any(|b| {
-            matches!(b.block_type, BlockType::AsyncForLoop)
-        });
+        let has_async_for_type = cfg
+            .blocks
+            .values()
+            .any(|b| matches!(b.block_type, BlockType::AsyncForLoop));
         assert!(has_async_for_type, "Should have AsyncForLoop block type");
 
         // Should have AsyncIterate edge
-        let has_async_iterate = cfg.edges.iter().any(|e| {
-            matches!(e.edge_type, EdgeType::AsyncIterate)
-        });
+        let has_async_iterate = cfg
+            .edges
+            .iter()
+            .any(|e| matches!(e.edge_type, EdgeType::AsyncIterate));
         assert!(has_async_iterate, "Should have AsyncIterate edge");
 
         // Should have AsyncExhausted edge
-        let has_async_exhausted = cfg.edges.iter().any(|e| {
-            matches!(e.edge_type, EdgeType::AsyncExhausted)
-        });
+        let has_async_exhausted = cfg
+            .edges
+            .iter()
+            .any(|e| matches!(e.edge_type, EdgeType::AsyncExhausted));
         assert!(has_async_exhausted, "Should have AsyncExhausted edge");
     }
 
@@ -7412,22 +7817,28 @@ async def connect_db():
         let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
 
         // Should have async with enter block
-        let has_async_with_enter = cfg.blocks.values().any(|b| {
-            b.label.contains("async_with_enter")
-        });
+        let has_async_with_enter = cfg
+            .blocks
+            .values()
+            .any(|b| b.label.contains("async_with_enter"));
         assert!(has_async_with_enter, "Should have async_with_enter block");
 
         // Should have AsyncWithBlock block type
-        let has_async_with_type = cfg.blocks.values().any(|b| {
-            matches!(b.block_type, BlockType::AsyncWithBlock)
-        });
+        let has_async_with_type = cfg
+            .blocks
+            .values()
+            .any(|b| matches!(b.block_type, BlockType::AsyncWithBlock));
         assert!(has_async_with_type, "Should have AsyncWithBlock block type");
 
         // Should have AsyncEnterSuccess edge
-        let has_async_enter_success = cfg.edges.iter().any(|e| {
-            matches!(e.edge_type, EdgeType::AsyncEnterSuccess)
-        });
-        assert!(has_async_enter_success, "Should have AsyncEnterSuccess edge");
+        let has_async_enter_success = cfg
+            .edges
+            .iter()
+            .any(|e| matches!(e.edge_type, EdgeType::AsyncEnterSuccess));
+        assert!(
+            has_async_enter_success,
+            "Should have AsyncEnterSuccess edge"
+        );
     }
 
     /// Test asyncio.create_task detection.
@@ -7447,15 +7858,20 @@ async def spawn_tasks():
         let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
 
         // Should have TaskSpawn block type
-        let has_task_spawn = cfg.blocks.values().any(|b| {
-            matches!(b.block_type, BlockType::TaskSpawn)
-        });
-        assert!(has_task_spawn, "Should have TaskSpawn block for create_task");
+        let has_task_spawn = cfg
+            .blocks
+            .values()
+            .any(|b| matches!(b.block_type, BlockType::TaskSpawn));
+        assert!(
+            has_task_spawn,
+            "Should have TaskSpawn block for create_task"
+        );
 
         // Should have TaskSpawn edge
-        let has_spawn_edge = cfg.edges.iter().any(|e| {
-            matches!(e.edge_type, EdgeType::TaskSpawn)
-        });
+        let has_spawn_edge = cfg
+            .edges
+            .iter()
+            .any(|e| matches!(e.edge_type, EdgeType::TaskSpawn));
         assert!(has_spawn_edge, "Should have TaskSpawn edge");
     }
 
@@ -7498,9 +7914,14 @@ async def bad_async():
         let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
 
         // Should detect time.sleep as blocking call in async context
-        assert!(!cfg.blocking_calls.is_empty(), "Should detect blocking call time.sleep");
         assert!(
-            cfg.blocking_calls.iter().any(|(name, _)| name.contains("time.sleep")),
+            !cfg.blocking_calls.is_empty(),
+            "Should detect blocking call time.sleep"
+        );
+        assert!(
+            cfg.blocking_calls
+                .iter()
+                .any(|(name, _)| name.contains("time.sleep")),
             "Should specifically detect time.sleep"
         );
     }
@@ -7530,21 +7951,24 @@ async def complex_async():
         assert!(cfg.await_points >= 2, "Should have multiple await points");
 
         // Should have async with
-        let has_async_with = cfg.blocks.values().any(|b| {
-            matches!(b.block_type, BlockType::AsyncWithBlock)
-        });
+        let has_async_with = cfg
+            .blocks
+            .values()
+            .any(|b| matches!(b.block_type, BlockType::AsyncWithBlock));
         assert!(has_async_with, "Should have AsyncWithBlock");
 
         // Should have async for
-        let has_async_for = cfg.blocks.values().any(|b| {
-            matches!(b.block_type, BlockType::AsyncForLoop)
-        });
+        let has_async_for = cfg
+            .blocks
+            .values()
+            .any(|b| matches!(b.block_type, BlockType::AsyncForLoop));
         assert!(has_async_for, "Should have AsyncForLoop");
 
         // Should have await points
-        let has_await_points = cfg.blocks.values().any(|b| {
-            matches!(b.block_type, BlockType::AwaitPoint)
-        });
+        let has_await_points = cfg
+            .blocks
+            .values()
+            .any(|b| matches!(b.block_type, BlockType::AwaitPoint));
         assert!(has_await_points, "Should have AwaitPoint blocks");
     }
 
@@ -7564,13 +7988,22 @@ def sync_function(x):
         let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
 
         // Should NOT be async
-        assert!(!cfg.is_async, "Sync function CFG should not be marked async");
+        assert!(
+            !cfg.is_async,
+            "Sync function CFG should not be marked async"
+        );
 
         // Should have 0 await points
-        assert_eq!(cfg.await_points, 0, "Sync function should have 0 await points");
+        assert_eq!(
+            cfg.await_points, 0,
+            "Sync function should have 0 await points"
+        );
 
         // Should have no blocking call warnings (not in async context)
-        assert!(cfg.blocking_calls.is_empty(), "Sync function should not track blocking calls");
+        assert!(
+            cfg.blocking_calls.is_empty(),
+            "Sync function should not track blocking calls"
+        );
     }
 
     /// Test async for with else clause.
@@ -7592,9 +8025,301 @@ async def search_stream(stream, target):
         let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
 
         // Should have async_for_else block
-        let has_async_for_else = cfg.blocks.values().any(|b| {
-            b.label.contains("async_for_else")
-        });
+        let has_async_for_else = cfg
+            .blocks
+            .values()
+            .any(|b| b.label.contains("async_for_else"));
         assert!(has_async_for_else, "Should have async_for_else block");
+    }
+
+    // =========================================================================
+    // Generator Flow Tests
+    // =========================================================================
+
+    /// Test basic generator function CFG with yield expression.
+    #[test]
+    fn generator_simple_yield() {
+        let code = r#"
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i += 1
+"#;
+        let tree = parse_python(code);
+        let python = Python;
+        let root = tree.root_node();
+        let func_node = Python::child_by_kind(root, "function_definition").unwrap();
+
+        let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
+
+        // CFG should be marked as generator
+        assert!(
+            cfg.is_generator,
+            "CFG should be marked as generator for function with yield"
+        );
+
+        // Should NOT be async
+        assert!(!cfg.is_async, "Regular generator should not be async");
+        assert!(
+            !cfg.is_async_generator,
+            "Regular generator should not be async generator"
+        );
+
+        // Should have 1 yield point
+        assert_eq!(cfg.yield_count, 1, "Should have 1 yield point");
+
+        // Should have YieldPoint block type
+        let has_yield_block = cfg
+            .blocks
+            .values()
+            .any(|b| matches!(b.block_type, BlockType::YieldPoint));
+        assert!(has_yield_block, "Should have YieldPoint block");
+
+        // Should have Yield edge type
+        let has_yield_edge = cfg
+            .edges
+            .iter()
+            .any(|e| matches!(e.edge_type, EdgeType::Yield));
+        assert!(has_yield_edge, "Should have Yield edge");
+
+        // Should have GeneratorResume edge type
+        let has_resume_edge = cfg
+            .edges
+            .iter()
+            .any(|e| matches!(e.edge_type, EdgeType::GeneratorResume));
+        assert!(has_resume_edge, "Should have GeneratorResume edge");
+    }
+
+    /// Test generator with multiple yield points.
+    #[test]
+    fn generator_multiple_yields() {
+        let code = r#"
+def multi_yield():
+    yield 1
+    yield 2
+    yield 3
+"#;
+        let tree = parse_python(code);
+        let python = Python;
+        let root = tree.root_node();
+        let func_node = Python::child_by_kind(root, "function_definition").unwrap();
+
+        let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
+
+        // Should be a generator
+        assert!(cfg.is_generator, "Should be marked as generator");
+
+        // Should have 3 yield points
+        assert_eq!(cfg.yield_count, 3, "Should have 3 yield points");
+
+        // Should have 3 Yield edges
+        let yield_edge_count = cfg
+            .edges
+            .iter()
+            .filter(|e| matches!(e.edge_type, EdgeType::Yield))
+            .count();
+        assert_eq!(yield_edge_count, 3, "Should have 3 Yield edges");
+
+        // Should have 3 GeneratorEntry blocks
+        let gen_entry_count = cfg
+            .blocks
+            .values()
+            .filter(|b| matches!(b.block_type, BlockType::GeneratorEntry))
+            .count();
+        assert_eq!(gen_entry_count, 3, "Should have 3 GeneratorEntry blocks");
+    }
+
+    /// Test yield from delegation.
+    #[test]
+    fn generator_yield_from() {
+        let code = r#"
+def chain(*iterables):
+    for it in iterables:
+        yield from it
+"#;
+        let tree = parse_python(code);
+        let python = Python;
+        let root = tree.root_node();
+        let func_node = Python::child_by_kind(root, "function_definition").unwrap();
+
+        let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
+
+        // Should be a generator
+        assert!(cfg.is_generator, "Should be marked as generator");
+
+        // Should have YieldFrom block type
+        let has_yield_from_block = cfg
+            .blocks
+            .values()
+            .any(|b| matches!(b.block_type, BlockType::YieldFrom));
+        assert!(has_yield_from_block, "Should have YieldFrom block");
+
+        // Should have YieldFromDelegate edge type
+        let has_delegate_edge = cfg
+            .edges
+            .iter()
+            .any(|e| matches!(e.edge_type, EdgeType::YieldFromDelegate));
+        assert!(has_delegate_edge, "Should have YieldFromDelegate edge");
+    }
+
+    /// Test async generator (async def with yield).
+    #[test]
+    fn generator_async_generator() {
+        let code = r#"
+async def async_counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i += 1
+"#;
+        let tree = parse_python(code);
+        let python = Python;
+        let root = tree.root_node();
+        let func_node = Python::child_by_kind(root, "function_definition").unwrap();
+
+        let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
+
+        // Should be async AND a generator
+        assert!(cfg.is_async, "Should be marked as async");
+        assert!(cfg.is_generator, "Should be marked as generator");
+        assert!(
+            cfg.is_async_generator,
+            "Should be marked as async generator"
+        );
+
+        // Should have 1 yield point
+        assert_eq!(cfg.yield_count, 1, "Should have 1 yield point");
+
+        // Should have AsyncYieldPoint block type
+        let has_async_yield_block = cfg
+            .blocks
+            .values()
+            .any(|b| matches!(b.block_type, BlockType::AsyncYieldPoint));
+        assert!(has_async_yield_block, "Should have AsyncYieldPoint block");
+
+        // Should have AsyncGeneratorYield edge type
+        let has_async_yield_edge = cfg
+            .edges
+            .iter()
+            .any(|e| matches!(e.edge_type, EdgeType::AsyncGeneratorYield));
+        assert!(has_async_yield_edge, "Should have AsyncGeneratorYield edge");
+    }
+
+    /// Test generator with try/finally (cleanup on close).
+    #[test]
+    fn generator_with_try_finally() {
+        let code = r#"
+def resource_generator():
+    resource = acquire()
+    try:
+        yield resource.get_data()
+    finally:
+        resource.close()
+"#;
+        let tree = parse_python(code);
+        let python = Python;
+        let root = tree.root_node();
+        let func_node = Python::child_by_kind(root, "function_definition").unwrap();
+
+        let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
+
+        // Should be a generator
+        assert!(cfg.is_generator, "Should be marked as generator");
+
+        // Should have yield point
+        let has_yield_block = cfg
+            .blocks
+            .values()
+            .any(|b| matches!(b.block_type, BlockType::YieldPoint));
+        assert!(has_yield_block, "Should have YieldPoint block");
+
+        // Should have finally block
+        let has_finally = cfg.blocks.values().any(|b| b.label.contains("finally"));
+        assert!(has_finally, "Should have finally block for cleanup");
+    }
+
+    /// Test that regular functions are not generators.
+    #[test]
+    fn generator_non_generator_function() {
+        let code = r#"
+def regular_function(x):
+    return x * 2
+"#;
+        let tree = parse_python(code);
+        let python = Python;
+        let root = tree.root_node();
+        let func_node = Python::child_by_kind(root, "function_definition").unwrap();
+
+        let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
+
+        // Should NOT be a generator
+        assert!(
+            !cfg.is_generator,
+            "Regular function should not be a generator"
+        );
+        assert!(
+            !cfg.is_async_generator,
+            "Regular function should not be async generator"
+        );
+        assert_eq!(
+            cfg.yield_count, 0,
+            "Regular function should have 0 yield points"
+        );
+    }
+
+    /// Test that nested generator doesn't affect outer function.
+    #[test]
+    fn generator_nested_generator() {
+        let code = r#"
+def outer():
+    def inner():
+        yield 1
+    return inner()
+"#;
+        let tree = parse_python(code);
+        let python = Python;
+        let root = tree.root_node();
+        let func_node = Python::child_by_kind(root, "function_definition").unwrap();
+
+        let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
+
+        // Outer function should NOT be a generator (yield is in nested function)
+        assert!(
+            !cfg.is_generator,
+            "Outer function should not be a generator"
+        );
+        assert_eq!(
+            cfg.yield_count, 0,
+            "Outer function should have 0 yield points"
+        );
+    }
+
+    /// Test generator with conditional yield.
+    #[test]
+    fn generator_conditional_yield() {
+        let code = r#"
+def conditional_gen(items, predicate):
+    for item in items:
+        if predicate(item):
+            yield item
+"#;
+        let tree = parse_python(code);
+        let python = Python;
+        let root = tree.root_node();
+        let func_node = Python::child_by_kind(root, "function_definition").unwrap();
+
+        let cfg = python.build_cfg(func_node, code.as_bytes()).unwrap();
+
+        // Should be a generator
+        assert!(cfg.is_generator, "Should be marked as generator");
+        assert_eq!(cfg.yield_count, 1, "Should have 1 yield point");
+
+        // Cyclomatic complexity should account for loop + if
+        let complexity = cfg.cyclomatic_complexity();
+        assert!(
+            complexity >= 3,
+            "Should have cyclomatic complexity >= 3 (loop + if + base)"
+        );
     }
 }

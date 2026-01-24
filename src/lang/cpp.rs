@@ -24,15 +24,14 @@
 //! - Variadic templates
 //! - Concepts (C++20)
 
-use std::collections::HashMap;
-
 use phf::phf_set;
+use rustc_hash::FxHashMap;
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::ast::types::{ClassInfo, FieldInfo, FunctionInfo, ImportInfo};
 use crate::cfg::types::{BlockId, BlockType, CFGBlock, CFGEdge, CFGInfo, EdgeType};
 use crate::dfg::types::{DFGInfo, DataflowEdge, DataflowKind};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::traits::Language;
 
 /// C++ keywords and reserved names that cannot be valid class names.
@@ -380,7 +379,12 @@ impl Cpp {
 
         for child in node.children(&mut cursor) {
             match child.kind() {
-                "storage_class_specifier" | "virtual" | "explicit" | "inline" | "constexpr" | "consteval" => {
+                "storage_class_specifier"
+                | "virtual"
+                | "explicit"
+                | "inline"
+                | "constexpr"
+                | "consteval" => {
                     // Skip these for return type
                 }
                 "type_qualifier" => {
@@ -454,11 +458,19 @@ impl Cpp {
             "template_function" => Some(self.node_text(node, source)),
             "pointer_declarator" => {
                 let (name, _) = self.extract_pointer_declarator(node, source);
-                if name.is_empty() { None } else { Some(name) }
+                if name.is_empty() {
+                    None
+                } else {
+                    Some(name)
+                }
             }
             "reference_declarator" => {
                 let (name, _) = self.extract_reference_declarator(node, source);
-                if name.is_empty() { None } else { Some(name) }
+                if name.is_empty() {
+                    None
+                } else {
+                    Some(name)
+                }
             }
             "function_declarator" => self.extract_function_name(node, source),
             _ => None,
@@ -564,7 +576,8 @@ impl Cpp {
         if let Some(decl) = self.child_by_field(node, "declarator") {
             let decl_text = self.node_text(decl, source).trim().to_string();
             let is_class_keyword = decl_text == "class" || decl_text == "struct";
-            let starts_with_class = decl_text.starts_with("class ") || decl_text.starts_with("struct ");
+            let starts_with_class =
+                decl_text.starts_with("class ") || decl_text.starts_with("struct ");
 
             // For qualified_identifier, check if it contains "class" somewhere
             let qualified_has_class = if decl.kind() == "qualified_identifier" {
@@ -578,7 +591,7 @@ impl Cpp {
                 // The ERROR might be a direct child of function_definition (Case 2)
                 // or a child of the qualified_identifier (Case 3)
                 let error_search_roots = if decl.kind() == "qualified_identifier" {
-                    vec![decl, node]  // Search both qualified_identifier and function_definition
+                    vec![decl, node] // Search both qualified_identifier and function_definition
                 } else {
                     vec![node]
                 };
@@ -630,8 +643,10 @@ impl Cpp {
         if class_name.is_none() {
             if let Some(decl) = self.child_by_field(node, "declarator") {
                 let decl_text = self.node_text(decl, source);
-                if decl_text != "class" && decl_text != "struct"
-                    && !decl_text.contains('(') && !decl_text.contains('{')
+                if decl_text != "class"
+                    && decl_text != "struct"
+                    && !decl_text.contains('(')
+                    && !decl_text.contains('{')
                 {
                     class_name = Some(decl_text.trim().to_string());
                 }
@@ -647,15 +662,14 @@ impl Cpp {
 
         // Check if body looks like a class body (has access specifiers as labels)
         let body = self.child_by_field(node, "body")?;
-        let has_access_specifiers = body.children(&mut body.walk())
-            .any(|c| {
-                if c.kind() == "labeled_statement" {
-                    let text = self.node_text(c, source);
-                    text.contains("public") || text.contains("private") || text.contains("protected")
-                } else {
-                    false
-                }
-            });
+        let has_access_specifiers = body.children(&mut body.walk()).any(|c| {
+            if c.kind() == "labeled_statement" {
+                let text = self.node_text(c, source);
+                text.contains("public") || text.contains("private") || text.contains("protected")
+            } else {
+                false
+            }
+        });
 
         if !has_access_specifiers {
             return None;
@@ -665,16 +679,13 @@ impl Cpp {
         let docstring = self.get_doc_comment(node, source);
 
         // Mark as template class since it had a macro (likely template macro)
-        let decorators = vec![
-            "class".to_string(),
-            format!("macro:{}", type_text),
-        ];
+        let decorators = vec!["class".to_string(), format!("macro:{}", type_text)];
 
         Some(ClassInfo {
             name,
-            bases: Vec::new(),  // Hard to extract from misparsed tree
+            bases: Vec::new(), // Hard to extract from misparsed tree
             docstring,
-            methods: Vec::new(),  // Would need more complex extraction
+            methods: Vec::new(), // Would need more complex extraction
             fields: Vec::new(),
             inner_classes: Vec::new(),
             decorators,
@@ -693,7 +704,8 @@ impl Cpp {
 
         // Extract captures from lambda_capture_specifier
         let mut captures = Vec::new();
-        if let Some(capture_list) = node.children(&mut node.walk())
+        if let Some(capture_list) = node
+            .children(&mut node.walk())
             .find(|c| c.kind() == "lambda_capture_specifier")
         {
             let capture_text = self.node_text(capture_list, source);
@@ -701,22 +713,29 @@ impl Cpp {
         }
 
         // Extract parameters
-        let params = self.child_by_field(node, "declarator")
+        let params = self
+            .child_by_field(node, "declarator")
             .and_then(|d| self.child_by_field(d, "parameters"))
             .map(|p| self.extract_params(p, source))
             .unwrap_or_default();
 
         // Extract return type (trailing return type)
-        let return_type = self.child_by_field(node, "declarator")
-            .and_then(|d| d.children(&mut d.walk())
-                .find(|c| c.kind() == "trailing_return_type"))
+        let return_type = self
+            .child_by_field(node, "declarator")
+            .and_then(|d| {
+                d.children(&mut d.walk())
+                    .find(|c| c.kind() == "trailing_return_type")
+            })
             .map(|t| self.node_text(t, source));
 
         let mut decorators = vec!["lambda".to_string()];
         decorators.extend(captures);
 
         // Check for mutable
-        if node.children(&mut node.walk()).any(|c| c.kind() == "mutable") {
+        if node
+            .children(&mut node.walk())
+            .any(|c| c.kind() == "mutable")
+        {
             decorators.push("mutable".to_string());
         }
 
@@ -736,13 +755,18 @@ impl Cpp {
 
     /// Extract template declaration.
     /// Returns the decorated FunctionInfo or ClassInfo with template parameters.
-    fn extract_template_declaration<'a>(&self, node: Node<'a>, source: &[u8]) -> Option<(Vec<String>, Node<'a>)> {
+    fn extract_template_declaration<'a>(
+        &self,
+        node: Node<'a>,
+        source: &[u8],
+    ) -> Option<(Vec<String>, Node<'a>)> {
         if node.kind() != "template_declaration" {
             return None;
         }
 
         // Extract template parameters
-        let template_params = node.children(&mut node.walk())
+        let template_params = node
+            .children(&mut node.walk())
             .find(|c| c.kind() == "template_parameter_list")
             .map(|p| self.extract_template_params(p, source))
             .unwrap_or_default();
@@ -751,10 +775,16 @@ impl Cpp {
         let template_decorator = format!("template<{}>", template_params.join(", "));
 
         // Find the templated declaration (function_definition, class_specifier, etc.)
-        let inner = node.children(&mut node.walk())
-            .find(|c| matches!(c.kind(),
-                "function_definition" | "declaration" | "class_specifier" |
-                "struct_specifier" | "alias_declaration"));
+        let inner = node.children(&mut node.walk()).find(|c| {
+            matches!(
+                c.kind(),
+                "function_definition"
+                    | "declaration"
+                    | "class_specifier"
+                    | "struct_specifier"
+                    | "alias_declaration"
+            )
+        });
 
         inner.map(move |n| (vec![template_decorator], n))
     }
@@ -766,7 +796,8 @@ impl Cpp {
         }
 
         // Get namespace name (could be qualified like foo::bar)
-        let name = self.child_by_field(node, "name")
+        let name = self
+            .child_by_field(node, "name")
             .map(|n| self.node_text(n, source))
             .unwrap_or_else(|| "<anonymous>".to_string());
 
@@ -785,8 +816,10 @@ impl Cpp {
                             methods.push(func);
                         }
                     }
-                    "class_specifier" | "struct_specifier" | "enum_specifier" |
-                    "namespace_definition" => {
+                    "class_specifier"
+                    | "struct_specifier"
+                    | "enum_specifier"
+                    | "namespace_definition" => {
                         if let Some(class) = self.extract_class(child, source) {
                             inner_classes.push(class);
                         }
@@ -841,7 +874,9 @@ impl Cpp {
                 }
                 "field_declaration" => {
                     // Extract field with current visibility
-                    if let Some(field) = self.extract_single_field(child, source, &current_visibility) {
+                    if let Some(field) =
+                        self.extract_single_field(child, source, &current_visibility)
+                    {
                         fields.push(field);
                     }
                 }
@@ -853,7 +888,12 @@ impl Cpp {
     }
 
     /// Extract a single field declaration.
-    fn extract_single_field(&self, node: Node, source: &[u8], visibility: &str) -> Option<FieldInfo> {
+    fn extract_single_field(
+        &self,
+        node: Node,
+        source: &[u8],
+        visibility: &str,
+    ) -> Option<FieldInfo> {
         let mut type_parts = Vec::new();
         let mut field_name = String::new();
         let mut is_static = false;
@@ -905,7 +945,8 @@ impl Cpp {
                     let mut bf_cursor = child.walk();
                     for bf_child in child.children(&mut bf_cursor) {
                         if bf_child.kind() == "number_literal" {
-                            annotations.push(format!("bitfield:{}", self.node_text(bf_child, source)));
+                            annotations
+                                .push(format!("bitfield:{}", self.node_text(bf_child, source)));
                             break;
                         }
                     }
@@ -937,7 +978,12 @@ impl Cpp {
     }
 
     /// Extract class methods with visibility tracking.
-    fn extract_class_methods(&self, node: Node, source: &[u8], class_name: &str) -> Vec<FunctionInfo> {
+    fn extract_class_methods(
+        &self,
+        node: Node,
+        source: &[u8],
+        class_name: &str,
+    ) -> Vec<FunctionInfo> {
         let mut methods = Vec::new();
         let mut current_visibility = "private".to_string();
 
@@ -971,7 +1017,9 @@ impl Cpp {
                         // Detect constructor/destructor
                         if func.name == class_name {
                             func.decorators.push("constructor".to_string());
-                        } else if func.name == format!("~{}", class_name) || func.name.starts_with('~') {
+                        } else if func.name == format!("~{}", class_name)
+                            || func.name.starts_with('~')
+                        {
                             func.decorators.push("destructor".to_string());
                         }
 
@@ -1010,7 +1058,9 @@ impl Cpp {
     fn extract_cpp_function(&self, node: Node, source: &[u8]) -> Option<FunctionInfo> {
         // Handle template declarations
         if node.kind() == "template_declaration" {
-            if let Some((template_decorators, inner)) = self.extract_template_declaration(node, source) {
+            if let Some((template_decorators, inner)) =
+                self.extract_template_declaration(node, source)
+            {
                 if let Some(mut func) = self.extract_cpp_function(inner, source) {
                     func.decorators.extend(template_decorators);
                     // Update line numbers to template declaration
@@ -1026,7 +1076,8 @@ impl Cpp {
                 let declarator = self.child_by_field(node, "declarator")?;
                 let name = self.extract_function_name(declarator, source)?;
 
-                let params = self.child_by_field(declarator, "parameters")
+                let params = self
+                    .child_by_field(declarator, "parameters")
                     .map(|p| self.extract_params(p, source))
                     .unwrap_or_default();
 
@@ -1108,7 +1159,8 @@ impl Cpp {
                 for child in node.children(&mut cursor) {
                     if child.kind() == "function_declarator" {
                         let name = self.extract_function_name(child, source)?;
-                        let params = self.child_by_field(child, "parameters")
+                        let params = self
+                            .child_by_field(child, "parameters")
                             .map(|p| self.extract_params(p, source))
                             .unwrap_or_default();
                         let return_type = self.extract_return_type(node, source);
@@ -1165,7 +1217,9 @@ impl Cpp {
     fn extract_cpp_class(&self, node: Node, source: &[u8]) -> Option<ClassInfo> {
         // Handle template declarations
         if node.kind() == "template_declaration" {
-            if let Some((template_decorators, inner)) = self.extract_template_declaration(node, source) {
+            if let Some((template_decorators, inner)) =
+                self.extract_template_declaration(node, source)
+            {
                 if let Some(mut class) = self.extract_cpp_class(inner, source) {
                     class.decorators.extend(template_decorators);
                     class.line_number = node.start_position().row + 1;
@@ -1177,7 +1231,8 @@ impl Cpp {
 
         match node.kind() {
             "class_specifier" | "struct_specifier" => {
-                let name = self.child_by_field(node, "name")
+                let name = self
+                    .child_by_field(node, "name")
                     .map(|n| self.node_text(n, source))?;
 
                 let docstring = self.get_doc_comment(node, source);
@@ -1190,8 +1245,10 @@ impl Cpp {
                 if let Some(body) = self.child_by_field(node, "body") {
                     let mut cursor = body.walk();
                     for child in body.children(&mut cursor) {
-                        if child.kind() == "class_specifier" || child.kind() == "struct_specifier"
-                            || child.kind() == "enum_specifier" {
+                        if child.kind() == "class_specifier"
+                            || child.kind() == "struct_specifier"
+                            || child.kind() == "enum_specifier"
+                        {
                             if let Some(inner) = self.extract_cpp_class(child, source) {
                                 inner_classes.push(inner);
                             }
@@ -1226,7 +1283,8 @@ impl Cpp {
                 })
             }
             "enum_specifier" => {
-                let name = self.child_by_field(node, "name")
+                let name = self
+                    .child_by_field(node, "name")
                     .map(|n| self.node_text(n, source))?;
 
                 let docstring = self.get_doc_comment(node, source);
@@ -1281,7 +1339,8 @@ impl Cpp {
             }
             "alias_declaration" => {
                 // using Name = Type;
-                let name = self.child_by_field(node, "name")
+                let name = self
+                    .child_by_field(node, "name")
                     .map(|n| self.node_text(n, source))?;
 
                 let docstring = self.get_doc_comment(node, source);
@@ -1308,7 +1367,7 @@ impl Cpp {
 
     /// Build CFG for a C++ function.
     fn build_cpp_cfg(&self, node: Node, source: &[u8], func_name: &str) -> CFGInfo {
-        let mut blocks = HashMap::new();
+        let mut blocks = FxHashMap::default();
         let mut edges = Vec::new();
         let mut block_id = 0;
         let mut exits = Vec::new();
@@ -1354,10 +1413,10 @@ impl Cpp {
             exits,
             decision_points: 0, // TODO: Calculate actual decision points for C++
             comprehension_decision_points: 0, // C++ doesn't have Python-style comprehensions
-            nested_cfgs: HashMap::new(),      // TODO: Handle lambda expressions as nested CFGs
-            is_async: false,                  // TODO: Track C++20 coroutines
-            await_points: 0,                  // TODO: Track co_await points
-            blocking_calls: Vec::new(),       // TODO: Track blocking calls in coroutines
+            nested_cfgs: FxHashMap::default(),
+            is_async: false,    // TODO: Track C++20 coroutines
+            await_points: 0,    // TODO: Track co_await points
+            blocking_calls: Vec::new(), // TODO: Track blocking calls in coroutines
             ..Default::default()
         }
     }
@@ -1368,7 +1427,7 @@ impl Cpp {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
@@ -1429,26 +1488,54 @@ impl Cpp {
                 }
                 "if_statement" => {
                     last_block = self.process_if_cfg(
-                        child, source, blocks, edges, block_id,
-                        last_block, exits, loop_headers, loop_exits,
+                        child,
+                        source,
+                        blocks,
+                        edges,
+                        block_id,
+                        last_block,
+                        exits,
+                        loop_headers,
+                        loop_exits,
                     );
                 }
                 "while_statement" | "for_statement" | "do_statement" | "for_range_loop" => {
                     last_block = self.process_loop_cfg(
-                        child, source, blocks, edges, block_id,
-                        last_block, exits, loop_headers, loop_exits,
+                        child,
+                        source,
+                        blocks,
+                        edges,
+                        block_id,
+                        last_block,
+                        exits,
+                        loop_headers,
+                        loop_exits,
                     );
                 }
                 "switch_statement" => {
                     last_block = self.process_switch_cfg(
-                        child, source, blocks, edges, block_id,
-                        last_block, exits, loop_headers, loop_exits,
+                        child,
+                        source,
+                        blocks,
+                        edges,
+                        block_id,
+                        last_block,
+                        exits,
+                        loop_headers,
+                        loop_exits,
                     );
                 }
                 "try_statement" => {
                     last_block = self.process_try_cfg(
-                        child, source, blocks, edges, block_id,
-                        last_block, exits, loop_headers, loop_exits,
+                        child,
+                        source,
+                        blocks,
+                        edges,
+                        block_id,
+                        last_block,
+                        exits,
+                        loop_headers,
+                        loop_exits,
                     );
                 }
                 "break_statement" => {
@@ -1463,8 +1550,15 @@ impl Cpp {
                 }
                 "compound_statement" => {
                     last_block = self.process_cfg_block(
-                        child, source, blocks, edges, block_id,
-                        last_block, exits, loop_headers, loop_exits,
+                        child,
+                        source,
+                        blocks,
+                        edges,
+                        block_id,
+                        last_block,
+                        exits,
+                        loop_headers,
+                        loop_exits,
                     );
                 }
                 "declaration" | "expression_statement" | "labeled_statement" => {
@@ -1487,7 +1581,7 @@ impl Cpp {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
@@ -1497,7 +1591,8 @@ impl Cpp {
     ) -> BlockId {
         *block_id += 1;
         let cond_block = BlockId(*block_id);
-        let condition = self.child_by_field(node, "condition")
+        let condition = self
+            .child_by_field(node, "condition")
             .map(|n| self.node_text(n, source))
             .unwrap_or_else(|| "condition".to_string());
 
@@ -1532,12 +1627,23 @@ impl Cpp {
             },
         );
 
-        edges.push(CFGEdge::from_label(cond_block, then_block, Some("true".to_string())));
+        edges.push(CFGEdge::from_label(
+            cond_block,
+            then_block,
+            Some("true".to_string()),
+        ));
 
         let then_end = if let Some(consequence) = self.child_by_field(node, "consequence") {
             self.process_cfg_block(
-                consequence, source, blocks, edges, block_id,
-                then_block, exits, loop_headers, loop_exits,
+                consequence,
+                source,
+                blocks,
+                edges,
+                block_id,
+                then_block,
+                exits,
+                loop_headers,
+                loop_exits,
             )
         } else {
             then_block
@@ -1568,26 +1674,41 @@ impl Cpp {
             blocks.insert(
                 else_block,
                 CFGBlock {
-                id: else_block,
-                label: "else".to_string(),
-                block_type: BlockType::Body,
-                statements: Vec::new(),
-                func_calls: Vec::new(),
-                start_line: alternative.start_position().row + 1,
-                end_line: alternative.start_position().row + 1,
-            },
+                    id: else_block,
+                    label: "else".to_string(),
+                    block_type: BlockType::Body,
+                    statements: Vec::new(),
+                    func_calls: Vec::new(),
+                    start_line: alternative.start_position().row + 1,
+                    end_line: alternative.start_position().row + 1,
+                },
             );
 
-            edges.push(CFGEdge::from_label(cond_block, else_block, Some("false".to_string())));
+            edges.push(CFGEdge::from_label(
+                cond_block,
+                else_block,
+                Some("false".to_string()),
+            ));
 
             let else_end = self.process_cfg_block(
-                alternative, source, blocks, edges, block_id,
-                else_block, exits, loop_headers, loop_exits,
+                alternative,
+                source,
+                blocks,
+                edges,
+                block_id,
+                else_block,
+                exits,
+                loop_headers,
+                loop_exits,
             );
 
             edges.push(CFGEdge::from_label(else_end, merge_block, None));
         } else {
-            edges.push(CFGEdge::from_label(cond_block, merge_block, Some("false".to_string())));
+            edges.push(CFGEdge::from_label(
+                cond_block,
+                merge_block,
+                Some("false".to_string()),
+            ));
         }
 
         merge_block
@@ -1599,7 +1720,7 @@ impl Cpp {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
@@ -1611,7 +1732,8 @@ impl Cpp {
         let header_block = BlockId(*block_id);
         let label = match node.kind() {
             "while_statement" => {
-                let cond = self.child_by_field(node, "condition")
+                let cond = self
+                    .child_by_field(node, "condition")
                     .map(|n| self.node_text(n, source))
                     .unwrap_or_else(|| "condition".to_string());
                 format!("while ({})", cond)
@@ -1659,14 +1781,29 @@ impl Cpp {
         // Process body
         if let Some(body) = self.child_by_field(node, "body") {
             let body_end = self.process_cfg_block(
-                body, source, blocks, edges, block_id,
-                header_block, exits, loop_headers, loop_exits,
+                body,
+                source,
+                blocks,
+                edges,
+                block_id,
+                header_block,
+                exits,
+                loop_headers,
+                loop_exits,
             );
 
-            edges.push(CFGEdge::from_label(body_end, header_block, Some("loop".to_string())));
+            edges.push(CFGEdge::from_label(
+                body_end,
+                header_block,
+                Some("loop".to_string()),
+            ));
         }
 
-        edges.push(CFGEdge::from_label(header_block, exit_block, Some("exit".to_string())));
+        edges.push(CFGEdge::from_label(
+            header_block,
+            exit_block,
+            Some("exit".to_string()),
+        ));
 
         loop_headers.pop();
         loop_exits.pop();
@@ -1680,7 +1817,7 @@ impl Cpp {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
@@ -1690,7 +1827,8 @@ impl Cpp {
     ) -> BlockId {
         *block_id += 1;
         let switch_block = BlockId(*block_id);
-        let condition = self.child_by_field(node, "condition")
+        let condition = self
+            .child_by_field(node, "condition")
             .map(|n| self.node_text(n, source))
             .unwrap_or_else(|| "expr".to_string());
 
@@ -1738,21 +1876,32 @@ impl Cpp {
                     blocks.insert(
                         case_block,
                         CFGBlock {
-                id: case_block,
-                label: "case".to_string(),
-                block_type: BlockType::Body,
-                statements: Vec::new(),
-                func_calls: Vec::new(),
-                start_line: child.start_position().row + 1,
-                end_line: child.end_position().row + 1,
-            },
+                            id: case_block,
+                            label: "case".to_string(),
+                            block_type: BlockType::Body,
+                            statements: Vec::new(),
+                            func_calls: Vec::new(),
+                            start_line: child.start_position().row + 1,
+                            end_line: child.end_position().row + 1,
+                        },
                     );
 
-                    edges.push(CFGEdge::from_label(switch_block, case_block, Some("case".to_string())));
+                    edges.push(CFGEdge::from_label(
+                        switch_block,
+                        case_block,
+                        Some("case".to_string()),
+                    ));
 
                     let case_end = self.process_cfg_block(
-                        child, source, blocks, edges, block_id,
-                        case_block, exits, loop_headers, loop_exits,
+                        child,
+                        source,
+                        blocks,
+                        edges,
+                        block_id,
+                        case_block,
+                        exits,
+                        loop_headers,
+                        loop_exits,
                     );
 
                     edges.push(CFGEdge::from_label(case_end, exit_block, None));
@@ -1770,7 +1919,7 @@ impl Cpp {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         block_id: &mut usize,
         current_block: BlockId,
@@ -1815,8 +1964,15 @@ impl Cpp {
         // Process try body
         if let Some(body) = self.child_by_field(node, "body") {
             let try_end = self.process_cfg_block(
-                body, source, blocks, edges, block_id,
-                try_block, exits, loop_headers, loop_exits,
+                body,
+                source,
+                blocks,
+                edges,
+                block_id,
+                try_block,
+                exits,
+                loop_headers,
+                loop_exits,
             );
             edges.push(CFGEdge::from_label(try_end, exit_block, None));
         }
@@ -1831,22 +1987,33 @@ impl Cpp {
                 blocks.insert(
                     catch_block,
                     CFGBlock {
-                id: catch_block,
-                label: "catch".to_string(),
-                block_type: BlockType::Body,
-                statements: Vec::new(),
-                func_calls: Vec::new(),
-                start_line: child.start_position().row + 1,
-                end_line: child.end_position().row + 1,
-            },
+                        id: catch_block,
+                        label: "catch".to_string(),
+                        block_type: BlockType::Body,
+                        statements: Vec::new(),
+                        func_calls: Vec::new(),
+                        start_line: child.start_position().row + 1,
+                        end_line: child.end_position().row + 1,
+                    },
                 );
 
-                edges.push(CFGEdge::from_label(try_block, catch_block, Some("exception".to_string())));
+                edges.push(CFGEdge::from_label(
+                    try_block,
+                    catch_block,
+                    Some("exception".to_string()),
+                ));
 
                 if let Some(body) = self.child_by_field(child, "body") {
                     let catch_end = self.process_cfg_block(
-                        body, source, blocks, edges, block_id,
-                        catch_block, exits, loop_headers, loop_exits,
+                        body,
+                        source,
+                        blocks,
+                        edges,
+                        block_id,
+                        catch_block,
+                        exits,
+                        loop_headers,
+                        loop_exits,
                     );
                     edges.push(CFGEdge::from_label(catch_end, exit_block, None));
                 }
@@ -1858,8 +2025,8 @@ impl Cpp {
 
     /// Build DFG for a C++ function.
     fn build_cpp_dfg(&self, node: Node, source: &[u8], func_name: &str) -> DFGInfo {
-        let mut definitions: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut uses: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut definitions: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+        let mut uses: FxHashMap<String, Vec<usize>> = FxHashMap::default();
         let mut edges = Vec::new();
 
         // Extract parameters as variable definitions
@@ -1868,7 +2035,8 @@ impl Cpp {
                 let mut cursor = params.walk();
                 for child in params.children(&mut cursor) {
                     if child.kind() == "parameter_declaration" {
-                        if let Some(name_node) = child.children(&mut child.walk())
+                        if let Some(name_node) = child
+                            .children(&mut child.walk())
                             .find(|c| c.kind() == "identifier")
                         {
                             let name = self.node_text(name_node, source);
@@ -1891,7 +2059,13 @@ impl Cpp {
             self.process_dfg_block(body, source, &mut definitions, &mut uses, &mut edges);
         }
 
-        DFGInfo::new(func_name.to_string(), edges, definitions, uses)
+        // Convert FxHashMap to HashMap for DFGInfo API compatibility
+        DFGInfo::new(
+            func_name.to_string(),
+            edges,
+            definitions.into_iter().collect(),
+            uses.into_iter().collect(),
+        )
     }
 
     /// Process a block for DFG construction.
@@ -1899,8 +2073,8 @@ impl Cpp {
         &self,
         node: Node,
         source: &[u8],
-        definitions: &mut HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
         edges: &mut Vec<DataflowEdge>,
     ) {
         let mut cursor = node.walk();
@@ -1911,13 +2085,23 @@ impl Cpp {
                 }
                 "expression_statement" => {
                     if let Some(expr) = child.children(&mut child.walk()).nth(0) {
-                        self.process_dfg_expression(expr, source, definitions, uses, edges, child.start_position().row + 1);
+                        self.process_dfg_expression(
+                            expr,
+                            source,
+                            definitions,
+                            uses,
+                            edges,
+                            child.start_position().row + 1,
+                        );
                     }
                 }
                 "return_statement" => {
                     let line = child.start_position().row + 1;
                     // Collect uses from return expression
-                    if let Some(expr) = child.children(&mut child.walk()).find(|c| c.kind() != "return") {
+                    if let Some(expr) = child
+                        .children(&mut child.walk())
+                        .find(|c| c.kind() != "return")
+                    {
                         self.collect_dfg_uses(expr, source, line, definitions, uses, edges);
                     }
                 }
@@ -1942,8 +2126,8 @@ impl Cpp {
         &self,
         node: Node,
         source: &[u8],
-        definitions: &mut HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
         edges: &mut Vec<DataflowEdge>,
     ) {
         let line = node.start_position().row + 1;
@@ -1960,7 +2144,7 @@ impl Cpp {
                             from_line: line,
                             to_line: line,
                             kind: DataflowKind::Definition,
-                            });
+                        });
 
                         // Check for initializer
                         if let Some(value) = self.child_by_field(child, "value") {
@@ -1976,7 +2160,7 @@ impl Cpp {
                         from_line: line,
                         to_line: line,
                         kind: DataflowKind::Definition,
-                            });
+                    });
                 }
                 _ => {}
             }
@@ -1988,8 +2172,8 @@ impl Cpp {
         &self,
         node: Node,
         source: &[u8],
-        definitions: &mut HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
         edges: &mut Vec<DataflowEdge>,
         line: usize,
     ) {
@@ -2009,7 +2193,7 @@ impl Cpp {
                         from_line: line,
                         to_line: line,
                         kind: DataflowKind::Mutation,
-                            });
+                    });
                 }
             }
             "update_expression" => {
@@ -2024,7 +2208,7 @@ impl Cpp {
                         from_line: line,
                         to_line: line,
                         kind: DataflowKind::Mutation,
-                            });
+                    });
                 }
             }
             _ => {}
@@ -2037,8 +2221,8 @@ impl Cpp {
         node: Node,
         source: &[u8],
         line: usize,
-        definitions: &HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
         edges: &mut Vec<DataflowEdge>,
     ) {
         match node.kind() {
@@ -2054,7 +2238,7 @@ impl Cpp {
                             from_line: def_line,
                             to_line: line,
                             kind: DataflowKind::Use,
-                            });
+                        });
                     }
                 }
             }
@@ -2077,7 +2261,10 @@ impl Cpp {
             match child.kind() {
                 "system_lib_string" => {
                     path = self.node_text(child, source);
-                    path = path.trim_start_matches('<').trim_end_matches('>').to_string();
+                    path = path
+                        .trim_start_matches('<')
+                        .trim_end_matches('>')
+                        .to_string();
                     is_system = true;
                 }
                 "string_literal" => {
@@ -2096,7 +2283,7 @@ impl Cpp {
         Some(ImportInfo {
             module: path,
             names: Vec::new(),
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: !is_system,
             level: if is_system { 0 } else { 1 },
             line_number: node.start_position().row + 1,
@@ -2126,7 +2313,7 @@ impl Cpp {
         Some(ImportInfo {
             module: names.join("::"),
             names: Vec::new(),
-            aliases: HashMap::new(),
+            aliases: FxHashMap::default(),
             is_from: true,
             level: 0,
             line_number: node.start_position().row + 1,
@@ -2245,7 +2432,8 @@ impl Language for Cpp {
             ));
         }
 
-        let func_name = self.child_by_field(node, "declarator")
+        let func_name = self
+            .child_by_field(node, "declarator")
             .and_then(|d| self.extract_function_name(d, source))
             .unwrap_or_else(|| "anonymous".to_string());
 
@@ -2259,7 +2447,8 @@ impl Language for Cpp {
             ));
         }
 
-        let func_name = self.child_by_field(node, "declarator")
+        let func_name = self
+            .child_by_field(node, "declarator")
             .and_then(|d| self.extract_function_name(d, source))
             .unwrap_or_else(|| "anonymous".to_string());
 
@@ -2390,7 +2579,10 @@ public:
                 if let Some(class) = cpp.extract_class(child, source.as_bytes()) {
                     let ctor = class.methods.iter().find(|m| m.name == "MyClass");
                     assert!(ctor.is_some());
-                    assert!(ctor.unwrap().decorators.contains(&"constructor".to_string()));
+                    assert!(ctor
+                        .unwrap()
+                        .decorators
+                        .contains(&"constructor".to_string()));
 
                     let dtor = class.methods.iter().find(|m| m.name.contains('~'));
                     assert!(dtor.is_some());
@@ -2475,7 +2667,13 @@ void free_function() {}
         let mut methods_found = 0;
         let mut free_functions_found = 0;
 
-        fn walk_tree(node: Node, cpp: &Cpp, source: &[u8], methods: &mut i32, free_funcs: &mut i32) {
+        fn walk_tree(
+            node: Node,
+            cpp: &Cpp,
+            source: &[u8],
+            methods: &mut i32,
+            free_funcs: &mut i32,
+        ) {
             if node.kind() == "function_definition" {
                 if let Some(func) = cpp.extract_function(node, source) {
                     if func.is_method {
@@ -2491,7 +2689,13 @@ void free_function() {}
             }
         }
 
-        walk_tree(root, &cpp, source.as_bytes(), &mut methods_found, &mut free_functions_found);
+        walk_tree(
+            root,
+            &cpp,
+            source.as_bytes(),
+            &mut methods_found,
+            &mut free_functions_found,
+        );
 
         assert_eq!(methods_found, 2, "Should find 2 methods");
         assert_eq!(free_functions_found, 1, "Should find 1 free function");

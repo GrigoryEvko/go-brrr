@@ -98,7 +98,9 @@ fn generate_typescript_file_with_calls(num_functions: usize, calls_per_function:
     content.push_str("    private data: Map<string, any> = new Map();\n\n");
 
     for i in 0..num_functions / 3 {
-        content.push_str(&format!("    public async handleRequest{i}(req: any): Promise<any> {{\n"));
+        content.push_str(&format!(
+            "    public async handleRequest{i}(req: any): Promise<any> {{\n"
+        ));
         content.push_str(&format!("        // Handle request variant {i}\n"));
 
         // Add this.method() calls
@@ -129,11 +131,15 @@ fn generate_typescript_file_with_calls(num_functions: usize, calls_per_function:
 
     // Generate regular functions
     for i in 0..num_functions / 3 {
-        content.push_str(&format!("export function transform{i}(input: any): any {{\n"));
+        content.push_str(&format!(
+            "export function transform{i}(input: any): any {{\n"
+        ));
 
         for j in 0..calls_per_function {
             let target = (i + j + 1) % (num_functions / 3);
-            content.push_str(&format!("    const result{j} = transform{target}(input);\n"));
+            content.push_str(&format!(
+                "    const result{j} = transform{target}(input);\n"
+            ));
         }
 
         content.push_str("    return input;\n");
@@ -158,11 +164,15 @@ fn generate_rust_file_with_calls(num_functions: usize, calls_per_function: usize
     content.push_str("impl Processor {\n");
 
     for i in 0..num_functions / 2 {
-        content.push_str(&format!("    pub fn process_{i}(&mut self, input: i64) -> i64 {{\n"));
+        content.push_str(&format!(
+            "    pub fn process_{i}(&mut self, input: i64) -> i64 {{\n"
+        ));
 
         for j in 0..calls_per_function {
             let target = (i + j + 1) % (num_functions / 2);
-            content.push_str(&format!("        let _r{j} = self.process_{target}(input);\n"));
+            content.push_str(&format!(
+                "        let _r{j} = self.process_{target}(input);\n"
+            ));
         }
 
         content.push_str("        input * 2\n");
@@ -256,7 +266,9 @@ fn generate_java_file_with_calls(num_functions: usize, calls_per_function: usize
 
         for j in 0..calls_per_function {
             let target = (i + j + 1) % (num_functions / 3);
-            content.push_str(&format!("        int r{j} = this.processItem{target}(input);\n"));
+            content.push_str(&format!(
+                "        int r{j} = this.processItem{target}(input);\n"
+            ));
         }
 
         content.push_str("        return input * 2;\n");
@@ -269,7 +281,9 @@ fn generate_java_file_with_calls(num_functions: usize, calls_per_function: usize
 
         for j in 0..calls_per_function {
             let target = (i + j + 1) % (num_functions / 3);
-            content.push_str(&format!("        int r{j} = DataService.compute{target}(value);\n"));
+            content.push_str(&format!(
+                "        int r{j} = DataService.compute{target}(value);\n"
+            ));
         }
 
         content.push_str("        return value + 1;\n");
@@ -362,7 +376,12 @@ fn create_synthetic_call_graph(num_functions: usize, edges_per_function: usize) 
     }
 
     // Add some entry points
-    for i in [0, num_functions / 4, num_functions / 2, 3 * num_functions / 4] {
+    for i in [
+        0,
+        num_functions / 4,
+        num_functions / 2,
+        3 * num_functions / 4,
+    ] {
         if i < num_functions {
             graph.edges.push(CallEdge {
                 caller: FunctionRef {
@@ -896,9 +915,21 @@ __all__ = ['ClassA', 'ClassB', 'func_a', 'func_b']
     group.bench_function("python_reexports", |b| {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("__init__.py"), reexport_index).unwrap();
-        fs::write(dir.path().join("module_a.py"), "class ClassA: pass\ndef func_a(): pass").unwrap();
-        fs::write(dir.path().join("module_b.py"), "class ClassB: pass\ndef func_b(): pass").unwrap();
-        fs::write(dir.path().join("module_c.py"), "class ClassC: pass\ndef func_c(): pass").unwrap();
+        fs::write(
+            dir.path().join("module_a.py"),
+            "class ClassA: pass\ndef func_a(): pass",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("module_b.py"),
+            "class ClassB: pass\ndef func_b(): pass",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("module_c.py"),
+            "class ClassC: pass\ndef func_c(): pass",
+        )
+        .unwrap();
         fs::write(
             dir.path().join("consumer.py"),
             "from . import ClassA, func_a\ndef use(): return ClassA()",

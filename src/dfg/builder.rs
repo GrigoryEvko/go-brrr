@@ -20,7 +20,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
 
 use crate::dfg::types::DFGInfo;
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
 use crate::util::format_query_error;
 
@@ -158,9 +158,9 @@ impl DfgBuilder {
 
         // Resolve language: use explicit override or auto-detect from extension
         let lang = match language {
-            Some(lang_name) => registry.get_by_name(lang_name).ok_or_else(|| {
-                BrrrError::UnsupportedLanguage(lang_name.to_string())
-            })?,
+            Some(lang_name) => registry
+                .get_by_name(lang_name)
+                .ok_or_else(|| BrrrError::UnsupportedLanguage(lang_name.to_string()))?,
             None => registry.detect_language(path).ok_or_else(|| {
                 BrrrError::UnsupportedLanguage(
                     path.extension()
@@ -172,8 +172,7 @@ impl DfgBuilder {
         };
 
         // Read and parse the file with extension-aware parser
-        let source = std::fs::read(path)
-            .map_err(|e| BrrrError::io_with_path(e, path))?;
+        let source = std::fs::read(path).map_err(|e| BrrrError::io_with_path(e, path))?;
         let mut parser = lang.parser_for_path(path)?;
         let tree = parser
             .parse(&source, None)
@@ -349,7 +348,12 @@ impl DfgBuilder {
         let ts_lang = tree.language();
 
         let query = Query::new(&ts_lang, class_query_str).map_err(|e| {
-            BrrrError::TreeSitter(format_query_error(lang.name(), "class", class_query_str, &e))
+            BrrrError::TreeSitter(format_query_error(
+                lang.name(),
+                "class",
+                class_query_str,
+                &e,
+            ))
         })?;
 
         let mut cursor = QueryCursor::new();
@@ -884,7 +888,10 @@ def plain_func(x):
             BrrrError::PathTraversal { .. } => {}
             BrrrError::Io(_) => {} // Also acceptable - path doesn't exist
             BrrrError::UnsupportedLanguage(_) => {} // File has no recognized extension
-            e => panic!("Expected PathTraversal, Io, or UnsupportedLanguage error, got: {:?}", e),
+            e => panic!(
+                "Expected PathTraversal, Io, or UnsupportedLanguage error, got: {:?}",
+                e
+            ),
         }
     }
 
@@ -910,6 +917,9 @@ def test():
     return 42
 "#;
         let result = DfgBuilder::extract_from_source(source, "python", "test");
-        assert!(result.is_ok(), "extract_from_source should work with string input");
+        assert!(
+            result.is_ok(),
+            "extract_from_source should work with string input"
+        );
     }
 }

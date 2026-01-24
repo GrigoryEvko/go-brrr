@@ -52,8 +52,9 @@ use tree_sitter::{Node, Tree};
 
 use crate::ast::AstExtractor;
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
+use crate::metrics::common::{calculate_median_u32, MetricStats};
 
 // =============================================================================
 // TYPES
@@ -318,11 +319,7 @@ impl NestingStats {
 
         let mut sorted = depths.clone();
         sorted.sort_unstable();
-        let median = if total % 2 == 0 {
-            (sorted[total / 2 - 1] + sorted[total / 2]) / 2
-        } else {
-            sorted[total / 2]
-        };
+        let median = calculate_median_u32(&sorted);
 
         let mut risk_distribution = HashMap::new();
         for r in results {
@@ -342,6 +339,29 @@ impl NestingStats {
             risk_distribution,
             functions_over_threshold,
         }
+    }
+}
+
+impl MetricStats for NestingStats {
+    fn count(&self) -> usize {
+        self.total_functions
+    }
+
+    fn total(&self) -> f64 {
+        // Total is sum of all max_depths; can be approximated from average * count
+        self.average_max_depth * self.total_functions as f64
+    }
+
+    fn average(&self) -> f64 {
+        self.average_max_depth
+    }
+
+    fn max(&self) -> f64 {
+        f64::from(self.global_max_depth)
+    }
+
+    fn min(&self) -> f64 {
+        f64::from(self.min_max_depth)
     }
 }
 
@@ -429,11 +449,7 @@ impl<'a> NestingCalculator<'a> {
 
         // Record deep location if above threshold
         if self.current_depth > self.threshold {
-            let stack: Vec<String> = self
-                .construct_stack
-                .iter()
-                .map(|c| c.to_string())
-                .collect();
+            let stack: Vec<String> = self.construct_stack.iter().map(|c| c.to_string()).collect();
 
             self.deep_locations.push(DeepNesting {
                 line,
@@ -516,7 +532,9 @@ impl<'a> NestingCalculator<'a> {
             "with_statement" => Some(NestingConstruct::With),
             "match_statement" => Some(NestingConstruct::Switch),
             "lambda" => Some(NestingConstruct::Lambda),
-            "list_comprehension" | "dictionary_comprehension" | "set_comprehension"
+            "list_comprehension"
+            | "dictionary_comprehension"
+            | "set_comprehension"
             | "generator_expression" => Some(NestingConstruct::Comprehension),
             _ => None,
         }
@@ -888,9 +906,7 @@ pub fn analyze_file_nesting(
     });
 
     let registry = LanguageRegistry::global();
-    let language = registry
-        .detect_language(file)
-        .map(|l| l.name().to_string());
+    let language = registry.detect_language(file).map(|l| l.name().to_string());
 
     Ok(NestingAnalysis {
         path: file.to_path_buf(),
@@ -1078,7 +1094,13 @@ fn analyze_function_nesting(
     threshold: u32,
 ) -> NestingMetrics {
     // Find the function node
-    let func_node = find_function_node(tree.root_node(), function_name, start_line, source, language);
+    let func_node = find_function_node(
+        tree.root_node(),
+        function_name,
+        start_line,
+        source,
+        language,
+    );
 
     if let Some(node) = func_node {
         let mut calculator = NestingCalculator::new(language, threshold);
@@ -1193,9 +1215,11 @@ fn find_function_node<'a>(
 
     let function_kinds: &[&str] = match language {
         "python" => &["function_definition"],
-        "typescript" | "javascript" | "tsx" | "jsx" => {
-            &["function_declaration", "method_definition", "arrow_function"]
-        }
+        "typescript" | "javascript" | "tsx" | "jsx" => &[
+            "function_declaration",
+            "method_definition",
+            "arrow_function",
+        ],
         "rust" => &["function_item"],
         "go" => &["function_declaration", "method_declaration"],
         "java" => &["method_declaration", "constructor_declaration"],
@@ -1218,9 +1242,8 @@ fn find_node_recursive<'a>(
 
     if function_kinds.contains(&node.kind()) && node_line == target_line {
         if let Some(name_node) = node.child_by_field_name("name") {
-            let name =
-                std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
-                    .unwrap_or("");
+            let name = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
+                .unwrap_or("");
             if name == target_name {
                 return Some(node);
             }
@@ -1263,12 +1286,21 @@ mod tests {
     fn test_depth_level_classification() {
         assert_eq!(NestingDepthLevel::from_depth(0), NestingDepthLevel::Good);
         assert_eq!(NestingDepthLevel::from_depth(3), NestingDepthLevel::Good);
-        assert_eq!(NestingDepthLevel::from_depth(4), NestingDepthLevel::Acceptable);
-        assert_eq!(NestingDepthLevel::from_depth(5), NestingDepthLevel::Acceptable);
+        assert_eq!(
+            NestingDepthLevel::from_depth(4),
+            NestingDepthLevel::Acceptable
+        );
+        assert_eq!(
+            NestingDepthLevel::from_depth(5),
+            NestingDepthLevel::Acceptable
+        );
         assert_eq!(NestingDepthLevel::from_depth(6), NestingDepthLevel::Complex);
         assert_eq!(NestingDepthLevel::from_depth(7), NestingDepthLevel::Complex);
         assert_eq!(NestingDepthLevel::from_depth(8), NestingDepthLevel::Severe);
-        assert_eq!(NestingDepthLevel::from_depth(100), NestingDepthLevel::Severe);
+        assert_eq!(
+            NestingDepthLevel::from_depth(100),
+            NestingDepthLevel::Severe
+        );
     }
 
     #[test]

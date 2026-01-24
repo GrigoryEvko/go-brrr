@@ -40,11 +40,9 @@ pub fn get_rust_sinks() -> SinkRegistry {
 fn add_sql_sinks(registry: &mut SinkRegistry) {
     // sqlx - the most popular async SQL crate
     registry.add(Sink::sql("sqlx::query(", "sqlx query() with string").with_severity(9));
+    registry.add(Sink::sql("sqlx::query_as(", "sqlx query_as() with string").with_severity(9));
     registry
-        .add(Sink::sql("sqlx::query_as(", "sqlx query_as() with string").with_severity(9));
-    registry.add(
-        Sink::sql("sqlx::query_scalar(", "sqlx query_scalar() with string").with_severity(9),
-    );
+        .add(Sink::sql("sqlx::query_scalar(", "sqlx query_scalar() with string").with_severity(9));
     registry.add(Sink::sql(".execute(", "sqlx execute()"));
     registry.add(Sink::sql(".fetch_one(", "sqlx fetch_one()"));
     registry.add(Sink::sql(".fetch_all(", "sqlx fetch_all()"));
@@ -53,21 +51,16 @@ fn add_sql_sinks(registry: &mut SinkRegistry) {
     // Note: sqlx::query!() and sqlx::query_as!() are compile-time checked and safe
 
     // diesel
-    registry.add(
-        Sink::sql("diesel::sql_query(", "diesel sql_query() raw SQL").with_severity(9),
-    );
+    registry.add(Sink::sql("diesel::sql_query(", "diesel sql_query() raw SQL").with_severity(9));
     registry.add(Sink::sql("diesel::dsl::sql(", "diesel dsl::sql()").with_severity(8));
     registry.add(Sink::sql(".execute(", "diesel execute()"));
     registry.add(Sink::sql(".load::<", "diesel load()"));
     registry.add(Sink::sql(".get_result(", "diesel get_result()"));
 
     // sea-orm
-    registry.add(
-        Sink::sql("Statement::from_string(", "sea-orm raw SQL statement").with_severity(9),
-    );
-    registry.add(
-        Sink::sql("Statement::from_sql_and_values(", "sea-orm raw SQL").with_severity(9),
-    );
+    registry
+        .add(Sink::sql("Statement::from_string(", "sea-orm raw SQL statement").with_severity(9));
+    registry.add(Sink::sql("Statement::from_sql_and_values(", "sea-orm raw SQL").with_severity(9));
     registry.add(
         Sink::sql("db.execute(Statement::from_string", "sea-orm execute raw").with_severity(9),
     );
@@ -83,7 +76,10 @@ fn add_sql_sinks(registry: &mut SinkRegistry) {
     registry.add(Sink::sql("client.query(", "tokio-postgres query()"));
     registry.add(Sink::sql("client.query_one(", "tokio-postgres query_one()"));
     registry.add(Sink::sql("client.execute(", "tokio-postgres execute()"));
-    registry.add(Sink::sql("client.simple_query(", "tokio-postgres simple_query()"));
+    registry.add(Sink::sql(
+        "client.simple_query(",
+        "tokio-postgres simple_query()",
+    ));
 
     // mysql_async
     registry.add(Sink::sql("conn.query(", "mysql_async query()"));
@@ -97,8 +93,14 @@ fn add_sql_sinks(registry: &mut SinkRegistry) {
 
 fn add_command_sinks(registry: &mut SinkRegistry) {
     // std::process::Command
-    registry.add(Sink::command("Command::new(", "std::process::Command::new()"));
-    registry.add(Sink::command("std::process::Command::new(", "std::process::Command::new()"));
+    registry.add(Sink::command(
+        "Command::new(",
+        "std::process::Command::new()",
+    ));
+    registry.add(Sink::command(
+        "std::process::Command::new(",
+        "std::process::Command::new()",
+    ));
     registry.add(Sink::command(".arg(", "Command.arg()").with_severity(7));
     registry.add(Sink::command(".args(", "Command.args()").with_severity(7));
     registry.add(Sink::command(".env(", "Command.env()").with_severity(5));
@@ -125,24 +127,37 @@ fn add_command_sinks(registry: &mut SinkRegistry) {
 fn add_path_sinks(registry: &mut SinkRegistry) {
     // std::fs operations
     registry.add(Sink::path("std::fs::read(", "std::fs::read()"));
-    registry.add(Sink::path("std::fs::read_to_string(", "std::fs::read_to_string()"));
+    registry.add(Sink::path(
+        "std::fs::read_to_string(",
+        "std::fs::read_to_string()",
+    ));
     registry.add(Sink::path("std::fs::write(", "std::fs::write()"));
-    registry.add(Sink::path("std::fs::remove_file(", "std::fs::remove_file()"));
+    registry.add(Sink::path(
+        "std::fs::remove_file(",
+        "std::fs::remove_file()",
+    ));
     registry.add(Sink::path("std::fs::remove_dir(", "std::fs::remove_dir()"));
-    registry.add(
-        Sink::path("std::fs::remove_dir_all(", "std::fs::remove_dir_all()").with_severity(9),
-    );
-    registry.add(Sink::path("std::fs::create_dir(", "std::fs::create_dir()"));
     registry
-        .add(Sink::path("std::fs::create_dir_all(", "std::fs::create_dir_all()"));
+        .add(Sink::path("std::fs::remove_dir_all(", "std::fs::remove_dir_all()").with_severity(9));
+    registry.add(Sink::path("std::fs::create_dir(", "std::fs::create_dir()"));
+    registry.add(Sink::path(
+        "std::fs::create_dir_all(",
+        "std::fs::create_dir_all()",
+    ));
     registry.add(Sink::path("std::fs::rename(", "std::fs::rename()"));
     registry.add(Sink::path("std::fs::copy(", "std::fs::copy()"));
     registry.add(Sink::path("std::fs::hard_link(", "std::fs::hard_link()"));
     registry.add(Sink::path("std::fs::read_link(", "std::fs::read_link()"));
     registry.add(Sink::path("std::fs::metadata(", "std::fs::metadata()"));
-    registry.add(Sink::path("std::fs::symlink_metadata(", "std::fs::symlink_metadata()"));
+    registry.add(Sink::path(
+        "std::fs::symlink_metadata(",
+        "std::fs::symlink_metadata()",
+    ));
     registry.add(Sink::path("std::fs::read_dir(", "std::fs::read_dir()"));
-    registry.add(Sink::path("std::fs::canonicalize(", "std::fs::canonicalize()"));
+    registry.add(Sink::path(
+        "std::fs::canonicalize(",
+        "std::fs::canonicalize()",
+    ));
 
     // Short forms (after use std::fs::*;)
     registry.add(Sink::path("fs::read(", "fs::read()"));
@@ -158,14 +173,26 @@ fn add_path_sinks(registry: &mut SinkRegistry) {
 
     // tokio::fs (async versions)
     registry.add(Sink::path("tokio::fs::read(", "tokio::fs::read()"));
-    registry.add(Sink::path("tokio::fs::read_to_string(", "tokio::fs::read_to_string()"));
+    registry.add(Sink::path(
+        "tokio::fs::read_to_string(",
+        "tokio::fs::read_to_string()",
+    ));
     registry.add(Sink::path("tokio::fs::write(", "tokio::fs::write()"));
-    registry.add(Sink::path("tokio::fs::remove_file(", "tokio::fs::remove_file()"));
+    registry.add(Sink::path(
+        "tokio::fs::remove_file(",
+        "tokio::fs::remove_file()",
+    ));
     registry.add(
         Sink::path("tokio::fs::remove_dir_all(", "tokio::fs::remove_dir_all()").with_severity(9),
     );
-    registry.add(Sink::path("tokio::fs::File::open(", "tokio::fs::File::open()"));
-    registry.add(Sink::path("tokio::fs::File::create(", "tokio::fs::File::create()"));
+    registry.add(Sink::path(
+        "tokio::fs::File::open(",
+        "tokio::fs::File::open()",
+    ));
+    registry.add(Sink::path(
+        "tokio::fs::File::create(",
+        "tokio::fs::File::create()",
+    ));
 
     // Path construction (lower severity)
     registry.add(Sink::path("Path::new(", "std::path::Path::new()").with_severity(4));
@@ -205,7 +232,10 @@ fn add_ssrf_sinks(registry: &mut SinkRegistry) {
 
     // hyper
     registry.add(Sink::ssrf("hyper::Client::new(", "hyper Client"));
-    registry.add(Sink::ssrf("hyper::Request::builder(", "hyper Request builder"));
+    registry.add(Sink::ssrf(
+        "hyper::Request::builder(",
+        "hyper Request builder",
+    ));
     registry.add(Sink::ssrf("client.request(", "hyper client.request()"));
 
     // ureq (blocking HTTP client)
@@ -228,7 +258,10 @@ fn add_ssrf_sinks(registry: &mut SinkRegistry) {
     registry.add(Sink::ssrf("UnixStream::connect(", "UnixStream::connect()"));
 
     // tokio::net
-    registry.add(Sink::ssrf("tokio::net::TcpStream::connect(", "tokio TcpStream::connect()"));
+    registry.add(Sink::ssrf(
+        "tokio::net::TcpStream::connect(",
+        "tokio TcpStream::connect()",
+    ));
 }
 
 // =============================================================================
@@ -237,52 +270,44 @@ fn add_ssrf_sinks(registry: &mut SinkRegistry) {
 
 fn add_deserialization_sinks(registry: &mut SinkRegistry) {
     // serde_json (generally safe, but included for completeness)
-    registry.add(
-        Sink::new("serde_json::from_str(", SinkCategory::Deserialization).with_severity(4),
-    );
-    registry.add(
-        Sink::new("serde_json::from_slice(", SinkCategory::Deserialization).with_severity(4),
-    );
-    registry.add(
-        Sink::new("serde_json::from_reader(", SinkCategory::Deserialization).with_severity(4),
-    );
+    registry
+        .add(Sink::new("serde_json::from_str(", SinkCategory::Deserialization).with_severity(4));
+    registry
+        .add(Sink::new("serde_json::from_slice(", SinkCategory::Deserialization).with_severity(4));
+    registry
+        .add(Sink::new("serde_json::from_reader(", SinkCategory::Deserialization).with_severity(4));
 
     // serde_yaml
-    registry.add(
-        Sink::new("serde_yaml::from_str(", SinkCategory::Deserialization).with_severity(5),
-    );
-    registry.add(
-        Sink::new("serde_yaml::from_slice(", SinkCategory::Deserialization).with_severity(5),
-    );
-    registry.add(
-        Sink::new("serde_yaml::from_reader(", SinkCategory::Deserialization).with_severity(5),
-    );
+    registry
+        .add(Sink::new("serde_yaml::from_str(", SinkCategory::Deserialization).with_severity(5));
+    registry
+        .add(Sink::new("serde_yaml::from_slice(", SinkCategory::Deserialization).with_severity(5));
+    registry
+        .add(Sink::new("serde_yaml::from_reader(", SinkCategory::Deserialization).with_severity(5));
 
     // toml
-    registry.add(
-        Sink::new("toml::from_str(", SinkCategory::Deserialization).with_severity(4),
-    );
+    registry.add(Sink::new("toml::from_str(", SinkCategory::Deserialization).with_severity(4));
 
     // bincode (binary format)
-    registry.add(
-        Sink::new("bincode::deserialize(", SinkCategory::Deserialization).with_severity(6),
-    );
+    registry
+        .add(Sink::new("bincode::deserialize(", SinkCategory::Deserialization).with_severity(6));
     registry.add(
         Sink::new("bincode::deserialize_from(", SinkCategory::Deserialization).with_severity(6),
     );
 
     // postcard (embedded binary format)
-    registry.add(
-        Sink::new("postcard::from_bytes(", SinkCategory::Deserialization).with_severity(5),
-    );
+    registry
+        .add(Sink::new("postcard::from_bytes(", SinkCategory::Deserialization).with_severity(5));
 
     // rmp-serde (MessagePack)
+    registry
+        .add(Sink::new("rmp_serde::from_slice(", SinkCategory::Deserialization).with_severity(5));
     registry.add(
-        Sink::new("rmp_serde::from_slice(", SinkCategory::Deserialization).with_severity(5),
-    );
-    registry.add(
-        Sink::new("rmp_serde::decode::from_read(", SinkCategory::Deserialization)
-            .with_severity(5),
+        Sink::new(
+            "rmp_serde::decode::from_read(",
+            SinkCategory::Deserialization,
+        )
+        .with_severity(5),
     );
 
     // ciborium (CBOR)
@@ -291,9 +316,8 @@ fn add_deserialization_sinks(registry: &mut SinkRegistry) {
     );
 
     // quick-xml
-    registry.add(
-        Sink::new("quick_xml::de::from_str(", SinkCategory::Deserialization).with_severity(6),
-    );
+    registry
+        .add(Sink::new("quick_xml::de::from_str(", SinkCategory::Deserialization).with_severity(6));
     registry.add(
         Sink::new("quick_xml::de::from_reader(", SinkCategory::Deserialization).with_severity(6),
     );
@@ -305,50 +329,38 @@ fn add_deserialization_sinks(registry: &mut SinkRegistry) {
 
 fn add_template_sinks(registry: &mut SinkRegistry) {
     // tera
-    registry.add(
-        Sink::new("Tera::new(", SinkCategory::TemplateInjection).with_severity(6),
-    );
-    registry.add(
-        Sink::new("tera.render(", SinkCategory::TemplateInjection).with_severity(5),
-    );
-    registry.add(
-        Sink::new("tera.render_str(", SinkCategory::TemplateInjection).with_severity(8),
-    );
-    registry.add(
-        Sink::new("Tera::one_off(", SinkCategory::TemplateInjection).with_severity(8),
-    );
+    registry.add(Sink::new("Tera::new(", SinkCategory::TemplateInjection).with_severity(6));
+    registry.add(Sink::new("tera.render(", SinkCategory::TemplateInjection).with_severity(5));
+    registry.add(Sink::new("tera.render_str(", SinkCategory::TemplateInjection).with_severity(8));
+    registry.add(Sink::new("Tera::one_off(", SinkCategory::TemplateInjection).with_severity(8));
 
     // handlebars
     registry.add(
-        Sink::new("handlebars.render_template(", SinkCategory::TemplateInjection)
-            .with_severity(8),
+        Sink::new(
+            "handlebars.render_template(",
+            SinkCategory::TemplateInjection,
+        )
+        .with_severity(8),
     );
-    registry.add(
-        Sink::new("handlebars.render(", SinkCategory::TemplateInjection).with_severity(5),
-    );
-    registry.add(
-        Sink::new("Handlebars::new(", SinkCategory::TemplateInjection).with_severity(5),
-    );
+    registry.add(Sink::new("handlebars.render(", SinkCategory::TemplateInjection).with_severity(5));
+    registry.add(Sink::new("Handlebars::new(", SinkCategory::TemplateInjection).with_severity(5));
 
     // askama (compile-time templates - generally safe)
     // Not included as it's compile-time checked
 
     // minijinja
-    registry.add(
-        Sink::new("Environment::new(", SinkCategory::TemplateInjection).with_severity(5),
-    );
-    registry.add(
-        Sink::new("env.render_str(", SinkCategory::TemplateInjection).with_severity(8),
-    );
+    registry.add(Sink::new("Environment::new(", SinkCategory::TemplateInjection).with_severity(5));
+    registry.add(Sink::new("env.render_str(", SinkCategory::TemplateInjection).with_severity(8));
 
     // liquid
     registry.add(
-        Sink::new("liquid::ParserBuilder::new(", SinkCategory::TemplateInjection)
-            .with_severity(5),
+        Sink::new(
+            "liquid::ParserBuilder::new(",
+            SinkCategory::TemplateInjection,
+        )
+        .with_severity(5),
     );
-    registry.add(
-        Sink::new("template.render(", SinkCategory::TemplateInjection).with_severity(5),
-    );
+    registry.add(Sink::new("template.render(", SinkCategory::TemplateInjection).with_severity(5));
 }
 
 // =============================================================================
@@ -357,71 +369,50 @@ fn add_template_sinks(registry: &mut SinkRegistry) {
 
 fn add_unsafe_sinks(registry: &mut SinkRegistry) {
     // std::ptr operations
-    registry.add(
-        Sink::new("std::ptr::read(", SinkCategory::MemoryCorruption).with_severity(9),
-    );
+    registry.add(Sink::new("std::ptr::read(", SinkCategory::MemoryCorruption).with_severity(9));
     registry.add(
         Sink::new("std::ptr::read_unaligned(", SinkCategory::MemoryCorruption).with_severity(9),
     );
     registry.add(
         Sink::new("std::ptr::read_volatile(", SinkCategory::MemoryCorruption).with_severity(9),
     );
+    registry.add(Sink::new("std::ptr::write(", SinkCategory::MemoryCorruption).with_severity(9));
     registry.add(
-        Sink::new("std::ptr::write(", SinkCategory::MemoryCorruption).with_severity(9),
-    );
-    registry.add(
-        Sink::new("std::ptr::write_unaligned(", SinkCategory::MemoryCorruption)
-            .with_severity(9),
+        Sink::new("std::ptr::write_unaligned(", SinkCategory::MemoryCorruption).with_severity(9),
     );
     registry.add(
         Sink::new("std::ptr::write_volatile(", SinkCategory::MemoryCorruption).with_severity(9),
     );
+    registry.add(Sink::new("std::ptr::copy(", SinkCategory::MemoryCorruption).with_severity(9));
     registry.add(
-        Sink::new("std::ptr::copy(", SinkCategory::MemoryCorruption).with_severity(9),
+        Sink::new(
+            "std::ptr::copy_nonoverlapping(",
+            SinkCategory::MemoryCorruption,
+        )
+        .with_severity(9),
     );
-    registry.add(
-        Sink::new("std::ptr::copy_nonoverlapping(", SinkCategory::MemoryCorruption)
-            .with_severity(9),
-    );
-    registry.add(
-        Sink::new("std::ptr::swap(", SinkCategory::MemoryCorruption).with_severity(8),
-    );
-    registry.add(
-        Sink::new("std::ptr::replace(", SinkCategory::MemoryCorruption).with_severity(8),
-    );
+    registry.add(Sink::new("std::ptr::swap(", SinkCategory::MemoryCorruption).with_severity(8));
+    registry.add(Sink::new("std::ptr::replace(", SinkCategory::MemoryCorruption).with_severity(8));
 
     // Short forms
-    registry.add(
-        Sink::new("ptr::read(", SinkCategory::MemoryCorruption).with_severity(9),
-    );
-    registry.add(
-        Sink::new("ptr::write(", SinkCategory::MemoryCorruption).with_severity(9),
-    );
+    registry.add(Sink::new("ptr::read(", SinkCategory::MemoryCorruption).with_severity(9));
+    registry.add(Sink::new("ptr::write(", SinkCategory::MemoryCorruption).with_severity(9));
 
     // std::mem operations
-    registry.add(
-        Sink::new("std::mem::transmute(", SinkCategory::MemoryCorruption).with_severity(10),
-    );
+    registry
+        .add(Sink::new("std::mem::transmute(", SinkCategory::MemoryCorruption).with_severity(10));
     registry.add(
         Sink::new("std::mem::transmute_copy(", SinkCategory::MemoryCorruption).with_severity(10),
     );
-    registry.add(
-        Sink::new("std::mem::zeroed(", SinkCategory::MemoryCorruption).with_severity(8),
-    );
+    registry.add(Sink::new("std::mem::zeroed(", SinkCategory::MemoryCorruption).with_severity(8));
     registry.add(
         Sink::new("std::mem::uninitialized(", SinkCategory::MemoryCorruption).with_severity(10),
     );
-    registry.add(
-        Sink::new("std::mem::forget(", SinkCategory::MemoryCorruption).with_severity(7),
-    );
+    registry.add(Sink::new("std::mem::forget(", SinkCategory::MemoryCorruption).with_severity(7));
 
     // Short forms
-    registry.add(
-        Sink::new("mem::transmute(", SinkCategory::MemoryCorruption).with_severity(10),
-    );
-    registry.add(
-        Sink::new("mem::zeroed(", SinkCategory::MemoryCorruption).with_severity(8),
-    );
+    registry.add(Sink::new("mem::transmute(", SinkCategory::MemoryCorruption).with_severity(10));
+    registry.add(Sink::new("mem::zeroed(", SinkCategory::MemoryCorruption).with_severity(8));
 
     // Raw pointer operations
     registry.add(
@@ -446,23 +437,17 @@ fn add_unsafe_sinks(registry: &mut SinkRegistry) {
     );
 
     // Box/Vec from raw
-    registry.add(
-        Sink::new("Box::from_raw(", SinkCategory::MemoryCorruption).with_severity(9),
-    );
-    registry.add(
-        Sink::new("Vec::from_raw_parts(", SinkCategory::MemoryCorruption).with_severity(9),
-    );
-    registry.add(
-        Sink::new("String::from_raw_parts(", SinkCategory::MemoryCorruption).with_severity(9),
-    );
+    registry.add(Sink::new("Box::from_raw(", SinkCategory::MemoryCorruption).with_severity(9));
+    registry
+        .add(Sink::new("Vec::from_raw_parts(", SinkCategory::MemoryCorruption).with_severity(9));
+    registry
+        .add(Sink::new("String::from_raw_parts(", SinkCategory::MemoryCorruption).with_severity(9));
 
     // slice::from_raw_parts
+    registry
+        .add(Sink::new("slice::from_raw_parts(", SinkCategory::MemoryCorruption).with_severity(9));
     registry.add(
-        Sink::new("slice::from_raw_parts(", SinkCategory::MemoryCorruption).with_severity(9),
-    );
-    registry.add(
-        Sink::new("slice::from_raw_parts_mut(", SinkCategory::MemoryCorruption)
-            .with_severity(9),
+        Sink::new("slice::from_raw_parts_mut(", SinkCategory::MemoryCorruption).with_severity(9),
     );
 }
 
@@ -472,50 +457,27 @@ fn add_unsafe_sinks(registry: &mut SinkRegistry) {
 
 fn add_web_sinks(registry: &mut SinkRegistry) {
     // Actix-web XSS (HTML responses)
-    registry.add(
-        Sink::new("HttpResponse::Ok().body(", SinkCategory::XSS)
-            .with_severity(5),
-    );
-    registry.add(
-        Sink::new("HttpResponse::build(", SinkCategory::XSS)
-            .with_severity(5),
-    );
-    registry.add(
-        Sink::new("web::Html(", SinkCategory::XSS)
-            .with_severity(6),
-    );
+    registry.add(Sink::new("HttpResponse::Ok().body(", SinkCategory::XSS).with_severity(5));
+    registry.add(Sink::new("HttpResponse::build(", SinkCategory::XSS).with_severity(5));
+    registry.add(Sink::new("web::Html(", SinkCategory::XSS).with_severity(6));
 
     // Axum
-    registry.add(
-        Sink::new("axum::response::Html(", SinkCategory::XSS)
-            .with_severity(6),
-    );
-    registry.add(
-        Sink::new("Response::builder(", SinkCategory::XSS)
-            .with_severity(5),
-    );
+    registry.add(Sink::new("axum::response::Html(", SinkCategory::XSS).with_severity(6));
+    registry.add(Sink::new("Response::builder(", SinkCategory::XSS).with_severity(5));
 
     // Rocket
-    registry.add(
-        Sink::new("rocket::response::content::RawHtml(", SinkCategory::XSS)
-            .with_severity(7),
-    );
+    registry
+        .add(Sink::new("rocket::response::content::RawHtml(", SinkCategory::XSS).with_severity(7));
 
     // Warp
+    registry.add(Sink::new("warp::reply::html(", SinkCategory::XSS).with_severity(6));
     registry.add(
-        Sink::new("warp::reply::html(", SinkCategory::XSS)
-            .with_severity(6),
-    );
-    registry.add(
-        Sink::new("warp::reply::with_header(", SinkCategory::HeaderInjection)
-            .with_severity(5),
+        Sink::new("warp::reply::with_header(", SinkCategory::HeaderInjection).with_severity(5),
     );
 
     // Redirect sinks
-    registry.add(
-        Sink::new("Redirect::to(", SinkCategory::OpenRedirect)
-            .with_dangerous_params(vec![0]),
-    );
+    registry
+        .add(Sink::new("Redirect::to(", SinkCategory::OpenRedirect).with_dangerous_params(vec![0]));
     registry.add(
         Sink::new("Redirect::permanent(", SinkCategory::OpenRedirect)
             .with_dangerous_params(vec![0]),
@@ -526,14 +488,8 @@ fn add_web_sinks(registry: &mut SinkRegistry) {
     );
 
     // Header sinks
-    registry.add(
-        Sink::new(".insert_header(", SinkCategory::HeaderInjection)
-            .with_severity(5),
-    );
-    registry.add(
-        Sink::new(".append_header(", SinkCategory::HeaderInjection)
-            .with_severity(5),
-    );
+    registry.add(Sink::new(".insert_header(", SinkCategory::HeaderInjection).with_severity(5));
+    registry.add(Sink::new(".append_header(", SinkCategory::HeaderInjection).with_severity(5));
 }
 
 // =============================================================================

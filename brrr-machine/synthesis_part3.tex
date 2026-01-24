@@ -1,0 +1,1754 @@
+%==================================================
+% PART III: PROGRAM REPRESENTATION
+% Converted from synthesis.md lines 2547-3847
+%==================================================
+\part{Program Representation}
+
+\chapter{The Code Property Graph}
+\label{ch:cpg}
+
+\noindent\textbf{Foundational Papers}: Yamaguchi et al.\ 2014, Ferrante et al.\ 1987, Horwitz et al.\ 1990, Weiser 1984
+
+\medskip
+
+The Code Property Graph (CPG) is the central data structure of the brrr-machine. It unifies multiple program representations into a single queryable graph, enabling all analyses to be expressed as graph traversals.
+
+%--------------------------------------------------
+\section{Why CPG?}
+\label{sec:cpg-motivation}
+
+\begin{tcolorbox}[colback=gray!5, colframe=gray!50, boxrule=0.3pt, title=The Problem with Separate Representations]
+Traditional analyzers maintain separate data structures:
+\begin{itemize}
+  \item AST for syntactic queries
+  \item CFG for control flow
+  \item Call graph for interprocedural analysis
+  \item Def-use chains for data flow
+\end{itemize}
+This leads to:
+\begin{itemize}
+  \item Redundant storage
+  \item Complex synchronization
+  \item Difficult cross-cutting queries
+\end{itemize}
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=blue!3, colframe=blue!40, boxrule=0.3pt, title=The CPG Solution (Yamaguchi 2014)]
+Merge all representations into \textbf{one} graph:
+\begin{itemize}
+  \item Nodes are shared (a statement is both AST node and CFG node)
+  \item Edges are labeled by type (\texttt{AST\_CHILD}, \texttt{CFG\_NEXT}, \texttt{DATA\_DEP}, etc.)
+  \item Queries mix edge types freely
+\end{itemize}
+\textbf{Benefits}:
+\begin{itemize}
+  \item Single data structure to maintain
+  \item Natural expression of complex queries
+  \item Efficient traversals via graph algorithms
+\end{itemize}
+\end{tcolorbox}
+
+%--------------------------------------------------
+\section{CPG Components}
+\label{sec:cpg-components}
+
+\begin{definition}[Code Property Graph]
+The Code Property Graph is the union of five component graphs:
+\[
+  \mathsf{CPG} = \mathsf{AST} \cup \mathsf{CFG} \cup \mathsf{PDG} \cup \mathsf{CallGraph} \cup \mathsf{EffectGraph}
+\]
+Each component contributes specific node interpretations and edge types.
+\end{definition}
+
+\subsection{AST (Abstract Syntax Tree)}
+\begin{itemize}
+  \item \textbf{Nodes}: Every syntactic element (functions, statements, expressions, etc.)
+  \item \textbf{Edges}: $\mathsf{Child}(i)$ from parent to $i$-th child
+  \item \textbf{Purpose}: Syntactic structure, source location mapping
+\end{itemize}
+
+\subsection{CFG (Control Flow Graph)}
+\begin{itemize}
+  \item \textbf{Nodes}: Shared with AST statement/expression nodes
+  \item \textbf{Edges}: \texttt{NEXT}, \texttt{TRUE\_BRANCH}, \texttt{FALSE\_BRANCH}, \texttt{EXCEPTION}
+  \item \textbf{Purpose}: Possible execution orders
+\end{itemize}
+
+\subsection{PDG (Program Dependence Graph)}
+\textbf{Source}: Ferrante et al.\ 1987
+\begin{itemize}
+  \item \textbf{Nodes}: Shared with AST
+  \item \textbf{Edges}: $\mathsf{DataDep}(\mathit{var})$, $\mathsf{CtrlDep}(\mathit{branch})$
+  \item \textbf{Purpose}: Semantic dependencies for slicing
+\end{itemize}
+
+\subsection{Call Graph}
+\begin{itemize}
+  \item \textbf{Nodes}: Shared with AST function/call nodes
+  \item \textbf{Edges}: $\mathsf{Calls}(\mathit{site})$, $\mathsf{ParamIn}(i)$, $\mathsf{ParamOut}$
+  \item \textbf{Purpose}: Interprocedural analysis
+\end{itemize}
+
+\subsection{Effect Graph (brrr-machine Extension)}
+\begin{itemize}
+  \item \textbf{Nodes}: Effect nodes (read, write, alloc, free, io, etc.)
+  \item \textbf{Edges}: $\mathsf{Effect}(\mathit{kind})$, \texttt{EFFECT\_ORDER}, \texttt{EFFECT\_CONFLICT}
+  \item \textbf{Purpose}: Effect tracking for bug detection
+\end{itemize}
+
+%--------------------------------------------------
+\section{Edge Types in Detail}
+\label{sec:cpg-edge-types}
+
+The following F* formalization defines the complete edge type vocabulary for the Code Property Graph. Each edge type is modeled as a constructor of an algebraic data type, with some edges carrying payload data (e.g., variable names for data dependencies, branch directions for control dependencies).
+
+\textbf{Key design principles}:
+\begin{itemize}
+  \item \textbf{AST edges} preserve syntactic parent-child relationships with explicit position indices
+  \item \textbf{CFG edges} distinguish conditional branches (true/false) from unconditional flow
+  \item \textbf{PDG edges} carry the variable name involved in the dependency, enabling precise slicing
+  \item \textbf{Call graph edges} follow Horwitz 1990's System Dependence Graph structure with summary edges
+  \item \textbf{Effect edges} are a brrr-machine extension for tracking side effects and their ordering
+  \item \textbf{Channel edges} integrate Honda 1998/2008 session types for concurrent program analysis
+\end{itemize}
+
+\begin{fstarcode}[title=CPG Edge Types]
+(* ==================================================
+   CPG EDGE TYPES
+   ================================================== *)
+
+type cpg_edge_label =
+  (* --------------------------------------------------
+     AST EDGES --- Syntactic structure
+     -------------------------------------------------- *)
+  | AstChild : index:nat -> cpg_edge_label
+      (* Parent contains child at position index.
+         Enables: tree traversals, subtree extraction, pattern matching *)
+
+  | AstNextSibling : cpg_edge_label
+      (* Sibling relationship for sequential AST nodes.
+         Enables: statement sequence traversal *)
+
+  (* --------------------------------------------------
+     CFG EDGES --- Control flow
+     Source: standard compiler construction
+     -------------------------------------------------- *)
+  | CfgNext : cpg_edge_label
+      (* Unconditional successor.
+         From: any statement
+         To: next statement in sequence *)
+
+  | CfgTrue : cpg_edge_label
+      (* Successor when condition is true.
+         From: if/while/for condition
+         To: then-branch / loop body *)
+
+  | CfgFalse : cpg_edge_label
+      (* Successor when condition is false.
+         From: if/while/for condition
+         To: else-branch / after loop *)
+
+  | CfgException : exn_type:string -> cpg_edge_label
+      (* Successor on exception of given type.
+         From: potentially-throwing statement
+         To: matching catch block or function exit *)
+
+  | CfgEntry : cpg_edge_label
+      (* Function entry edge.
+         From: function node
+         To: first statement *)
+
+  | CfgExit : cpg_edge_label
+      (* Function exit edge.
+         From: return statement or last statement
+         To: function exit node *)
+
+  (* --------------------------------------------------
+     PDG EDGES --- Data and control dependencies
+     Source: Ferrante 1987
+     -------------------------------------------------- *)
+  | DataDep : var:string -> cpg_edge_label
+      (* Data dependence: target uses value defined at source.
+         From: definition of var
+         To: use of var
+         Enables: reaching definitions, taint propagation *)
+
+  | CtrlDep : branch:bool -> cpg_edge_label
+      (* Control dependence: target's execution depends on source's branch.
+         From: branch condition
+         To: statement that executes only if branch goes this way
+         The bool indicates which branch (true/false)
+         Enables: slicing, dead code detection *)
+
+  | OutputDep : var:string -> cpg_edge_label
+      (* Output dependence: both source and target write to var.
+         From: earlier write
+         To: later write
+         Enables: race detection, write-write conflict *)
+
+  | AntiDep : var:string -> cpg_edge_label
+      (* Anti-dependence: source reads var, target writes var.
+         From: read
+         To: write
+         Enables: race detection, read-write conflict *)
+
+  (* --------------------------------------------------
+     CALL GRAPH EDGES --- Interprocedural structure
+     Source: Horwitz 1990 (SDG)
+     -------------------------------------------------- *)
+  | Calls : site_id:nat -> cpg_edge_label
+      (* Call edge from call site to callee.
+         From: call expression
+         To: callee function entry *)
+
+  | ParamIn : index:nat -> cpg_edge_label
+      (* Actual-to-formal parameter binding.
+         From: actual argument expression
+         To: formal parameter *)
+
+  | ParamOut : cpg_edge_label
+      (* Return value flow.
+         From: return statement value
+         To: call site result *)
+
+  | Summary : cpg_edge_label
+      (* Summary edge: transitive dependence through procedure.
+         From: input parameter
+         To: output (return or modified parameter)
+         Enables: efficient interprocedural analysis without re-analyzing callee *)
+
+  (* --------------------------------------------------
+     EFFECT EDGES --- Side effect tracking
+     Source: brrr-machine theory (our contribution)
+     -------------------------------------------------- *)
+  | Effect : kind:effect_kind -> cpg_edge_label
+      (* Statement has this effect.
+         From: statement
+         To: effect node *)
+
+  | EffectOrder : cpg_edge_label
+      (* Effect ordering: source must happen before target.
+         Derived from CFG + data dependencies *)
+
+  | EffectConflict : cpg_edge_label
+      (* Effects may conflict (race condition candidate).
+         Between: effects on same location from different threads *)
+
+  | EffectCause : cpg_edge_label
+      (* Causal chain: source effect enables/causes target effect.
+         Enables: root cause analysis *)
+
+  (* --------------------------------------------------
+     CHANNEL EDGES --- Honda 1998/2008 session type structure
+     These edges integrate channel operations into the CPG for analysis of
+     communication patterns, protocol conformance, and deadlock detection.
+     -------------------------------------------------- *)
+  | ChannelFlow : chan_id:nat -> cpg_edge_label
+      (* Data flow through channel: send -> recv.
+         From: NChannelSend node
+         To: NChannelRecv node on same channel
+         Enables: taint propagation through channels, data flow analysis *)
+
+  | SessionOf : cpg_edge_label
+      (* Associates prefix node with its session.
+         From: NPrefixNode
+         To: NSessionNode *)
+
+  | ParticipantOf : cpg_edge_label
+      (* Associates participant node with its session.
+         From: NParticipantNode
+         To: NSessionNode *)
+
+  | LocalTypeOf : cpg_edge_label
+      (* Associates process with its local session type.
+         From: NFunction or NBlock (implementing participant)
+         To: NParticipantNode (with local type) *)
+
+  | SessionCausality : kind:causality_kind -> cpg_edge_label
+      (* Causality dependency between prefixes (Honda 2008 Section 3.2).
+         From: earlier prefix node
+         To: later prefix node
+         kind: II (input-input), IO (input-output), OO (output-output)
+         Enables: deadlock detection, protocol conformance, linearity checking *)
+
+  | SessionNext : cpg_edge_label
+      (* Sequential composition within session type.
+         From: prefix node
+         To: next prefix node in sequence *)
+
+  | ChannelCreate : cpg_edge_label
+      (* Channel creation to channel use.
+         From: NChannelCreate node
+         To: NChannelSend, NChannelRecv, or NChannelClose node *)
+
+  | ChannelAlias : cpg_edge_label
+      (* Channel aliasing: source and target refer to same channel.
+         From: channel variable assignment
+         To: channel variable use
+         Enables: alias analysis for channels *)
+
+  | DelegationTransfer : cpg_edge_label
+      (* Session delegation: capability transfer.
+         From: NChannelDelegate (sender)
+         To: NChannelRecv (receiver of capability)
+         Enables: tracking session ownership transfer *)
+
+and causality_kind =
+  | CausalityII  (* Input-Input: two inputs at same participant must be ordered *)
+  | CausalityIO  (* Input-Output: output depends on data from input *)
+  | CausalityOO  (* Output-Output: two outputs from same sender must be ordered *)
+\end{fstarcode}
+
+%--------------------------------------------------
+\section{Node Types}
+\label{sec:cpg-node-types}
+
+The CPG node vocabulary captures all syntactic and semantic elements of a program. Unlike traditional ASTs that only represent syntax, CPG nodes unify multiple views:
+
+\begin{itemize}
+  \item \textbf{AST nodes} represent syntactic program structure (functions, statements, expressions)
+  \item \textbf{CFG nodes} mark control flow entry/exit points and join locations
+  \item \textbf{Channel nodes} (Honda 1998/2008) represent concurrent communication operations
+  \item \textbf{Effect nodes} track side effects for bug detection and resource analysis
+\end{itemize}
+
+\textbf{Type signature conventions}:
+\begin{itemize}
+  \item Node kinds with \texttt{name:string} carry the identifier name for lookup and display
+  \item Node kinds with \texttt{index:nat} carry positional information (parameters, children)
+  \item Channel nodes carry \texttt{chan\_id:nat} to track channel identity across operations
+  \item Session nodes reference \texttt{session\_id} for protocol conformance checking
+\end{itemize}
+
+The following F* formalization defines the complete node type vocabulary:
+
+\begin{fstarcode}[title=CPG Node Types]
+(* ==================================================
+   CPG NODE TYPES
+   ================================================== *)
+
+type cpg_node_kind =
+  (* --------------------------------------------------
+     AST NODES --- Program structure
+     -------------------------------------------------- *)
+  | NFile : path:string -> cpg_node_kind
+  | NModule : name:string -> cpg_node_kind
+  | NClass : name:string -> cpg_node_kind
+  | NFunction : name:string -> params:list string -> cpg_node_kind
+  | NMethod : name:string -> receiver:string -> params:list string -> cpg_node_kind
+  | NParameter : name:string -> index:nat -> cpg_node_kind
+  | NLocalVar : name:string -> cpg_node_kind
+  | NGlobalVar : name:string -> cpg_node_kind
+
+  (* Statements *)
+  | NBlock : cpg_node_kind
+  | NExprStmt : cpg_node_kind
+  | NVarDecl : name:string -> cpg_node_kind
+  | NAssign : target:string -> cpg_node_kind
+  | NIf : cpg_node_kind
+  | NWhile : cpg_node_kind
+  | NFor : cpg_node_kind
+  | NForEach : cpg_node_kind
+  | NReturn : cpg_node_kind
+  | NThrow : cpg_node_kind
+  | NTry : cpg_node_kind
+  | NCatch : exn_type:string -> cpg_node_kind
+  | NBreak : cpg_node_kind
+  | NContinue : cpg_node_kind
+
+  (* Expressions *)
+  | NLiteral : lit_kind:literal_kind -> cpg_node_kind
+  | NIdentifier : name:string -> cpg_node_kind
+  | NBinaryOp : op:string -> cpg_node_kind
+  | NUnaryOp : op:string -> cpg_node_kind
+  | NCall : cpg_node_kind
+  | NMethodCall : method_name:string -> cpg_node_kind
+  | NFieldAccess : field:string -> cpg_node_kind
+  | NIndexAccess : cpg_node_kind
+  | NLambda : cpg_node_kind
+  | NNew : type_name:string -> cpg_node_kind
+  | NConditional : cpg_node_kind  (* ternary *)
+  | NCast : target_type:string -> cpg_node_kind
+
+  (* --------------------------------------------------
+     CFG NODES --- Control flow structure
+     -------------------------------------------------- *)
+  | NEntry : func:string -> cpg_node_kind
+  | NExit : func:string -> cpg_node_kind
+  | NJoin : cpg_node_kind  (* Merge point for branches *)
+  | NLoopHead : cpg_node_kind  (* Target for widening *)
+
+  (* --------------------------------------------------
+     CHANNEL NODES --- Honda 1998/2008 session type operations
+     Integrates with AST (channel operations in syntax), CFG (control flow
+     through channel ops), PDG (data dependencies through channels),
+     and call graph (channels passed to functions).
+     -------------------------------------------------- *)
+  | NChannelCreate : chan_id:nat -> elem_type:string -> buffer_size:nat -> cpg_node_kind
+      (* Channel creation: ch := make(chan T) or mpsc::channel() *)
+
+  | NChannelSend : chan_id:nat -> cpg_node_kind
+      (* Send operation: ch <- v or tx.send(v) *)
+
+  | NChannelRecv : chan_id:nat -> binding:option string -> cpg_node_kind
+      (* Receive operation: v := <-ch or rx.recv() *)
+
+  | NChannelClose : chan_id:nat -> cpg_node_kind
+      (* Close operation: close(ch) or drop(tx) *)
+
+  | NChannelSelect : cases:nat -> has_default:bool -> cpg_node_kind
+      (* Select statement: select { case ... } or tokio::select! *)
+
+  | NChannelSelectCase : chan_id:nat -> direction:chan_direction -> cpg_node_kind
+      (* Individual case in select *)
+
+  | NChannelBranch : chan_id:nat -> labels:list string -> cpg_node_kind
+      (* Session type branching: offer branches on channel *)
+
+  | NChannelChoice : chan_id:nat -> label:string -> cpg_node_kind
+      (* Session type selection: select branch on channel *)
+
+  | NChannelDelegate : chan_id:nat -> delegated_chan:nat -> cpg_node_kind
+      (* Session delegation: transfer capability through channel *)
+
+  (* Session type nodes --- for protocol conformance checking *)
+  | NSessionNode : session_id:nat -> global_type:string -> cpg_node_kind
+      (* Session (conversation) node *)
+
+  | NParticipantNode : session_id:nat -> participant:nat -> local_type:string -> cpg_node_kind
+      (* Participant in a session with its local type *)
+
+  | NPrefixNode : session_id:nat -> kind:prefix_kind -> channel:nat -> payload:string -> cpg_node_kind
+      (* Communication prefix in session type *)
+
+  (* --------------------------------------------------
+     EFFECT NODES --- Side effects
+     -------------------------------------------------- *)
+  | NEffect : kind:effect_kind -> cpg_node_kind
+
+and chan_direction = ChanSend | ChanRecv
+
+and prefix_kind = PrefixSend | PrefixRecv | PrefixSelect | PrefixBranch
+
+and literal_kind =
+  | LitInt : value:int -> literal_kind
+  | LitFloat : value:float -> literal_kind
+  | LitString : value:string -> literal_kind
+  | LitBool : value:bool -> literal_kind
+  | LitNull : literal_kind
+  | LitUndefined : literal_kind
+
+and effect_kind =
+  | EffRead : loc:abstract_loc -> effect_kind
+  | EffWrite : loc:abstract_loc -> effect_kind
+  | EffAlloc : size:nat -> effect_kind
+  | EffFree : loc:abstract_loc -> effect_kind
+  | EffCall : target:string -> effect_kind
+  | EffThrow : exn_type:string -> effect_kind
+  | EffCatch : exn_type:string -> effect_kind
+  | EffIO : io_kind -> effect_kind
+  | EffSpawn : task_id:nat -> effect_kind
+  | EffJoin : task_id:nat -> effect_kind
+  | EffLock : lock_id:nat -> effect_kind
+  | EffUnlock : lock_id:nat -> effect_kind
+  | EffSend : chan:nat -> effect_kind
+  | EffRecv : chan:nat -> effect_kind
+  (* Channel effects --- Honda 1998/2008 session types *)
+  | EffChanCreate : chan:nat -> elem_type:string -> buffer_size:nat -> effect_kind
+  | EffChanClose : chan:nat -> effect_kind
+  | EffSelect : chan:nat -> label:string -> effect_kind
+  | EffBranch : chan:nat -> labels:list string -> effect_kind
+  | EffDelegate : chan:nat -> delegated_chan:nat -> effect_kind
+
+and io_kind =
+  | IOFileRead | IOFileWrite
+  | IONetworkRead | IONetworkWrite
+  | IOStdin | IOStdout | IOStderr
+  | IOEnvRead | IOTimeRead | IORandom
+\end{fstarcode}
+
+%--------------------------------------------------
+\section{CPG Data Structure}
+\label{sec:cpg-data-structure}
+
+The CPG data structure organizes nodes and edges into an efficiently queryable form. The design prioritizes:
+
+\begin{enumerate}
+  \item \textbf{Fast traversal}: Pre-computed indices for outgoing/incoming edges enable $O(1)$ edge lookup
+  \item \textbf{Label-based filtering}: Edges indexed by label type support efficient type-specific queries
+  \item \textbf{Source location mapping}: Bidirectional mapping between nodes and source locations enables IDE integration
+  \item \textbf{Language parameterization}: Each CPG carries its language configuration for language-aware analysis
+\end{enumerate}
+
+\textbf{Key type signatures}:
+\begin{itemize}
+  \item \texttt{node\_id = nat}: Unique identifier for each node, enabling $O(1)$ lookup in hash maps
+  \item \texttt{source\_location}: Captures file path and line/column ranges for error reporting
+  \item \texttt{cpg\_node}: Combines node kind with metadata (source location, type info, abstract state)
+  \item \texttt{cpg\_edge}: Triple of source node, target node, and edge label
+  \item \texttt{cpg}: The complete graph with indices for efficient traversal
+\end{itemize}
+
+\begin{fstarcode}[title=The Code Property Graph Data Structure]
+(* ==================================================
+   THE CODE PROPERTY GRAPH
+   ================================================== *)
+
+module BrrrMachine.CPG
+
+type node_id = nat
+
+type source_location = {
+  file : string;
+  start_line : nat;
+  start_col : nat;
+  end_line : nat;
+  end_col : nat;
+}
+
+type cpg_node = {
+  id : node_id;
+  kind : cpg_node_kind;
+  source_loc : option source_location;
+  (* Type information (when available) *)
+  type_info : option type_info;
+  (* Abstract state attached during analysis *)
+  abstract_state : option abstract_state;
+  (* Original source text (for error messages) *)
+  source_text : option string;
+}
+
+type cpg_edge = {
+  source : node_id;
+  target : node_id;
+  label : cpg_edge_label;
+}
+
+type cpg = {
+  (* Core graph structure *)
+  nodes : map node_id cpg_node;
+  edges : list cpg_edge;
+
+  (* Indices for efficient traversal *)
+  outgoing : map node_id (list cpg_edge);  (* node -> outgoing edges *)
+  incoming : map node_id (list cpg_edge);  (* node -> incoming edges *)
+  by_label : map cpg_edge_label (list cpg_edge);  (* label -> edges *)
+
+  (* Entry points *)
+  functions : map string node_id;  (* function name -> entry node *)
+  entry_points : list node_id;  (* main functions, tests, handlers *)
+
+  (* Reverse mappings *)
+  node_by_loc : map source_location node_id;  (* for IDE integration *)
+
+  (* Language configuration *)
+  language : language_config;
+}
+\end{fstarcode}
+
+%--------------------------------------------------
+\section{CPG Traversal Primitives}
+\label{sec:cpg-traversals}
+
+The power of the CPG is in its traversals. We define a small set of primitives that compose to express any analysis. This section formalizes the traversal algebra from Yamaguchi 2014 in F*, providing type-safe implementations of graph queries.
+
+\textbf{Core insight}: By treating traversals as first-class functions on node sets, we can compose complex vulnerability queries from simple primitives using function composition.
+
+\begin{definition}[Traversal Algebra (Yamaguchi 2014, Section 7)]
+Traversals are \emph{functions on node sets}:
+\[
+  T : \mathcal{P}(V) \to \mathcal{P}(V)
+\]
+This enables compositional query construction via function composition. Complex vulnerability patterns are built by composing primitive traversals.
+
+\textbf{Key insight}: Graph queries become first-class values that can be stored, composed, and reused. A traversal $T$ applied to node set $X$ yields a new node set $T(X)$.
+\end{definition}
+
+\begin{fstarcode}[title=CPG Traversal Primitives (Yamaguchi 2014 adapted)]
+(* ==================================================
+   CPG TRAVERSAL PRIMITIVES
+   Source: Yamaguchi 2014 (adapted)
+   ================================================== *)
+
+module BrrrMachine.CPG.Traversal
+
+(* A traversal is a function from a set of nodes to a set of nodes *)
+type traversal = set node_id -> set node_id
+
+(* Traversal composition: apply traversals in sequence (left-to-right) *)
+val compose : list traversal -> traversal
+let compose traversals nodes =
+  List.fold_left (fun ns t -> t ns) nodes traversals
+
+(* Alternative: compose two traversals *)
+val compose2 : traversal -> traversal -> traversal
+let compose2 t1 t2 nodes = t2 (t1 nodes)
+
+(* Identity traversal *)
+let id_traversal : traversal = fun nodes -> nodes
+\end{fstarcode}
+
+The traversal type \texttt{set node\_id -> set node\_id} captures the essence of graph queries: given a starting set of nodes, produce the set of reachable nodes. The \texttt{compose} function enables building complex queries by chaining simpler ones.
+
+\subsection{TNODES: Tree Nodes (AST Subtree Collection)}
+
+\begin{remark}[Yamaguchi 2014]
+$\mathsf{TNODES}(V)$ returns all nodes in subtrees rooted at $V$. This is essential for syntax-based queries that need to examine entire expressions or statement subtrees.
+\end{remark}
+
+\begin{fstarcode}[title=TNODES Traversal]
+(* --------------------------------------------------
+   TNODES: Tree Nodes (AST Subtree Collection)
+   Yamaguchi 2014: "TNODES(V) returns all nodes in subtrees rooted at V"
+   -------------------------------------------------- *)
+
+val tnodes : cpg -> traversal
+let tnodes g roots =
+  let rec collect_subtree node acc =
+    (* Get all AST children of this node *)
+    let children = out g (Set.singleton node) (LabelPrefix "AstChild") in
+    (* Recursively collect all descendants *)
+    Set.fold (fun child acc' -> collect_subtree child acc')
+             children
+             (Set.add node acc)
+  in
+  Set.fold (fun root acc -> collect_subtree root acc) roots Set.empty
+\end{fstarcode}
+
+\subsection{MATCH: Find Nodes Matching Predicate in Subtrees}
+
+\begin{remark}[Yamaguchi 2014]
+$\mathsf{MATCH}_p(V) = \mathsf{FILTER}_p(\mathsf{TNODES}(V))$. Combines subtree collection with filtering to find specific patterns within AST subtrees. Essential for syntax-aware vulnerability queries.
+\end{remark}
+
+\begin{fstarcode}[title=MATCH Traversals]
+(* --------------------------------------------------
+   MATCH_p: Find Nodes Matching Predicate in Subtrees
+   Yamaguchi 2014: "MATCH_p(V) = FILTER_p(TNODES(V))"
+   -------------------------------------------------- *)
+
+val match_pred : cpg -> (cpg_node -> bool) -> traversal
+let match_pred g pred roots =
+  filter g (tnodes g roots) pred
+
+(* Convenience: match nodes by kind *)
+val match_kind : cpg -> cpg_node_kind -> traversal
+let match_kind g kind roots =
+  match_pred g (fun n -> n.kind = kind) roots
+
+(* Convenience: match nodes by name pattern (regex) *)
+val match_name : cpg -> string -> traversal
+let match_name g pattern roots =
+  match_pred g (fun n -> matches_regex pattern (node_name n)) roots
+\end{fstarcode}
+
+The \texttt{match\_pred} function demonstrates the composability principle: it combines \texttt{tnodes} (subtree collection) with \texttt{filter} (predicate testing) to find specific patterns within AST subtrees. This is the foundation for syntax-aware vulnerability queries.
+
+\subsection{Traversal Combinators}
+
+Traversal combinators provide set-theoretic operations on traversal results, enabling complex query patterns:
+
+\begin{fstarcode}[title=Traversal Combinators]
+(* --------------------------------------------------
+   TRAVERSAL COMBINATORS
+   Higher-order functions for building complex traversals
+   -------------------------------------------------- *)
+
+(* Union: nodes reachable by either traversal *)
+val union_t : traversal -> traversal -> traversal
+let union_t t1 t2 nodes = Set.union (t1 nodes) (t2 nodes)
+
+(* Intersection: nodes reachable by both traversals *)
+val inter_t : traversal -> traversal -> traversal
+let inter_t t1 t2 nodes = Set.inter (t1 nodes) (t2 nodes)
+
+(* Difference: nodes in first but not second *)
+val diff_t : traversal -> traversal -> traversal
+let diff_t t1 t2 nodes = Set.diff (t1 nodes) (t2 nodes)
+\end{fstarcode}
+
+\subsection{Buffer Overflow Query Example}
+
+\begin{example}[Buffer Overflow Detection (Yamaguchi 2014, Section 8.4)]
+This example demonstrates compositional query construction for detecting buffer overflows in write handlers where a \texttt{count} parameter reaches \texttt{memcpy} without bounds checking.
+
+\textbf{Pattern}: Function parameter matching ``count'' flows to memcpy's size argument without sanitization (bounds check, allocation check, \texttt{min()}).
+\end{example}
+
+\begin{fstarcode}[title=Buffer Overflow Query (Yamaguchi Section 8.4)]
+(* --------------------------------------------------
+   EXAMPLE: Buffer Overflow Query (Yamaguchi 2014, Section 8.4)
+
+   Demonstrates compositional query construction for detecting buffer
+   overflows in write handlers where count parameter reaches memcpy
+   without bounds checking.
+
+   Pattern: Function parameter matching "count" flows to memcpy's size
+   argument without sanitization (bounds check, allocation check, min()).
+   -------------------------------------------------- *)
+
+val buffer_overflow_query : cpg -> set node_id
+let buffer_overflow_query g =
+  (* Step 1: Find parameters with names suggesting count/size *)
+  let count_params = filter g (all_nodes g) (fun n ->
+    is_parameter n && matches_regex ".*c(ou)?nt.*" (node_name n)) in
+
+  (* Step 2: Find nodes that reach via data dependence *)
+  let reaches_from_count =
+    Set.fold (fun param acc ->
+      Set.union acc (reaches g param (LabelPrefix "DataDep"))
+    ) count_params Set.empty in
+
+  (* Step 3: Filter to memcpy size argument (position 2) *)
+  let memcpy_size_args = filter g reaches_from_count (fun n ->
+    is_call_argument g n.id "memcpy" 2 ||
+    is_call_argument g n.id "copy_from_user" 2) in
+
+  (* Step 4: Exclude if sanitized (bounds check, alloc, min) *)
+  let sanitizers = filter g (all_nodes g) (fun n ->
+    contains_bounds_check n ||
+    is_allocation_with_param n ||
+    node_contains_text n "min") in
+
+  (* Step 5: Return unsanitized paths *)
+  let sanitized = Set.fold (fun s acc ->
+    Set.union acc (reached_by g s (LabelPrefix "DataDep"))
+  ) sanitizers Set.empty in
+
+  Set.diff memcpy_size_args sanitized
+\end{fstarcode}
+
+This query demonstrates the full power of compositional traversals:
+\begin{enumerate}
+  \item \textbf{Source identification}: Filter for parameters matching a name pattern
+  \item \textbf{Reachability}: Follow data dependencies transitively
+  \item \textbf{Sink filtering}: Identify dangerous function arguments
+  \item \textbf{Sanitizer exclusion}: Remove paths that pass through bounds checks
+\end{enumerate}
+
+The result is a precise set of potentially vulnerable code locations that require manual review.
+
+\subsection{Generic Vulnerability Query Structure}
+
+\begin{fstarcode}[title=Generic Vulnerability Query]
+(* Generic vulnerability query structure *)
+type vuln_query = {
+  source : cpg -> traversal;      (* Where tainted data originates *)
+  sink : cpg -> traversal;        (* Where it must not reach unsanitized *)
+  sanitizers : cpg -> traversal;  (* What makes data safe *)
+}
+
+val execute_vuln_query : cpg -> vuln_query -> set (node_id * node_id)
+let execute_vuln_query g query =
+  let sources = query.source g (all_nodes g) in
+  let sinks = query.sink g (all_nodes g) in
+  let safe = query.sanitizers g (all_nodes g) in
+  (* Find source-sink pairs where path exists without sanitizer *)
+  reaches_set g sources sinks (LabelPrefix "DataDep")
+  |> Set.filter (fun (src, snk) ->
+       let path_nodes = path_between g src snk (LabelPrefix "DataDep") in
+       Set.is_empty (Set.inter path_nodes safe))
+\end{fstarcode}
+
+\subsection{Basic Traversals}
+
+\begin{fstarcode}[title=Basic Traversals]
+(* --------------------------------------------------
+   BASIC TRAVERSALS
+   -------------------------------------------------- *)
+
+(* OUT: follow outgoing edges matching label pattern *)
+val out : cpg -> set node_id -> label_pattern -> set node_id
+let out g nodes pattern =
+  { e.target |
+    e <- concat_map (fun n -> Map.find_default n [] g.outgoing) (Set.to_list nodes),
+    matches pattern e.label }
+
+(* IN: follow incoming edges matching label pattern *)
+val in_ : cpg -> set node_id -> label_pattern -> set node_id
+let in_ g nodes pattern =
+  { e.source |
+    e <- concat_map (fun n -> Map.find_default n [] g.incoming) (Set.to_list nodes),
+    matches pattern e.label }
+
+(* FILTER: keep only nodes satisfying predicate *)
+val filter : cpg -> set node_id -> (cpg_node -> bool) -> set node_id
+let filter g nodes pred =
+  Set.filter (fun n ->
+    match Map.find n g.nodes with
+    | Some node -> pred node
+    | None -> false) nodes
+
+(* MAP: transform node set *)
+val map_nodes : cpg -> set node_id -> (cpg_node -> 'a) -> set 'a
+let map_nodes g nodes f =
+  Set.map (fun n ->
+    match Map.find n g.nodes with
+    | Some node -> f node
+    | None -> failwith "invalid node") nodes
+\end{fstarcode}
+
+\subsection{Transitive Closures}
+
+\begin{fstarcode}[title=Transitive Closure Traversals]
+(* --------------------------------------------------
+   TRANSITIVE CLOSURES
+   -------------------------------------------------- *)
+
+(* REACHES: transitive closure following edge pattern *)
+val reaches : cpg -> node_id -> label_pattern -> set node_id
+let reaches g start pattern =
+  let rec go visited frontier =
+    if Set.is_empty frontier then visited
+    else
+      let next = out g frontier pattern in
+      let new_nodes = Set.diff next visited in
+      go (Set.union visited new_nodes) new_nodes
+  in
+  go (Set.singleton start) (Set.singleton start)
+
+(* REACHED_BY: reverse transitive closure *)
+val reached_by : cpg -> node_id -> label_pattern -> set node_id
+let reached_by g target pattern =
+  let rec go visited frontier =
+    if Set.is_empty frontier then visited
+    else
+      let prev = in_ g frontier pattern in
+      let new_nodes = Set.diff prev visited in
+      go (Set.union visited new_nodes) new_nodes
+  in
+  go (Set.singleton target) (Set.singleton target)
+
+(* REACHES_SET: from any source to any target *)
+val reaches_set :
+  cpg -> set node_id -> set node_id -> label_pattern -> set (node_id * node_id)
+let reaches_set g sources targets pattern =
+  let reachable_from_sources =
+    Set.fold (fun src acc ->
+      Map.add src (reaches g src pattern) acc) sources Map.empty in
+  { (src, tgt) |
+    src <- Set.to_list sources,
+    tgt <- Set.to_list targets,
+    Set.mem tgt (Map.find_default src Set.empty reachable_from_sources) }
+\end{fstarcode}
+
+\subsection{Program Slicing}
+
+\begin{definition}[Program Slicing (Weiser 1984, Horwitz 1990)]
+The following concepts map to CPG terminology:
+
+\begin{description}
+  \item[Slicing Criterion] A tuple $C = (i, V)$ where $i$ is a statement and $V$ is a set of variables. The slice preserves behavior at $i$ for variables $V$.
+
+  \item[REF(n) / DEF(n)] Variables referenced/defined at statement $n$:
+    \begin{itemize}
+      \item $\mathsf{REF}(n)$ $\to$ Read effects, \texttt{get\_used\_vars} in CPG
+      \item $\mathsf{DEF}(n)$ $\to$ Write effects, \texttt{get\_defined\_var} in CPG
+      \item \texttt{DataDep} edges encode the REF/DEF relationship directly
+    \end{itemize}
+
+  \item[INFL(b)] The influence range of branch $b$---statements whose execution depends on $b$'s outcome. Captured by \texttt{CtrlDep} edges in CPG.
+\end{description}
+\end{definition}
+
+\begin{theorem}[Undecidability (Weiser 1984, Theorem 1)]
+Finding statement-minimal slices is undecidable---equivalent to the halting problem.
+
+\textbf{Consequence}: We compute \emph{conservative approximations} via dataflow analysis. Our slices may include extra statements but will \textbf{never} exclude statements that affect the slicing criterion.
+\end{theorem}
+
+\begin{remark}[Algorithm Correspondence]
+\begin{itemize}
+  \item Weiser's $R^0_C(n)$ computation $\to$ \texttt{backward\_slice} with \texttt{DataDep} edges
+  \item Weiser's $B^i_C$ (branch influence) $\to$ \texttt{CtrlDep} edge following
+  \item Weiser's fixpoint $S_C = \bigcup S^i_C$ $\to$ \texttt{reached\_by} transitive closure
+\end{itemize}
+\textbf{Cross-reference}: Section 4.1 (IFDS) for context-sensitive slicing; Section 8.1 (Taint Analysis) uses forward slicing.
+\end{remark}
+
+The following F* code implements the slicing algorithms. The key functions are:
+\begin{itemize}
+  \item \texttt{backward\_slice}: Find all nodes that could affect a given criterion (for debugging, understanding)
+  \item \texttt{forward\_slice}: Find all nodes that could be affected by a criterion (for impact analysis)
+  \item \texttt{thin\_slice}: A more precise backward slice following only relevant dependencies (from TAJ, Tripp 2009)
+\end{itemize}
+
+\begin{fstarcode}[title=Slicing Traversals]
+(* --------------------------------------------------
+   SLICING (from Weiser 1984, Horwitz 1990)
+   -------------------------------------------------- *)
+
+(* BACKWARD_SLICE: all nodes that could affect the slicing criterion *)
+val backward_slice : cpg -> set node_id -> set node_id
+let backward_slice g criteria =
+  (* Follow DATA_DEP and CTRL_DEP edges backwards *)
+  let dep_pattern = LabelOr [LabelPrefix "DataDep"; LabelPrefix "CtrlDep"] in
+  reached_by_set g criteria dep_pattern
+
+(* FORWARD_SLICE: all nodes that could be affected by the slicing criterion *)
+val forward_slice : cpg -> set node_id -> set node_id
+let forward_slice g criteria =
+  let dep_pattern = LabelOr [LabelPrefix "DataDep"; LabelPrefix "CtrlDep"] in
+  reaches_set g criteria dep_pattern
+
+(* THIN_SLICE: backward slice following only relevant dependencies
+   Source: Tripp 2009 (TAJ) *)
+val thin_slice : cpg -> node_id -> string -> set node_id
+let thin_slice g sink sink_arg =
+  (* Only follow dependencies that affect the sink argument *)
+  let rec go visited frontier relevant_vars =
+    if Set.is_empty frontier then visited
+    else
+      let preds = in_ g frontier (LabelPrefix "DataDep") in
+      let relevant_preds = Set.filter (fun n ->
+        (* Node defines a relevant variable *)
+        match get_defined_var g n with
+        | Some v -> Set.mem v relevant_vars
+        | None -> false) preds in
+      let new_vars = Set.fold (fun n acc ->
+        Set.union acc (get_used_vars g n)) relevant_preds Set.empty in
+      let new_nodes = Set.diff relevant_preds visited in
+      go (Set.union visited new_nodes) new_nodes (Set.union relevant_vars new_vars)
+  in
+  go (Set.singleton sink) (Set.singleton sink) (Set.singleton sink_arg)
+\end{fstarcode}
+
+\subsection{Two-Phase Interprocedural Slicing}
+
+\begin{tcolorbox}[colback=red!5, colframe=red!50, boxrule=0.5pt, title=Critical: Horwitz 1990]
+\textbf{CRITICAL}: Weiser's transitive closure slicing is \textbf{WRONG} for interprocedural analysis!
+
+\textbf{The problem}: Transitive closure can produce \emph{spurious} results by ``descending into a called procedure and then ascending to an incorrect calling context.''
+
+\textbf{Example}:
+\begin{itemize}
+  \item Main calls A, which calls Add
+  \item Main also calls A, which calls Increment, which calls Add
+\end{itemize}
+If slicing from Increment, Weiser incorrectly includes the first Main$\to$A$\to$Add path because it doesn't track calling contexts.
+
+\textbf{THE FIX}: Two-phase slicing with restricted edge following.
+\end{tcolorbox}
+
+\begin{fstarcode}[title=Two-Phase Interprocedural Slicing (Horwitz 1990)]
+(* --------------------------------------------------
+   TWO-PHASE INTERPROCEDURAL SLICING (from Horwitz 1990)
+
+   CRITICAL: Weiser's transitive closure slicing is WRONG for interprocedural!
+
+   THE FIX: Two-phase slicing with restricted edge following.
+   -------------------------------------------------- *)
+
+(* PHASE 1: Ascend to callers --- DON'T follow param-out edges *)
+let slice_phase1 (g : cpg) (criteria : set node_id) : set node_id =
+  let exclude = [ParamOut; DefOrder] in
+  reach_backwards g criteria exclude
+
+(* PHASE 2: Descend into callees --- DON'T follow call/param-in edges *)
+let slice_phase2 (g : cpg) (phase1_nodes : set node_id) : set node_id =
+  let exclude = [Calls; ParamIn; DefOrder] in
+  reach_backwards g phase1_nodes exclude
+
+(* Combined two-phase interprocedural slice *)
+val interprocedural_slice : cpg -> set node_id -> set node_id
+let interprocedural_slice g criteria =
+  let phase1 = slice_phase1 g criteria in
+  let phase2 = slice_phase2 g phase1 in
+  Set.union phase1 phase2
+
+(* WHY THIS WORKS:
+   Phase 1 can ASCEND from a called procedure to its callers via
+   call/param-in edges, but cannot DESCEND via param-out.
+
+   Phase 2 can DESCEND into called procedures via param-out, but
+   cannot ASCEND via call/param-in.
+
+   This ensures we never:
+   - Descend into procedure P
+   - Then ascend to caller Q (that didn't actually call P in our context)
+
+   The result is a CONTEXT-SENSITIVE slice: only nodes on REALIZABLE
+   paths (matched call/return parentheses) are included.
+*)
+
+(* FORWARD SLICE (dual): for impact analysis *)
+val interprocedural_forward_slice : cpg -> set node_id -> set node_id
+let interprocedural_forward_slice g criteria =
+  (* Phase 1: Forward in callers, don't descend via param-in/call *)
+  let phase1 = reach_forward g criteria [ParamIn; Calls; DefOrder] in
+  (* Phase 2: Forward into callees, don't ascend via param-out *)
+  let phase2 = reach_forward g phase1 [ParamOut; DefOrder] in
+  Set.union phase1 phase2
+
+(* See Section 12.9 for soundness proofs *)
+\end{fstarcode}
+
+The two-phase algorithm is essential for \textbf{context-sensitive} interprocedural analysis. It ensures that only \emph{realizable paths}---those with matched call/return parentheses---are included in the slice. This prevents the spurious results that plague naive transitive closure approaches.
+
+\textbf{Connection to IFDS}: The two-phase restriction corresponds to respecting the Dyck language of matched parentheses in CFL-reachability (see Section~4.1).
+
+\subsection{Taint Analysis Traversals}
+
+\begin{fstarcode}[title={Taint Analysis Traversals (Livshits 2005, Tripp 2009)}]
+(* --------------------------------------------------
+   TAINT ANALYSIS TRAVERSALS
+   Source: Livshits 2005, Tripp 2009
+   -------------------------------------------------- *)
+
+(* UNSANITIZED_PATHS: find source-to-sink paths avoiding sanitizers *)
+val unsanitized_paths :
+  cpg ->
+  sources:set node_id ->
+  sinks:set node_id ->
+  sanitizers:set node_id ->
+  list (list node_id)  (* Paths from source to sink *)
+
+let unsanitized_paths g sources sinks sanitizers =
+  (* BFS from sources, stopping at sanitizers *)
+  let rec bfs_paths frontier visited paths =
+    if Set.is_empty frontier then paths
+    else
+      let next_edges = concat_map (fun n -> Map.find_default n [] g.outgoing) frontier in
+      let data_edges = List.filter (fun e ->
+        match e.label with DataDep _ -> true | _ -> false) next_edges in
+      let next_nodes = Set.of_list (List.map (fun e -> e.target) data_edges) in
+      let unsanitized = Set.diff next_nodes sanitizers in
+      let new_nodes = Set.diff unsanitized visited in
+      (* Record complete paths *)
+      let complete = Set.inter new_nodes sinks in
+      let new_paths = (* ... reconstruct paths ... *) in
+      bfs_paths new_nodes (Set.union visited new_nodes) (paths @ new_paths)
+  in
+  bfs_paths sources sources []
+\end{fstarcode}
+
+\subsection{Label Patterns}
+
+\begin{fstarcode}[title=Label Patterns for Flexible Edge Matching]
+(* --------------------------------------------------
+   LABEL PATTERNS --- for flexible edge matching
+   -------------------------------------------------- *)
+
+type label_pattern =
+  | LabelExact : cpg_edge_label -> label_pattern
+  | LabelPrefix : string -> label_pattern  (* e.g., "DataDep" matches DataDep(_) *)
+  | LabelAny : label_pattern
+  | LabelOr : list label_pattern -> label_pattern
+  | LabelAnd : list label_pattern -> label_pattern
+  | LabelNot : label_pattern -> label_pattern
+
+let rec matches (pattern : label_pattern) (label : cpg_edge_label) : bool =
+  match pattern with
+  | LabelExact l -> label = l
+  | LabelPrefix prefix -> String.is_prefix prefix (label_to_string label)
+  | LabelAny -> true
+  | LabelOr patterns -> List.exists (fun p -> matches p label) patterns
+  | LabelAnd patterns -> List.for_all (fun p -> matches p label) patterns
+  | LabelNot p -> not (matches p label)
+\end{fstarcode}
+
+%--------------------------------------------------
+\section{CPG Construction}
+\label{sec:cpg-construction}
+
+This section describes the algorithm for constructing a Code Property Graph from source code. The construction proceeds in phases, building each component graph layer by layer.
+
+\textbf{Construction phases}:
+\begin{enumerate}
+  \item \textbf{Parsing}: Convert source to AST, create AST nodes and edges
+  \item \textbf{CFG construction}: Add control flow edges between statements
+  \item \textbf{Dominator computation}: Required for control dependence
+  \item \textbf{PDG construction}: Add data and control dependence edges
+  \item \textbf{Call graph}: Add interprocedural edges
+  \item \textbf{Effect graph}: Add side effect tracking edges
+  \item \textbf{Indexing}: Build efficient lookup structures
+\end{enumerate}
+
+\begin{tcolorbox}[colback=red!5, colframe=red!70!black, boxrule=0.5pt, title=Critical Warning: Phased vs.\ Interleaved Construction]
+The phased approach below is \textbf{ONLY} valid for languages without virtual dispatch (C, basic procedural code). For OOP languages (Java, Python, JS, C++), call graph construction \textbf{MUST} be interleaved with pointer analysis.
+
+See Section 5.3 (On-the-Fly Call Graph Construction) for the correct approach for dynamic dispatch languages.
+
+\textbf{Source}: Qilin (He, Lu, Xue 2022)---``pointer analysis and call graph construction are mutually dependent and must be solved together''
+\end{tcolorbox}
+
+\begin{fstarcode}[title=CPG Construction Algorithm (Phased---for non-OOP languages only)]
+(* ==================================================
+   CPG CONSTRUCTION ALGORITHM (PHASED - for non-OOP languages only)
+   WARNING: For OOP/dynamic dispatch, use interleaved approach in Section 5.3
+   ================================================== *)
+
+module BrrrMachine.CPG.Builder
+
+(* Main construction pipeline - PHASED VERSION *)
+(* Use build_cpg_interleaved for Java/Python/JS/C++ *)
+val build_cpg : language_config -> source_file -> cpg
+let build_cpg lang source =
+  (* Phase 1: Parse to AST and create AST nodes/edges *)
+  let ast = parse lang source in
+  let cpg = create_ast_nodes ast in
+
+  (* Phase 2: Build CFG edges *)
+  let cpg = build_cfg_edges cpg in
+
+  (* Phase 3: Compute dominators for control dependence *)
+  let dom = compute_dominators cpg in
+  let pdom = compute_post_dominators cpg in
+
+  (* Phase 4: Build PDG edges *)
+  let cpg = build_control_dep_edges cpg pdom in
+  let cpg = build_data_dep_edges cpg in
+
+  (* Phase 5: Build call graph edges - STATIC ONLY *)
+  (* WARNING: This misses virtual/dynamic calls! *)
+  let cpg = build_static_call_edges cpg in
+
+  (* Phase 6: Build effect edges *)
+  let cpg = build_effect_edges cpg lang in
+
+  (* Phase 7: Create indices *)
+  let cpg = build_indices cpg in
+
+  cpg
+\end{fstarcode}
+
+\subsection{Control Dependence Construction}
+
+Control dependence captures which statements' execution depends on which branch decisions. This is essential for program slicing: if a statement is control-dependent on a branch, changing the branch outcome could affect whether that statement executes.
+
+\begin{definition}[Control Dependence (Ferrante 1987)]
+Node $Y$ is \emph{control-dependent} on edge $(A, B)$ if:
+\begin{enumerate}
+  \item $Y$ post-dominates $B$
+  \item $Y$ does not strictly post-dominate $A$
+\end{enumerate}
+\textbf{Intuition}: $Y$ executes only if the $A \to B$ branch is taken.
+\end{definition}
+
+\begin{fstarcode}[title=Control Dependence Edge Construction (Ferrante 1987)]
+(* --------------------------------------------------
+   CONTROL DEPENDENCE (Ferrante 1987)
+
+   Definition: Node Y is control-dependent on edge (A,B) if:
+     1. Y post-dominates B
+     2. Y does not strictly post-dominate A
+
+   Intuition: Y executes only if the A->B branch is taken.
+   -------------------------------------------------- *)
+
+val build_control_dep_edges : cpg -> post_dominators -> cpg
+let build_control_dep_edges cpg pdom =
+  (* For each CFG edge (A,B) *)
+  fold_edges cpg (fun cpg edge ->
+    match edge.label with
+    | CfgTrue | CfgFalse | CfgNext ->
+      let a = edge.source in
+      let b = edge.target in
+      let branch = (edge.label = CfgTrue) in
+      (* Find least common ancestor in post-dominator tree *)
+      let lca = pdom_lca pdom a b in
+      (* All nodes on path from B to LCA (exclusive) are control-dependent on A *)
+      let path = pdom_path pdom b lca in
+      let ctrl_dep_nodes = List.filter (fun n -> n <> lca) path in
+      (* Add control dependence edges *)
+      List.fold_left (fun cpg n ->
+        add_edge cpg { source = a; target = n; label = CtrlDep branch }
+      ) cpg ctrl_dep_nodes
+    | _ -> cpg
+  ) cpg
+\end{fstarcode}
+
+\subsection{Data Dependence Construction}
+
+Data dependence captures which statements' values flow to which other statements. This is the foundation for taint analysis: if statement $X$ defines a value that statement $Y$ uses, then taint at $X$ propagates to $Y$.
+
+\begin{definition}[Data Dependence]
+Node $Y$ is \emph{data-dependent} on node $X$ through variable $v$ if:
+\begin{enumerate}
+  \item $X$ defines $v$
+  \item $Y$ uses $v$
+  \item There is a CFG path from $X$ to $Y$ with no intervening definition of $v$
+\end{enumerate}
+\end{definition}
+
+\begin{fstarcode}[title=Data Dependence Edge Construction]
+(* --------------------------------------------------
+   DATA DEPENDENCE (via reaching definitions)
+
+   Definition: Node Y is data-dependent on node X through variable v if:
+     1. X defines v
+     2. Y uses v
+     3. There is a CFG path from X to Y with no intervening definition of v
+   -------------------------------------------------- *)
+
+val build_data_dep_edges : cpg -> cpg
+let build_data_dep_edges cpg =
+  (* Compute reaching definitions for each node *)
+  let reach_defs = compute_reaching_definitions cpg in
+  (* For each node that uses a variable *)
+  fold_nodes cpg (fun cpg node ->
+    let uses = get_used_vars cpg node.id in
+    Set.fold (fun var cpg ->
+      (* Find reaching definitions of this variable *)
+      let defs = get_reaching_defs reach_defs node.id var in
+      (* Add data dependence edge from each definition *)
+      Set.fold (fun def_node cpg ->
+        add_edge cpg { source = def_node; target = node.id; label = DataDep var }
+      ) defs cpg
+    ) uses cpg
+  ) cpg
+\end{fstarcode}
+
+\subsection{Reaching Definitions}
+
+Reaching definitions is the classic dataflow problem that computes, for each program point, which definitions of each variable could reach that point without being killed by an intervening redefinition.
+
+\textbf{Transfer function}: $\mathsf{out} = \mathsf{gen} \cup (\mathsf{in} \setminus \mathsf{kill})$
+
+The \texttt{gen} set contains the definition at the current node (if any), while \texttt{kill} removes any prior definitions of the same variable. The algorithm iterates to a fixpoint, propagating definitions along CFG edges.
+
+\begin{fstarcode}[title=Reaching Definitions (Classic Dataflow)]
+(* --------------------------------------------------
+   REACHING DEFINITIONS (classic dataflow)
+   -------------------------------------------------- *)
+
+type def = { node : node_id; var : string }
+type reaching_defs = map node_id (set def)
+
+val compute_reaching_definitions : cpg -> reaching_defs
+let compute_reaching_definitions cpg =
+  (* Transfer function: out = gen $\cup$ (in \ kill) *)
+  let transfer node in_set =
+    let gen = match get_defined_var cpg node with
+      | Some v -> Set.singleton { node = node; var = v }
+      | None -> Set.empty in
+    let kill = match get_defined_var cpg node with
+      | Some v -> Set.filter (fun d -> d.var <> v) in_set
+      | None -> Set.empty in
+    Set.union gen (Set.diff in_set kill)
+  in
+  (* Fixpoint iteration *)
+  let rec iterate current =
+    let next = Map.mapi (fun node _ ->
+      let preds = get_cfg_predecessors cpg node in
+      let in_set = Set.unions (List.map (fun p ->
+        Map.find_default p Set.empty current) preds) in
+      transfer node in_set
+    ) current in
+    if Map.equal Set.equal current next then current
+    else iterate next
+  in
+  let init = Map.map (fun _ -> Set.empty) cpg.nodes in
+  iterate init
+\end{fstarcode}
+
+%--------------------------------------------------
+\section{Neural Program Graph Embeddings (Optional Enhancement)}
+\label{sec:neural-embeddings}
+
+This section describes optional neural network enhancements to the CPG that enable learning-based analysis. While the core CPG provides a sound foundation for static analysis, neural embeddings can capture patterns that are difficult to express with hand-crafted rules.
+
+\textbf{Paper}: Si et al.\ 2018 (Code2Inv---NeurIPS)
+
+\begin{tcolorbox}[colback=blue!3, colframe=blue!40, boxrule=0.3pt, title=GNN-Based Program Representation]
+\textbf{INSIGHT}: The CPG already encodes AST, CFG, and data flow edges. A Graph Neural Network (GNN) can learn \emph{dense vector embeddings} that capture semantic patterns beyond what static traversals can express.
+
+\textbf{ARCHITECTURE (Code2Inv)}:
+\begin{enumerate}
+  \item Convert program to SSA form (explicit data dependencies)
+  \item Build program graph with 6 edge types:
+    \begin{itemize}
+      \item AST parent/child (bidirectional)
+      \item CFG forward/backward (bidirectional)
+      \item Data flow (SSA connections, bidirectional)
+    \end{itemize}
+  \item Message passing with edge-type-specific weight matrices
+  \item GRU aggregation for each node embedding update
+\end{enumerate}
+
+\textbf{GNN Update Rule} (each round $t$):
+\[
+  h_v^{(t+1)} = \mathsf{GRU}\left(h_v^{(t)}, \sum_{(u,v,k)} W_k \cdot h_u^{(t)}\right)
+\]
+where $W_k$ is the weight matrix for edge type $k$.
+
+\textbf{USE CASES}:
+\begin{itemize}
+  \item Loop invariant synthesis (Section 2.1.5c)
+  \item Bug pattern detection via learned embeddings
+  \item Semantic code search and similarity
+\end{itemize}
+\end{tcolorbox}
+
+\begin{fstarcode}[title=Neural Program Graph Embedding (Si et al.\ 2018)]
+(* ==================================================
+   NEURAL PROGRAM GRAPH EMBEDDING
+   Source: Si et al. 2018 (Code2Inv)
+   ================================================== *)
+
+module BrrrMachine.CPG.NeuralEmbedding
+
+(* Embedding dimension - typically 64 or 128 *)
+let embedding_dim : nat = 64
+
+type node_embedding = vec float embedding_dim
+
+(* Edge types for GNN message passing - extends cpg_edge_label *)
+type gnn_edge_type =
+  | GNNAstChild : gnn_edge_type      (* AST parent to child *)
+  | GNNAstParent : gnn_edge_type     (* AST child to parent (reverse) *)
+  | GNNCfgNext : gnn_edge_type       (* Control flow forward *)
+  | GNNCfgPrev : gnn_edge_type       (* Control flow backward *)
+  | GNNDataFlow : gnn_edge_type      (* SSA data dependency *)
+  | GNNDataFlowRev : gnn_edge_type   (* Reverse data dependency *)
+
+(* GNN parameters - one weight matrix per edge type *)
+type gnn_params = {
+  edge_weights : map gnn_edge_type (matrix embedding_dim embedding_dim);
+  gru_weights : gru_params embedding_dim;
+  token_embeds : map token_type node_embedding;  (* Initial node embeddings *)
+}
+
+(* Program embedding: all nodes + global graph summary *)
+type program_embedding = {
+  node_embeds : map node_id node_embedding;
+  global_embed : node_embedding;  (* Aggregated graph representation *)
+}
+
+(* Convert CPG edge labels to GNN edge types *)
+val cpg_to_gnn_edge : cpg_edge_label -> bool -> gnn_edge_type
+let cpg_to_gnn_edge label is_reverse =
+  match label, is_reverse with
+  | AstChild _, false -> GNNAstChild
+  | AstChild _, true -> GNNAstParent
+  | CfgNext, false | CfgTrue, false | CfgFalse, false -> GNNCfgNext
+  | CfgNext, true | CfgTrue, true | CfgFalse, true -> GNNCfgPrev
+  | DataDep _, false -> GNNDataFlow
+  | DataDep _, true -> GNNDataFlowRev
+  | _ -> GNNCfgNext  (* Default for other edge types *)
+
+(* Single round of message passing *)
+val message_pass_round :
+  cpg:cpg ->
+  params:gnn_params ->
+  current:map node_id node_embedding ->
+  map node_id node_embedding
+
+let message_pass_round cpg params current =
+  Map.mapi (fun nid _ ->
+    (* Aggregate messages from all incoming edges *)
+    let incoming = get_all_incoming_edges cpg nid in
+    let message = List.fold_left (fun acc (src, label) ->
+      let etype = cpg_to_gnn_edge label true in
+      let w = Map.find etype params.edge_weights in
+      let h_src = Map.find src current in
+      vec_add acc (mat_vec_mul w h_src)
+    ) (zero_vec embedding_dim) incoming in
+    (* GRU update *)
+    gru_cell params.gru_weights (Map.find nid current) message
+  ) current
+
+(* Full encoding with T message passing rounds *)
+val encode_program :
+  cpg:cpg ->
+  params:gnn_params ->
+  rounds:nat{rounds > 0} ->
+  program_embedding
+
+let encode_program cpg params rounds =
+  (* Initialize embeddings from token types *)
+  let initial = Map.mapi (fun nid node ->
+    let token = node_to_token node in
+    Map.find_default token (zero_vec embedding_dim) params.token_embeds
+  ) cpg.nodes in
+  (* T rounds of message passing *)
+  let final = iterate_n rounds (message_pass_round cpg params) initial in
+  (* Global embedding via max pooling *)
+  let global = Map.fold (fun _ emb acc -> vec_max acc emb)
+                        final (zero_vec embedding_dim) in
+  { node_embeds = final; global_embed = global }
+
+(* Attention over program nodes - for invariant synthesis *)
+val compute_attention :
+  query:node_embedding ->
+  program:program_embedding ->
+  map node_id float  (* Attention weights sum to 1 *)
+
+let compute_attention query program =
+  let scores = Map.map (fun emb -> vec_dot query emb) program.node_embeds in
+  softmax scores
+\end{fstarcode}
+
+The F* code above defines a complete GNN-based program embedding system:
+\begin{itemize}
+  \item \texttt{gnn\_edge\_type}: Maps CPG edge labels to GNN-compatible edge types (with bidirectional variants)
+  \item \texttt{message\_pass\_round}: Single iteration of message passing with edge-type-specific weights
+  \item \texttt{encode\_program}: Full encoding with $T$ rounds of message passing
+  \item \texttt{compute\_attention}: Attention mechanism for focusing on relevant program nodes
+\end{itemize}
+
+\textbf{Key insight}: The GNN learns to aggregate information from a node's graph neighborhood, capturing semantic relationships that depend on both local syntax and global program structure.
+
+\begin{remark}[Integration with CPG]
+\begin{itemize}
+  \item GNN embeddings are an \textbf{optional enhancement} to the static CPG
+  \item The CPG provides the graph structure; GNN learns dense representations
+  \item Pre-trained embeddings can be loaded for transfer learning
+  \item Use embeddings for neural invariant synthesis (Section 2.1.5c)
+\end{itemize}
+\end{remark}
+
+\begin{remark}[When to Use GNN Embeddings]
+\begin{itemize}
+  \item Learning-based analysis (invariant synthesis, bug detection)
+  \item Semantic code similarity/search
+  \item When static patterns are insufficient
+\end{itemize}
+\end{remark}
+
+%--------------------------------------------------
+\subsection{Semantic Identifier Embeddings (DeepBugs)}
+\label{sec:deepbugs}
+
+While GNN embeddings capture program structure, identifier names carry crucial semantic information that traditional static analysis ignores. This section describes how to leverage name semantics for bug detection.
+
+\textbf{Source}: Pradel \& Sen 2018---``DeepBugs: A Learning Approach to Name-Based Bug Detection'' (OOPSLA)
+
+\begin{tcolorbox}[colback=green!3, colframe=green!50!black, boxrule=0.3pt, title=Name-Aware Semantic Embeddings for Bug Detection]
+\textbf{INSIGHT}: Traditional static analysis \textbf{ignores} identifier names. But names encode \emph{semantic intent} that can reveal bugs:
+\begin{itemize}
+  \item \texttt{setTimeout(delay, callback)} vs \texttt{setTimeout(callback, delay)}
+  \item \texttt{height + width} (bug?) vs \texttt{height + height}
+  \item \texttt{j < tokens.length} (should be \texttt{j < token.length}?)
+\end{itemize}
+
+\textbf{DEEPBUGS APPROACH}:
+\begin{enumerate}
+  \item Create \emph{semantic embeddings} for identifiers via word2vec
+  \item Split identifiers into subtokens: \texttt{getUserName} $\to$ [\texttt{get}, \texttt{User}, \texttt{Name}]
+  \item Train binary classifiers: correct code vs synthetic bugs
+  \item Detect swapped arguments, wrong operators, wrong operands
+\end{enumerate}
+
+\textbf{RESULTS}: 89--95\% accuracy, 68\% true positive rate on real bugs\\
+\textbf{SPEED}: $<$20ms per file (pre-computed embeddings + matrix ops)
+\end{tcolorbox}
+
+\begin{fstarcode}[title=Semantic Identifier Embeddings (Pradel \& Sen 2018)]
+(* ==================================================
+   SEMANTIC IDENTIFIER EMBEDDINGS
+   Source: Pradel & Sen 2018 (DeepBugs)
+
+   Capture semantic meaning of identifiers via word2vec-style embeddings.
+   "src" and "source" have similar embeddings; "src" and "dst" are opposites.
+   ================================================== *)
+
+module BrrrMachine.CPG.NameEmbeddings
+
+(* --------------------------------------------------
+   SUBTOKEN SPLITTING
+
+   Split identifiers into semantically meaningful subtokens:
+   - camelCase: getUserName -> [get, user, name]
+   - snake_case: user_name -> [user, name]
+   - Combined: getUser_ID -> [get, user, id]
+   -------------------------------------------------- *)
+
+val split_camel_case : string -> list string
+let split_camel_case name =
+  (* Split on case transitions: "getUserName" -> ["get", "User", "Name"] *)
+  regex_split "[A-Z]" name |> List.map String.lowercase
+
+val split_snake_case : string -> list string
+let split_snake_case name =
+  String.split "_" name |> List.filter (fun s -> String.length s > 0)
+
+val split_identifier : string -> list string
+let split_identifier name =
+  let camel = split_camel_case name in
+  let snake = split_snake_case name in
+  List.deduplicate (camel @ snake) |> List.map String.lowercase
+
+(* --------------------------------------------------
+   EMBEDDING MODEL
+
+   Pre-trained word2vec model maps subtokens to dense vectors.
+   Identifier embedding = average of subtoken embeddings.
+   -------------------------------------------------- *)
+
+type embedding_dim = n:nat{n > 0}
+type embedding (dim:embedding_dim) = vector float dim
+
+noeq type name_embedding_model (dim:embedding_dim) = {
+  subtoken_embeddings : map string (embedding dim);
+  oov_embedding : embedding dim;  (* Out-of-vocabulary fallback *)
+}
+
+val embed_identifier :
+  #dim:embedding_dim ->
+  model:name_embedding_model dim ->
+  name:string ->
+  embedding dim
+
+let embed_identifier #dim model name =
+  let subtokens = split_identifier name in
+  let embeddings = List.filter_map (fun st ->
+    Map.find_opt st model.subtoken_embeddings
+  ) subtokens in
+  if List.is_empty embeddings then
+    model.oov_embedding
+  else
+    vector_average embeddings
+\end{fstarcode}
+
+The \texttt{split\_identifier} function handles common naming conventions (camelCase, snake\_case) to extract meaningful subtokens. The \texttt{embed\_identifier} function averages subtoken embeddings, falling back to an out-of-vocabulary embedding for unknown tokens.
+
+\begin{fstarcode}[title=Identifier Similarity]
+(* Cosine similarity between identifier embeddings *)
+val name_similarity :
+  #dim:embedding_dim ->
+  model:name_embedding_model dim ->
+  name1:string -> name2:string ->
+  float
+
+let name_similarity #dim model name1 name2 =
+  let e1 = embed_identifier model name1 in
+  let e2 = embed_identifier model name2 in
+  cosine_similarity e1 e2
+\end{fstarcode}
+
+\subsubsection{Name-Based Bug Detectors}
+
+DeepBugs defines three detector types, each trained on synthetically generated bugs. The detectors extract identifier embeddings from code locations and classify whether the code is likely buggy.
+
+\textbf{Detector types}:
+\begin{enumerate}
+  \item \textbf{Swapped Arguments}: Detects when function arguments may be in the wrong order based on name semantics
+  \item \textbf{Wrong Binary Operator}: Detects when an operator may be incorrect (e.g., \texttt{==} vs \texttt{!=})
+  \item \textbf{Wrong Binary Operand}: Detects when a variable may be the wrong one based on name similarity
+\end{enumerate}
+
+\begin{fstarcode}[title=Name-Based Bug Detectors]
+(* --------------------------------------------------
+   NAME-BASED BUG DETECTORS
+
+   DeepBugs defines three detector types, each trained on synthetic bugs:
+   1. Swapped Arguments: setTimeout(delay, fn) vs setTimeout(fn, delay)
+   2. Wrong Binary Operator: x == y vs x != y
+   3. Wrong Binary Operand: height + width vs height + height
+   -------------------------------------------------- *)
+
+type ml_prediction = {
+  is_bug : bool;
+  confidence : float;  (* 0.0 to 1.0 *)
+  bug_type : string;
+  explanation : option string;
+}
+
+(* Feature extraction for call sites *)
+val extract_call_features :
+  #dim:embedding_dim ->
+  model:name_embedding_model dim ->
+  cpg:cpg ->
+  call_node:node_id ->
+  option (list (embedding dim))
+
+let extract_call_features #dim model cpg call_node =
+  match get_node cpg call_node with
+  | Some (NCall callee args) ->
+      let callee_emb = embed_identifier model callee in
+      let arg_embs = List.map (fun arg ->
+        match get_identifier_name cpg arg with
+        | Some name -> embed_identifier model name
+        | None -> model.oov_embedding
+      ) args in
+      Some (callee_emb :: arg_embs)
+  | _ -> None
+
+(* Feature extraction for binary operations *)
+val extract_binop_features :
+  #dim:embedding_dim ->
+  model:name_embedding_model dim ->
+  cpg:cpg ->
+  expr_node:node_id ->
+  option (list (embedding dim))
+
+let extract_binop_features #dim model cpg expr_node =
+  match get_node cpg expr_node with
+  | Some (NBinOp left op right) ->
+      let left_emb = match get_identifier_name cpg left with
+        | Some name -> embed_identifier model name
+        | None -> model.oov_embedding in
+      let right_emb = match get_identifier_name cpg right with
+        | Some name -> embed_identifier model name
+        | None -> model.oov_embedding in
+      let op_emb = embed_operator model op in
+      Some [left_emb; op_emb; right_emb]
+  | _ -> None
+\end{fstarcode}
+
+\subsubsection{Synthetic Bug Generation for Training}
+
+A key insight from DeepBugs is that training data can be generated by simple mutations of correct code. Correct code serves as positive examples; mutated code serves as negative examples. This avoids the need for expensive manual bug labeling.
+
+\begin{fstarcode}[title=Synthetic Bug Generation for Training]
+(* --------------------------------------------------
+   SYNTHETIC BUG GENERATION FOR TRAINING
+
+   Key insight: Generate training data by simple mutations.
+   Correct code = positive examples; mutated code = negative examples.
+   -------------------------------------------------- *)
+
+type mutation_type =
+  | SwapArguments : idx1:nat -> idx2:nat -> mutation_type
+  | ReplaceOperator : new_op:binop -> mutation_type
+  | ReplaceOperand : side:bool -> new_var:string -> mutation_type
+
+type training_example = {
+  features : list (embedding embedding_dim);
+  label : bool;  (* true = correct, false = buggy *)
+  mutation : option mutation_type;
+}
+
+val generate_training_examples :
+  cpg:cpg ->
+  model:name_embedding_model embedding_dim ->
+  detector_type:string ->
+  list training_example
+
+let generate_training_examples cpg model detector_type =
+  match detector_type with
+  | "swapped_args" ->
+      (* Find all call sites, generate original + swapped versions *)
+      let calls = find_all_calls cpg in
+      List.concat_map (fun call ->
+        match extract_call_features model cpg call with
+        | Some features when List.length features >= 3 ->
+            let original = { features; label = true; mutation = None } in
+            let swapped = { features = swap_in_list features 1 2;
+                           label = false;
+                           mutation = Some (SwapArguments 0 1) } in
+            [original; swapped]
+        | _ -> []
+      ) calls
+  | "wrong_operator" ->
+      let binops = find_all_binops cpg in
+      List.concat_map (fun binop ->
+        match extract_binop_features model cpg binop with
+        | Some features ->
+            let original = { features; label = true; mutation = None } in
+            (* Generate mutants with different operators *)
+            let mutants = List.map (fun new_op ->
+              { features = replace_op_embedding features new_op;
+                label = false;
+                mutation = Some (ReplaceOperator new_op) }
+            ) (alternative_operators (get_operator binop)) in
+            original :: mutants
+        | None -> []
+      ) binops
+  | _ -> []
+\end{fstarcode}
+
+\subsubsection{Name-Based Security Role Classification}
+
+Function names often indicate their security relevance. Names like ``sanitize'', ``escape'', and ``encode'' strongly suggest sanitizer functions, while ``input'', ``request'', and ``param'' suggest sources. This section shows how to leverage name embeddings for automatic security role classification.
+
+\textbf{Application}: Augment taint analysis configuration by discovering likely sanitizers that were not explicitly configured.
+
+\begin{fstarcode}[title=Name-Based Security Role Classification]
+(* --------------------------------------------------
+   NAME-BASED SECURITY ROLE CLASSIFICATION
+
+   Names often indicate security relevance:
+   - "sanitize", "escape", "encode" -> likely sanitizer
+   - "input", "request", "param" -> likely source
+   - "query", "exec", "eval" -> likely sink
+   -------------------------------------------------- *)
+
+type security_role =
+  | LikelySource
+  | LikelySink
+  | LikelySanitizer
+  | LikelyValidator
+  | SecurityNeutral
+
+(* Canonical security term embeddings *)
+noeq type security_classifier (dim:embedding_dim) = {
+  source_centroid : embedding dim;      (* avg of "input", "request", "param" *)
+  sink_centroid : embedding dim;        (* avg of "query", "exec", "eval" *)
+  sanitizer_centroid : embedding dim;   (* avg of "escape", "sanitize", "encode" *)
+  validator_centroid : embedding dim;   (* avg of "validate", "check", "verify" *)
+  threshold : float;
+}
+
+val classify_security_role :
+  #dim:embedding_dim ->
+  classifier:security_classifier dim ->
+  model:name_embedding_model dim ->
+  func_name:string ->
+  option (security_role * float)
+
+let classify_security_role #dim classifier model func_name =
+  let func_emb = embed_identifier model func_name in
+  let similarities = [
+    (LikelySource, cosine_similarity func_emb classifier.source_centroid);
+    (LikelySink, cosine_similarity func_emb classifier.sink_centroid);
+    (LikelySanitizer, cosine_similarity func_emb classifier.sanitizer_centroid);
+    (LikelyValidator, cosine_similarity func_emb classifier.validator_centroid);
+  ] in
+  let (best_role, best_sim) = List.max_by snd similarities in
+  if best_sim >= classifier.threshold then
+    Some (best_role, best_sim)
+  else
+    None
+
+(* Augment taint configuration with name-based hints *)
+val augment_taint_config :
+  #dim:embedding_dim ->
+  classifier:security_classifier dim ->
+  model:name_embedding_model dim ->
+  cpg:cpg ->
+  base_config:taint_config ->
+  taint_config
+
+let augment_taint_config #dim classifier model cpg base_config =
+  let functions = get_all_functions cpg in
+  let classified = List.filter_map (fun f ->
+    classify_security_role classifier model f.name
+  ) functions in
+  let new_sanitizers = List.filter_map (fun (f, role, _) ->
+    if role = LikelySanitizer then Some f.id else None
+  ) (List.zip functions classified) in
+  { base_config with
+    sanitizers = Set.union base_config.sanitizers (Set.of_list new_sanitizers) }
+\end{fstarcode}
+
+\begin{remark}[Integration with Taint Analysis (Section 8.1.2)]
+\begin{itemize}
+  \item Use name-based classification to discover likely sanitizers automatically
+  \item Augment configured sanitizer list with name-inferred candidates
+  \item Report confidence level based on embedding similarity score
+\end{itemize}
+\end{remark}
+
+\begin{remark}[Integration with Static Analysis (Section 13.4 Layer 5.5)]
+\begin{itemize}
+  \item ML predictions feed into confidence calculation at Layer 6
+  \item Combine static analysis violations with ML bug predictions
+  \item Higher confidence when static + ML agree
+\end{itemize}
+\end{remark}
+
+\begin{remark}[Cross-References]
+\begin{itemize}
+  \item Section 2.1.5c: Neural invariant synthesis (primary consumer)
+  \item Section 3.1.2: CPG components (provides graph structure)
+  \item Section 3.1.3: Edge types (mapped to GNN edge types)
+  \item Section 8.1.2: Taint analysis (name-based sanitizer detection)
+  \item Section 4.4.7: Optimistic concolic (ML can prioritize paths)
+\end{itemize}
+\end{remark}
+
+%==================================================
+% END OF PART III
+%==================================================

@@ -10,9 +10,10 @@
 //! use the same tree-sitter parser. This ensures that callers using
 //! `get_by_name("javascript")` get the correct handler.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
+
+use rustc_hash::FxHashMap;
 
 use crate::lang::traits::{BoxedLanguage, Language};
 use crate::lang::{c, cpp, go, java, python, rust_lang, typescript};
@@ -26,9 +27,9 @@ static REGISTRY: OnceLock<LanguageRegistry> = OnceLock::new();
 /// - `by_ext`: File extension to language name (e.g., ".ts" -> "typescript")
 /// - `aliases`: Alternative names to canonical names (e.g., "javascript" -> "typescript")
 pub struct LanguageRegistry {
-    by_name: HashMap<&'static str, BoxedLanguage>,
-    by_ext: HashMap<&'static str, &'static str>,
-    aliases: HashMap<&'static str, &'static str>,
+    by_name: FxHashMap<&'static str, BoxedLanguage>,
+    by_ext: FxHashMap<&'static str, &'static str>,
+    aliases: FxHashMap<&'static str, &'static str>,
 }
 
 impl LanguageRegistry {
@@ -40,9 +41,9 @@ impl LanguageRegistry {
     /// Create a new registry with all supported languages.
     fn new() -> Self {
         let mut registry = Self {
-            by_name: HashMap::new(),
-            by_ext: HashMap::new(),
-            aliases: HashMap::new(),
+            by_name: FxHashMap::default(),
+            by_ext: FxHashMap::default(),
+            aliases: FxHashMap::default(),
         };
 
         // Register all languages

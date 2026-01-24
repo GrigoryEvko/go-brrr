@@ -122,9 +122,12 @@
 // Module Declarations
 // =============================================================================
 
+pub mod analysis;
 pub mod ast;
 pub mod callgraph;
 pub mod cfg;
+pub mod coverage;
+pub mod dataflow;
 pub mod dfg;
 pub mod embedding;
 pub mod error;
@@ -158,7 +161,7 @@ pub mod lang {
 // =============================================================================
 
 // Error types - most important for users
-pub use error::{Result, BrrrError};
+pub use error::{BrrrError, Result};
 
 // AST types and utilities
 pub use ast::{
@@ -184,13 +187,41 @@ pub use cfg::{
     to_json_compact as cfg_to_json_compact, to_mermaid as cfg_to_mermaid,
 };
 
+// Coverage types - map test coverage to CFG
+pub use coverage::{
+    BranchCoverage, CoverageData, CoverageFormat, CoverageSummary, EdgeId, FileCoverage,
+    FunctionCoverage, TestSuggestion,
+};
+
+// Coverage mapping functions
+pub use coverage::{
+    compute_path_coverage, find_critical_uncovered_paths, find_uncovered_branches,
+    generate_test_suggestions, map_coverage_to_cfg, parse_coverage_file, parse_coverage_string,
+    CFGCoverage, CriticalPath, PathCoverageResult, UncoveredBranch,
+};
+
+// Analysis types - advanced code analysis
+pub use analysis::{
+    extract_state_machines, extract_state_machines_from_source, OutputFormat as StateMachineFormat,
+    State, StateId, StateMachine, StateMachineError, StateMachineExtractor, Transition,
+    ValidationIssue, ValidationResult as StateMachineValidationResult,
+};
+
+// Invariant analysis types
+pub use analysis::{
+    analyze_invariants, analyze_invariants_function, analyze_invariants_source,
+    format_invariant_function_json, format_invariant_json, format_invariant_text, Evidence,
+    EvidenceKind, FileInvariantAnalysis, FunctionInvariantAnalysis, Invariant, InvariantAnalyzer,
+    InvariantError, InvariantLocation, InvariantMetrics, InvariantOutputFormat, InvariantSummary,
+    InvariantType, LoopBounds, LoopInvariantInfo, MonotonicDirection, MonotonicVariable,
+    SuggestedAssertion, SuggestionCategory,
+};
+
 // DFG types
 pub use dfg::{DFGInfo, DataflowEdge, DataflowKind};
 
 // PDG types (combines CFG + DFG for accurate slicing)
-pub use pdg::{
-    BranchType, ControlDependence, PDGInfo, SliceCriteria, SliceMetrics, SliceResult,
-};
+pub use pdg::{BranchType, ControlDependence, PDGInfo, SliceCriteria, SliceMetrics, SliceResult};
 // PDG slicing functions for advanced use cases (when you want to build PDG once and slice multiple times)
 pub use pdg::{backward_slice as pdg_backward_slice, forward_slice as pdg_forward_slice};
 
@@ -202,9 +233,8 @@ pub use metrics::{
 
 // Nesting depth metrics
 pub use metrics::{
-    analyze_nesting, analyze_file_nesting, NestingMetrics, NestingAnalysis,
-    NestingStats, FunctionNesting, NestingDepthLevel, NestingConstruct,
-    DeepNesting, NestingAnalysisError,
+    analyze_file_nesting, analyze_nesting, DeepNesting, FunctionNesting, NestingAnalysis,
+    NestingAnalysisError, NestingConstruct, NestingDepthLevel, NestingMetrics, NestingStats,
 };
 
 // Call graph types
@@ -235,8 +265,8 @@ pub use callgraph::{analyze_architecture, ArchAnalysis, ArchStats, CycleDependen
 
 // Call graph cache utilities
 pub use callgraph::{
-    get_cache_dir, get_cache_file, get_or_build_graph_with_config,
-    invalidate_cache, warm_cache_with_config, CachedCallGraph, CachedEdge,
+    get_cache_dir, get_cache_file, get_or_build_graph_with_config, invalidate_cache,
+    warm_cache_with_config, CachedCallGraph, CachedEdge,
 };
 
 // Language types
@@ -257,9 +287,9 @@ pub use embedding::{
 
 // Security analysis types - Command Injection
 pub use security::injection::command::{
-    CommandInjectionFinding, CommandSink, Confidence, InjectionKind,
-    Severity as CommandSeverity, SourceLocation, TaintSource, TaintSourceKind,
-    scan_command_injection, scan_file_command_injection,
+    scan_command_injection, scan_file_command_injection, CommandInjectionFinding, CommandSink,
+    Confidence, InjectionKind, Severity as CommandSeverity, SourceLocation, TaintSource,
+    TaintSourceKind,
 };
 
 // Security analysis types - SQL Injection
@@ -270,28 +300,25 @@ pub use security::injection::sql::{
 
 // Security analysis types - Path Traversal
 pub use security::injection::path_traversal::{
-    Confidence as PathTraversalConfidence, FileOperationType, FileSink,
-    PathTraversalFinding, ScanResult as PathTraversalScanResult,
-    Severity as PathTraversalSeverity, SourceLocation as PathTraversalLocation,
-    VulnerablePattern as PathTraversalPattern,
-    scan_path_traversal, scan_file_path_traversal, get_file_sinks,
+    get_file_sinks, scan_file_path_traversal, scan_path_traversal,
+    Confidence as PathTraversalConfidence, FileOperationType, FileSink, PathTraversalFinding,
+    ScanResult as PathTraversalScanResult, Severity as PathTraversalSeverity,
+    SourceLocation as PathTraversalLocation, VulnerablePattern as PathTraversalPattern,
 };
 
 // Security analysis types - Weak Cryptography
 pub use security::crypto::{
-    Algorithm as CryptoAlgorithm, Confidence as CryptoConfidence,
-    Location as CryptoLocation, ScanResult as CryptoScanResult,
-    Severity as CryptoSeverity, UsageContext as CryptoUsageContext,
-    WeakCryptoDetector, WeakCryptoFinding, WeakCryptoIssue,
-    scan_weak_crypto, scan_file_weak_crypto,
+    scan_file_weak_crypto, scan_weak_crypto, Algorithm as CryptoAlgorithm,
+    Confidence as CryptoConfidence, Location as CryptoLocation, ScanResult as CryptoScanResult,
+    Severity as CryptoSeverity, UsageContext as CryptoUsageContext, WeakCryptoDetector,
+    WeakCryptoFinding, WeakCryptoIssue,
 };
 
 // Unified Security API (runs all analyzers in parallel)
 pub use security::{
-    scan_security, Confidence as UnifiedConfidence, InjectionType,
-    Location as UnifiedLocation, ScanSummary, SecurityCategory, SecurityConfig,
+    check_suppression, is_suppressed, scan_security, Confidence as UnifiedConfidence,
+    InjectionType, Location as UnifiedLocation, ScanSummary, SecurityCategory, SecurityConfig,
     SecurityFinding, SecurityReport, Severity as UnifiedSeverity,
-    check_suppression, is_suppressed,
 };
 
 // SARIF output format for CI/CD integration
@@ -306,8 +333,8 @@ pub use quality::clones::{
 // Design pattern detection types
 pub use patterns::{
     detect_patterns, format_pattern_summary, DesignPattern, Location as PatternLocation,
-    PatternAnalysis, PatternCategory, PatternConfig, PatternDetector, PatternError,
-    PatternMatch, PatternStats,
+    PatternAnalysis, PatternCategory, PatternConfig, PatternDetector, PatternError, PatternMatch,
+    PatternStats,
 };
 
 // =============================================================================
@@ -553,7 +580,10 @@ impl RelevantContext {
                     .file_name()
                     .map(|f| f.to_string_lossy().to_string())
                     .unwrap_or_else(|| callee.file.clone());
-                output.push_str(&format!("- {} ({}:{})\n", callee.name, short, callee.start_line));
+                output.push_str(&format!(
+                    "- {} ({}:{})\n",
+                    callee.name, short, callee.start_line
+                ));
             }
             output.push('\n');
         }
@@ -566,7 +596,10 @@ impl RelevantContext {
                     .file_name()
                     .map(|f| f.to_string_lossy().to_string())
                     .unwrap_or_else(|| caller.file.clone());
-                output.push_str(&format!("- {} ({}:{})\n", caller.name, short, caller.start_line));
+                output.push_str(&format!(
+                    "- {} ({}:{})\n",
+                    caller.name, short, caller.start_line
+                ));
             }
             output.push('\n');
         }
@@ -648,8 +681,7 @@ impl<'a> SourceInput<'a> {
                             .unwrap_or_else(|| "unknown".to_string()),
                     )
                 })?;
-                let source = std::fs::read(p)
-                    .map_err(|e| BrrrError::io_with_path(e, p))?;
+                let source = std::fs::read(p).map_err(|e| BrrrError::io_with_path(e, p))?;
                 Ok((source, lang, Some(*path)))
             }
             SourceInput::Source { code, language } => {
@@ -711,9 +743,7 @@ pub fn get_tree(
     exclude_hidden: bool,
     respect_ignore: bool,
 ) -> Result<FileTreeEntry> {
-    let ext_vec: Vec<String> = ext_filter
-        .map(|e| vec![e.to_string()])
-        .unwrap_or_default();
+    let ext_vec: Vec<String> = ext_filter.map(|e| vec![e.to_string()]).unwrap_or_default();
     // Map parameters to ast::file_tree conventions:
     // - show_hidden = !exclude_hidden (show_hidden=false means exclude hidden files)
     // - no_ignore = !respect_ignore (no_ignore=false means respect ignore patterns)
@@ -1676,7 +1706,11 @@ pub fn get_dfg_variables(file: &str, function: &str) -> Result<Vec<String>> {
 /// - [`BrrrError::Io`] if the file cannot be read
 /// - [`BrrrError::FunctionNotFound`] if the function doesn't exist
 /// - [`BrrrError::Parse`] if the file cannot be parsed
-pub fn get_def_use_chains(file: &str, function: &str, variable: &str) -> Result<Vec<(usize, usize)>> {
+pub fn get_def_use_chains(
+    file: &str,
+    function: &str,
+    variable: &str,
+) -> Result<Vec<(usize, usize)>> {
     let dfg = get_dfg(file, function, None)?;
     let chains: Vec<_> = dfg
         .edges
@@ -2081,7 +2115,12 @@ pub fn get_forward_slice(file: &str, function: &str, line: usize) -> Result<Vec<
 /// - [`BrrrError::FunctionNotFound`] if the function doesn't exist
 /// - [`BrrrError::Parse`] if the file cannot be parsed
 /// - [`BrrrError::InvalidArgument`] if line is 0 or direction is not "backward" or "forward"
-pub fn get_pdg_slice(file: &str, function: &str, line: usize, direction: &str) -> Result<Vec<usize>> {
+pub fn get_pdg_slice(
+    file: &str,
+    function: &str,
+    line: usize,
+    direction: &str,
+) -> Result<Vec<usize>> {
     // Validate line number is 1-indexed (lines start at 1, not 0)
     if line == 0 {
         return Err(BrrrError::InvalidArgument(
@@ -2183,7 +2222,7 @@ pub fn build_callgraph(path: &str) -> Result<CallGraph> {
 ///
 /// Returns [`BrrrError`] if the project cannot be scanned.
 pub fn get_impact(path: &str, function: &str, depth: usize) -> Result<Vec<FunctionRef>> {
-    use callgraph::{cache, analyze_impact, ImpactConfig};
+    use callgraph::{analyze_impact, cache, ImpactConfig};
 
     let project = std::path::Path::new(path);
     let graph = cache::get_or_build_graph_with_config(project, None, false)?;
@@ -2473,10 +2512,11 @@ pub fn detect_semantic_patterns(code: &str) -> Vec<String> {
     semantic::detect_semantic_patterns(code)
 }
 
-/// Count tokens in text using tiktoken (cl100k_base).
+/// Count tokens in text using Qwen3-Embedding-0.6B tokenizer.
 ///
-/// Uses the same tokenizer as GPT-4 and Claude for accurate token counting.
-/// Falls back to character-based estimation if tokenizer is unavailable.
+/// Uses the native HuggingFace tokenizer for exact parity with Python's
+/// token counting. Falls back to Unicode-aware character estimation if
+/// the tokenizer is unavailable.
 ///
 /// # Arguments
 ///
@@ -2938,7 +2978,10 @@ pub fn build_function_index(root: &str, language: Option<&str>) -> Result<Functi
 ///
 /// - [`BrrrError::Io`] if the path does not exist or cannot be read
 /// - [`BrrrError::UnsupportedLanguage`] if the language filter is not recognized
-pub fn build_function_index_with_config(root: &str, config: &IndexingConfig) -> Result<FunctionIndex> {
+pub fn build_function_index_with_config(
+    root: &str,
+    config: &IndexingConfig,
+) -> Result<FunctionIndex> {
     use std::path::Path;
 
     let scanner = ProjectScanner::new(root)?;
@@ -3160,7 +3203,9 @@ pub struct IntraFileCall {
 /// - [`BrrrError::Io`] if the file cannot be read
 /// - [`BrrrError::UnsupportedLanguage`] if the file type is not recognized
 /// - [`BrrrError::Parse`] if the file cannot be parsed
-pub fn get_intra_file_calls(file_path: &str) -> Result<std::collections::HashMap<String, Vec<String>>> {
+pub fn get_intra_file_calls(
+    file_path: &str,
+) -> Result<std::collections::HashMap<String, Vec<String>>> {
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
 
@@ -3178,13 +3223,14 @@ pub fn get_intra_file_calls(file_path: &str) -> Result<std::collections::HashMap
     })?;
 
     // Read and parse the file
-    let source = std::fs::read(path)
-        .map_err(|e| BrrrError::io_with_path(e, path))?;
+    let source = std::fs::read(path).map_err(|e| BrrrError::io_with_path(e, path))?;
     let mut parser = lang.parser_for_path(path)?;
-    let tree = parser.parse(&source, None).ok_or_else(|| BrrrError::Parse {
-        file: file_path.to_string(),
-        message: "Failed to parse file".to_string(),
-    })?;
+    let tree = parser
+        .parse(&source, None)
+        .ok_or_else(|| BrrrError::Parse {
+            file: file_path.to_string(),
+            message: "Failed to parse file".to_string(),
+        })?;
 
     // Extract all function definitions
     let module_info = ast::AstExtractor::extract_file(path)?;
@@ -3236,9 +3282,8 @@ pub fn get_intra_file_calls(file_path: &str) -> Result<std::collections::HashMap
 
     // Use tree-sitter query to find call expressions
     let query_str = lang.call_query();
-    let query = tree_sitter::Query::new(&tree.language(), query_str).map_err(|e| {
-        BrrrError::TreeSitter(format!("Failed to compile call query: {}", e))
-    })?;
+    let query = tree_sitter::Query::new(&tree.language(), query_str)
+        .map_err(|e| BrrrError::TreeSitter(format!("Failed to compile call query: {}", e)))?;
 
     let mut cursor = tree_sitter::QueryCursor::new();
     let mut matches = cursor.matches(&query, tree.root_node(), source.as_slice());
@@ -3254,11 +3299,10 @@ pub fn get_intra_file_calls(file_path: &str) -> Result<std::collections::HashMap
 
         if let Some(capture) = callee_capture {
             let callee_node = capture.node;
-            let callee_name = std::str::from_utf8(
-                &source[callee_node.start_byte()..callee_node.end_byte()],
-            )
-            .unwrap_or("")
-            .to_string();
+            let callee_name =
+                std::str::from_utf8(&source[callee_node.start_byte()..callee_node.end_byte()])
+                    .unwrap_or("")
+                    .to_string();
 
             // Only consider calls to functions defined in this file
             if !defined_functions.contains(&callee_name) {
@@ -3348,13 +3392,14 @@ pub fn get_intra_file_calls_detailed(file_path: &str) -> Result<Vec<IntraFileCal
     })?;
 
     // Read and parse the file
-    let source = std::fs::read(path)
-        .map_err(|e| BrrrError::io_with_path(e, path))?;
+    let source = std::fs::read(path).map_err(|e| BrrrError::io_with_path(e, path))?;
     let mut parser = lang.parser_for_path(path)?;
-    let tree = parser.parse(&source, None).ok_or_else(|| BrrrError::Parse {
-        file: file_path.to_string(),
-        message: "Failed to parse file".to_string(),
-    })?;
+    let tree = parser
+        .parse(&source, None)
+        .ok_or_else(|| BrrrError::Parse {
+            file: file_path.to_string(),
+            message: "Failed to parse file".to_string(),
+        })?;
 
     // Extract all function definitions
     let module_info = ast::AstExtractor::extract_file(path)?;
@@ -3402,9 +3447,8 @@ pub fn get_intra_file_calls_detailed(file_path: &str) -> Result<Vec<IntraFileCal
 
     // Use tree-sitter query to find call expressions
     let query_str = lang.call_query();
-    let query = tree_sitter::Query::new(&tree.language(), query_str).map_err(|e| {
-        BrrrError::TreeSitter(format!("Failed to compile call query: {}", e))
-    })?;
+    let query = tree_sitter::Query::new(&tree.language(), query_str)
+        .map_err(|e| BrrrError::TreeSitter(format!("Failed to compile call query: {}", e)))?;
 
     let mut cursor = tree_sitter::QueryCursor::new();
     let mut matches = cursor.matches(&query, tree.root_node(), source.as_slice());
@@ -3420,11 +3464,10 @@ pub fn get_intra_file_calls_detailed(file_path: &str) -> Result<Vec<IntraFileCal
 
         if let Some(capture) = callee_capture {
             let callee_node = capture.node;
-            let callee_name = std::str::from_utf8(
-                &source[callee_node.start_byte()..callee_node.end_byte()],
-            )
-            .unwrap_or("")
-            .to_string();
+            let callee_name =
+                std::str::from_utf8(&source[callee_node.start_byte()..callee_node.end_byte()])
+                    .unwrap_or("")
+                    .to_string();
 
             // Only consider calls to functions defined in this file
             if !defined_functions.contains(&callee_name) {
@@ -3452,9 +3495,7 @@ pub fn get_intra_file_calls_detailed(file_path: &str) -> Result<Vec<IntraFileCal
     }
 
     // Sort by line number for consistent output
-    detailed_calls.sort_by(|a, b| {
-        a.line.cmp(&b.line).then_with(|| a.column.cmp(&b.column))
-    });
+    detailed_calls.sort_by(|a, b| a.line.cmp(&b.line).then_with(|| a.column.cmp(&b.column)));
 
     Ok(detailed_calls)
 }
@@ -3563,8 +3604,17 @@ mod tests {
             let _ = get_dfg_from_source as fn(&str, &str, &str) -> Result<DFGInfo>;
             let _ = get_pdg as fn(&str, &str, Option<&str>) -> Result<PDGInfo>;
             let _ = get_pdg_auto as fn(&str, &str) -> Result<PDGInfo>;
-            let _ = get_slice as fn(&str, &str, usize, Option<&str>, Option<&str>, Option<&str>) -> Result<Vec<usize>>;
-            let _ = get_slice_from_source as fn(&str, &str, usize, Option<&str>, Option<&str>, &str) -> Result<Vec<usize>>;
+            let _ = get_slice
+                as fn(
+                    &str,
+                    &str,
+                    usize,
+                    Option<&str>,
+                    Option<&str>,
+                    Option<&str>,
+                ) -> Result<Vec<usize>>;
+            let _ = get_slice_from_source
+                as fn(&str, &str, usize, Option<&str>, Option<&str>, &str) -> Result<Vec<usize>>;
             let _ = get_backward_slice as fn(&str, &str, usize) -> Result<Vec<usize>>;
             let _ = get_slice_dfg_only as fn(&str, &str, usize) -> Result<Vec<usize>>;
             let _ = get_forward_slice as fn(&str, &str, usize) -> Result<Vec<usize>>;
@@ -3578,7 +3628,8 @@ mod tests {
             let _ = warm_callgraph as fn(&str, Option<&[String]>) -> Result<()>;
             // Semantic API functions
             let _ = extract_semantic_units as fn(&str, &str) -> Result<Vec<EmbeddingUnit>>;
-            let _ = extract_semantic_units_with_callgraph as fn(&str, &str) -> Result<Vec<EmbeddingUnit>>;
+            let _ = extract_semantic_units_with_callgraph
+                as fn(&str, &str) -> Result<Vec<EmbeddingUnit>>;
             let _ = extract_file_units as fn(&str) -> Result<Vec<EmbeddingUnit>>;
             let _ = build_embedding_text as fn(&EmbeddingUnit) -> String;
             let _ = count_tokens as fn(&str) -> usize;
@@ -3590,11 +3641,13 @@ mod tests {
             let _ = estimate_file_count as fn(&str) -> Result<usize>;
             // Function index API functions
             let _ = build_function_index as fn(&str, Option<&str>) -> Result<FunctionIndex>;
-            let _ = build_function_index_with_config as fn(&str, &IndexingConfig) -> Result<FunctionIndex>;
+            let _ = build_function_index_with_config
+                as fn(&str, &IndexingConfig) -> Result<FunctionIndex>;
             // Import analysis API functions
             let _ = get_importers as fn(&str, &str, Option<&str>) -> Result<Vec<ImporterInfo>>;
             // Intra-file call graph API functions
-            let _ = get_intra_file_calls as fn(&str) -> Result<std::collections::HashMap<String, Vec<String>>>;
+            let _ = get_intra_file_calls
+                as fn(&str) -> Result<std::collections::HashMap<String, Vec<String>>>;
             let _ = get_intra_file_calls_detailed as fn(&str) -> Result<Vec<IntraFileCall>>;
         }
     }
@@ -3660,7 +3713,8 @@ mod tests {
         let _ = analyze_dead_code as fn(&CallGraph) -> DeadCodeResult;
         let _ = analyze_dead_code_with_config as fn(&CallGraph, &DeadCodeConfig) -> DeadCodeResult;
         let _ = analyze_impact as fn(&CallGraph, &str, ImpactConfig) -> ImpactResult;
-        let _ = detect_entry_points_with_config as fn(&CallGraph, &DeadCodeConfig) -> Vec<FunctionRef>;
+        let _ =
+            detect_entry_points_with_config as fn(&CallGraph, &DeadCodeConfig) -> Vec<FunctionRef>;
         let _ = analyze_architecture as fn(&CallGraph) -> ArchAnalysis;
     }
 
@@ -3708,8 +3762,14 @@ def compute(x, y):
 "#;
         let dfg = get_dfg_from_source(source, "compute", "python").unwrap();
         assert_eq!(dfg.function_name, "compute");
-        assert!(dfg.definitions.contains_key("z"), "Should track 'z' definition");
-        assert!(dfg.definitions.contains_key("result"), "Should track 'result' definition");
+        assert!(
+            dfg.definitions.contains_key("z"),
+            "Should track 'z' definition"
+        );
+        assert!(
+            dfg.definitions.contains_key("result"),
+            "Should track 'result' definition"
+        );
         assert!(dfg.uses.contains_key("x"), "Should track 'x' use");
         assert!(dfg.uses.contains_key("y"), "Should track 'y' use");
     }
@@ -3729,7 +3789,8 @@ def compute(x):
         assert!(!slice.is_empty(), "Backward slice should not be empty");
 
         // Forward slice from line 3 (a = x + 1)
-        let fwd_slice = get_slice_from_source(source, "compute", 3, Some("forward"), None, "python").unwrap();
+        let fwd_slice =
+            get_slice_from_source(source, "compute", 3, Some("forward"), None, "python").unwrap();
         // Should include lines affected by line 3
         assert!(!fwd_slice.is_empty(), "Forward slice should not be empty");
     }
@@ -3781,10 +3842,7 @@ def main():
     helper()
     return value
 "#;
-        let mut file = tempfile::Builder::new()
-            .suffix(".py")
-            .tempfile()
-            .unwrap();
+        let mut file = tempfile::Builder::new().suffix(".py").tempfile().unwrap();
         file.write_all(source.as_bytes()).unwrap();
 
         let calls = get_intra_file_calls(file.path().to_str().unwrap()).unwrap();
@@ -3792,18 +3850,36 @@ def main():
         // Check that main calls both process and helper
         assert!(calls.contains_key("main"), "Should have main in call map");
         let main_calls = calls.get("main").unwrap();
-        assert!(main_calls.contains(&"process".to_string()), "main should call process");
-        assert!(main_calls.contains(&"helper".to_string()), "main should call helper");
+        assert!(
+            main_calls.contains(&"process".to_string()),
+            "main should call process"
+        );
+        assert!(
+            main_calls.contains(&"helper".to_string()),
+            "main should call helper"
+        );
 
         // Check that process calls helper
-        assert!(calls.contains_key("process"), "Should have process in call map");
+        assert!(
+            calls.contains_key("process"),
+            "Should have process in call map"
+        );
         let process_calls = calls.get("process").unwrap();
-        assert!(process_calls.contains(&"helper".to_string()), "process should call helper");
+        assert!(
+            process_calls.contains(&"helper".to_string()),
+            "process should call helper"
+        );
 
         // Check that helper has no intra-file calls
-        assert!(calls.contains_key("helper"), "Should have helper in call map");
+        assert!(
+            calls.contains_key("helper"),
+            "Should have helper in call map"
+        );
         let helper_calls = calls.get("helper").unwrap();
-        assert!(helper_calls.is_empty(), "helper should not call any local functions");
+        assert!(
+            helper_calls.is_empty(),
+            "helper should not call any local functions"
+        );
     }
 
     #[test]
@@ -3823,16 +3899,17 @@ def main():
     helper()
     return value
 "#;
-        let mut file = tempfile::Builder::new()
-            .suffix(".py")
-            .tempfile()
-            .unwrap();
+        let mut file = tempfile::Builder::new().suffix(".py").tempfile().unwrap();
         file.write_all(source.as_bytes()).unwrap();
 
         let calls = get_intra_file_calls_detailed(file.path().to_str().unwrap()).unwrap();
 
         // Should have at least 3 intra-file calls
-        assert!(calls.len() >= 3, "Should have at least 3 intra-file calls, got {}", calls.len());
+        assert!(
+            calls.len() >= 3,
+            "Should have at least 3 intra-file calls, got {}",
+            calls.len()
+        );
 
         // Check that calls are sorted by line number
         for window in calls.windows(2) {
@@ -3871,10 +3948,7 @@ function main(): number {
     return value;
 }
 "#;
-        let mut file = tempfile::Builder::new()
-            .suffix(".ts")
-            .tempfile()
-            .unwrap();
+        let mut file = tempfile::Builder::new().suffix(".ts").tempfile().unwrap();
         file.write_all(source.as_bytes()).unwrap();
 
         let calls = get_intra_file_calls(file.path().to_str().unwrap()).unwrap();
@@ -3882,8 +3956,14 @@ function main(): number {
         // Check that main calls both process and helper
         assert!(calls.contains_key("main"), "Should have main in call map");
         let main_calls = calls.get("main").unwrap();
-        assert!(main_calls.contains(&"process".to_string()), "main should call process");
-        assert!(main_calls.contains(&"helper".to_string()), "main should call helper");
+        assert!(
+            main_calls.contains(&"process".to_string()),
+            "main should call process"
+        );
+        assert!(
+            main_calls.contains(&"helper".to_string()),
+            "main should call helper"
+        );
     }
 
     #[test]
@@ -3904,18 +3984,24 @@ class Calculator:
         standalone()
         return result
 "#;
-        let mut file = tempfile::Builder::new()
-            .suffix(".py")
-            .tempfile()
-            .unwrap();
+        let mut file = tempfile::Builder::new().suffix(".py").tempfile().unwrap();
         file.write_all(source.as_bytes()).unwrap();
 
         let calls = get_intra_file_calls(file.path().to_str().unwrap()).unwrap();
 
         // Methods should be tracked
-        assert!(calls.contains_key("add"), "Should have add method in call map");
-        assert!(calls.contains_key("compute"), "Should have compute method in call map");
-        assert!(calls.contains_key("standalone"), "Should have standalone in call map");
+        assert!(
+            calls.contains_key("add"),
+            "Should have add method in call map"
+        );
+        assert!(
+            calls.contains_key("compute"),
+            "Should have compute method in call map"
+        );
+        assert!(
+            calls.contains_key("standalone"),
+            "Should have standalone in call map"
+        );
 
         // compute should call standalone (direct function call)
         let compute_calls = calls.get("compute").unwrap();
@@ -3945,10 +4031,7 @@ def main():
     print(value)
     return value
 "#;
-        let mut file = tempfile::Builder::new()
-            .suffix(".py")
-            .tempfile()
-            .unwrap();
+        let mut file = tempfile::Builder::new().suffix(".py").tempfile().unwrap();
         file.write_all(source.as_bytes()).unwrap();
 
         let calls = get_intra_file_calls(file.path().to_str().unwrap()).unwrap();
@@ -3956,8 +4039,10 @@ def main():
         let main_calls = calls.get("main").unwrap();
         // Should only contain local_func, not os, join, or print
         assert_eq!(
-            main_calls.len(), 1,
-            "main should only call one local function, got {:?}", main_calls
+            main_calls.len(),
+            1,
+            "main should only call one local function, got {:?}",
+            main_calls
         );
         assert!(
             main_calls.contains(&"local_func".to_string()),
@@ -3971,10 +4056,7 @@ def main():
         use tempfile::NamedTempFile;
 
         let source = "# Empty Python file with just a comment\n";
-        let mut file = tempfile::Builder::new()
-            .suffix(".py")
-            .tempfile()
-            .unwrap();
+        let mut file = tempfile::Builder::new().suffix(".py").tempfile().unwrap();
         file.write_all(source.as_bytes()).unwrap();
 
         let calls = get_intra_file_calls(file.path().to_str().unwrap()).unwrap();
@@ -3989,14 +4071,14 @@ def main():
         use tempfile::NamedTempFile;
 
         let source = "Some random content";
-        let mut file = tempfile::Builder::new()
-            .suffix(".xyz")
-            .tempfile()
-            .unwrap();
+        let mut file = tempfile::Builder::new().suffix(".xyz").tempfile().unwrap();
         file.write_all(source.as_bytes()).unwrap();
 
         let result = get_intra_file_calls(file.path().to_str().unwrap());
-        assert!(result.is_err(), "Should return error for unsupported language");
+        assert!(
+            result.is_err(),
+            "Should return error for unsupported language"
+        );
         assert!(matches!(result, Err(BrrrError::UnsupportedLanguage(_))));
     }
 

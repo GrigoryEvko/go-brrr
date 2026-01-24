@@ -1,6 +1,6 @@
 //! Complexity metrics for code analysis.
 //!
-//! Provides three types of complexity measurement:
+//! Provides four types of complexity measurement:
 //!
 //! # Cyclomatic Complexity
 //!
@@ -35,6 +35,11 @@
 //! - **Time (T)**: E / 18 - development time estimate (seconds)
 //! - **Bugs (B)**: V / 3000 - estimated bug count
 //!
+//! # Maintainability Index
+//!
+//! Composite metric combining Halstead Volume, Cyclomatic Complexity, and Lines of Code
+//! into a single score (0-100) indicating how maintainable the code is.
+//!
 //! # Risk Levels
 //!
 //! ## Cyclomatic Complexity
@@ -58,30 +63,36 @@
 //! - **Rust**: if, if let, while, while let, for, match arms, ?
 //! - **Go**: if, for, switch cases, select cases
 
-mod cyclomatic;
 mod cognitive;
+pub mod common;
+mod cyclomatic;
 mod halstead;
 mod maintainability;
 
 pub use cyclomatic::{
-    analyze_complexity, analyze_file_complexity, CyclomaticComplexity,
-    ComplexityAnalysis, RiskLevel, ComplexityStats, FunctionComplexity,
+    analyze_complexity, analyze_file_complexity, ComplexityAnalysis, ComplexityStats,
+    CyclomaticComplexity, FunctionComplexity, RiskLevel,
 };
 
 pub use cognitive::{
-    analyze_cognitive_complexity, analyze_file_cognitive_complexity,
-    CognitiveComplexity, CognitiveAnalysis, CognitiveRiskLevel,
-    CognitiveStats, FunctionCognitiveComplexity, ComplexityContribution,
-    ConstructType, CognitiveAnalysisError,
+    analyze_cognitive_complexity, analyze_file_cognitive_complexity, CognitiveAnalysis,
+    CognitiveAnalysisError, CognitiveComplexity, CognitiveRiskLevel, CognitiveStats,
+    ComplexityContribution, ConstructType, FunctionCognitiveComplexity,
 };
 
 pub use halstead::{
-    analyze_halstead, analyze_file_halstead, HalsteadMetrics, HalsteadAnalysis,
-    HalsteadStats, FunctionHalstead, HalsteadQuality, QualityLevel, HalsteadError,
+    analyze_file_halstead, analyze_halstead, FunctionHalstead, HalsteadAnalysis, HalsteadError,
+    HalsteadMetrics, HalsteadQuality, HalsteadStats, QualityLevel,
 };
 
 pub use maintainability::{
-    analyze_maintainability, analyze_file_maintainability, MaintainabilityIndex,
-    MaintainabilityAnalysis, MaintainabilityStats, FunctionMaintainability,
-    MaintainabilityRiskLevel, MaintainabilityError, LinesOfCode,
+    analyze_file_maintainability, analyze_maintainability, FunctionMaintainability, LinesOfCode,
+    MaintainabilityAnalysis, MaintainabilityError, MaintainabilityIndex, MaintainabilityRiskLevel,
+    MaintainabilityStats,
+};
+
+pub use common::{
+    build_histogram, calculate_risk_distribution, find_function_body, find_function_node,
+    is_function_node, is_function_signature_part, AnalysisError, BaseComplexityStats, BaseF64Stats,
+    HistogramBucket,
 };

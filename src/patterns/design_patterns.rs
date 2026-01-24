@@ -653,24 +653,30 @@ impl PatternDetector {
         self.calculate_stats(&mut analysis);
 
         // Filter by minimum confidence.
-        analysis.patterns.retain(|p| p.confidence >= self.config.min_confidence);
+        analysis
+            .patterns
+            .retain(|p| p.confidence >= self.config.min_confidence);
 
         // Filter by requested patterns if specified.
         if !self.config.patterns.is_empty() {
-            let patterns_lower: Vec<String> = self.config.patterns
+            let patterns_lower: Vec<String> = self
+                .config
+                .patterns
                 .iter()
                 .map(|p| p.to_lowercase())
                 .collect();
             analysis.patterns.retain(|p| {
-                patterns_lower.iter().any(|name| {
-                    p.pattern.name().to_lowercase().contains(name)
-                })
+                patterns_lower
+                    .iter()
+                    .any(|name| p.pattern.name().to_lowercase().contains(name))
             });
         }
 
         // Sort by confidence (highest first).
         analysis.patterns.sort_by(|a, b| {
-            b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal)
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         Ok(analysis)
@@ -678,9 +684,9 @@ impl PatternDetector {
 
     /// Detect patterns in a directory.
     fn detect_in_directory(&self, path: &Path, analysis: &mut PatternAnalysis) -> Result<()> {
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| crate::error::BrrrError::InvalidArgument("Invalid path encoding".to_string()))?;
+        let path_str = path.to_str().ok_or_else(|| {
+            crate::error::BrrrError::InvalidArgument("Invalid path encoding".to_string())
+        })?;
 
         let scanner = ProjectScanner::new(path_str)?;
 
@@ -749,8 +755,12 @@ impl PatternDetector {
     /// Detect patterns in a single file.
     fn detect_in_file(&self, path: &Path, analysis: &mut PatternAnalysis) -> Result<()> {
         let registry = LanguageRegistry::global();
-        let lang = registry.detect_language(path)
-            .or_else(|| self.config.language.as_ref().and_then(|l| registry.get_by_name(l)));
+        let lang = registry.detect_language(path).or_else(|| {
+            self.config
+                .language
+                .as_ref()
+                .and_then(|l| registry.get_by_name(l))
+        });
 
         if lang.is_none() {
             trace!("Unsupported language for file: {}", path.display());
@@ -855,11 +865,17 @@ impl PatternDetector {
         // Check for private constructor.
         let private_ctor = class.methods.iter().find(|m| {
             let name = m.name.to_lowercase();
-            (name == "__init__" || name == "new" || name == class_name_lower ||
-             name == "init" || name == "constructor") &&
-            m.decorators.iter().any(|d| d.contains("private")) ||
-            matches!(lang, "java" | "typescript" | "csharp") &&
-                !m.params.iter().any(|p| !p.contains("self") && !p.contains("this"))
+            (name == "__init__"
+                || name == "new"
+                || name == class_name_lower
+                || name == "init"
+                || name == "constructor")
+                && m.decorators.iter().any(|d| d.contains("private"))
+                || matches!(lang, "java" | "typescript" | "csharp")
+                    && !m
+                        .params
+                        .iter()
+                        .any(|p| !p.contains("self") && !p.contains("this"))
         });
 
         // Check for Python __new__ singleton pattern.
@@ -876,10 +892,21 @@ impl PatternDetector {
         }
 
         // Check for static instance field.
-        let instance_field_names = ["_instance", "instance", "_singleton", "singleton",
-                                     "INSTANCE", "_INSTANCE", "shared", "sharedInstance"];
+        let instance_field_names = [
+            "_instance",
+            "instance",
+            "_singleton",
+            "singleton",
+            "INSTANCE",
+            "_INSTANCE",
+            "shared",
+            "sharedInstance",
+        ];
         for field in &class.fields {
-            if instance_field_names.iter().any(|n| field.name.eq_ignore_ascii_case(n)) {
+            if instance_field_names
+                .iter()
+                .any(|n| field.name.eq_ignore_ascii_case(n))
+            {
                 if field.is_static {
                     confidence += 0.25;
                     evidence.push(format!("Has static instance field: {}", field.name));
@@ -893,15 +920,28 @@ impl PatternDetector {
         }
 
         // Check for getInstance() or similar method.
-        let getter_patterns = ["getinstance", "get_instance", "instance", "shared",
-                               "sharedinstance", "default", "current", "singleton"];
+        let getter_patterns = [
+            "getinstance",
+            "get_instance",
+            "instance",
+            "shared",
+            "sharedinstance",
+            "default",
+            "current",
+            "singleton",
+        ];
         for method in &class.methods {
             let method_lower = method.name.to_lowercase();
-            if getter_patterns.iter().any(|p| method_lower == *p || method_lower.contains(p)) {
+            if getter_patterns
+                .iter()
+                .any(|p| method_lower == *p || method_lower.contains(p))
+            {
                 // Check if it returns the class type or has static marker.
-                let is_static = method.decorators.iter().any(|d| {
-                    d.contains("static") || d.contains("classmethod")
-                }) || !method.params.iter().any(|p| p.contains("self"));
+                let is_static = method
+                    .decorators
+                    .iter()
+                    .any(|d| d.contains("static") || d.contains("classmethod"))
+                    || !method.params.iter().any(|p| p.contains("self"));
 
                 if is_static {
                     confidence += 0.3;
@@ -921,8 +961,10 @@ impl PatternDetector {
         if lang == "rust" {
             for field in &class.fields {
                 let field_type = field.field_type.as_deref().unwrap_or("");
-                if field_type.contains("Lazy") || field_type.contains("OnceCell") ||
-                   field_type.contains("LazyLock") {
+                if field_type.contains("Lazy")
+                    || field_type.contains("OnceCell")
+                    || field_type.contains("LazyLock")
+                {
                     confidence += 0.3;
                     evidence.push(format!("Uses lazy initialization: {}", field_type));
                 }
@@ -947,17 +989,19 @@ impl PatternDetector {
                 None
             };
 
-            Some(PatternMatch::new(pattern, confidence.min(1.0))
-                .with_location(Location::for_class(path.to_path_buf(), class))
-                .with_note(note.unwrap_or_default())
-                .with_evidence(evidence))
+            Some(
+                PatternMatch::new(pattern, confidence.min(1.0))
+                    .with_location(Location::for_class(path.to_path_buf(), class))
+                    .with_note(note.unwrap_or_default())
+                    .with_evidence(evidence),
+            )
         } else {
             None
         }
     }
 
     /// Detect Builder pattern.
-    fn detect_builder(&self, class: &ClassInfo, path: &Path, lang: &str) -> Option<PatternMatch> {
+    fn detect_builder(&self, class: &ClassInfo, path: &Path, _lang: &str) -> Option<PatternMatch> {
         let mut confidence: f64 = 0.0;
         let mut evidence = Vec::new();
         let mut build_method = String::new();
@@ -971,7 +1015,9 @@ impl PatternDetector {
             confidence += 0.35;
             evidence.push("Class name ends with 'Builder'".to_string());
             // Infer target type from class name.
-            let target = class.name.strip_suffix("Builder")
+            let target = class
+                .name
+                .strip_suffix("Builder")
                 .or_else(|| class.name.strip_suffix("builder"));
             if let Some(t) = target {
                 if !t.is_empty() {
@@ -981,7 +1027,14 @@ impl PatternDetector {
         }
 
         // Check for build() method.
-        let build_methods = ["build", "create", "make", "construct", "get_result", "getResult"];
+        let build_methods = [
+            "build",
+            "create",
+            "make",
+            "construct",
+            "get_result",
+            "getResult",
+        ];
         for method in &class.methods {
             let method_lower = method.name.to_lowercase();
             if build_methods.iter().any(|b| method_lower == *b) {
@@ -1005,9 +1058,11 @@ impl PatternDetector {
             let is_setter = setter_prefixes.iter().any(|p| method_lower.starts_with(p));
 
             // Check if method returns Self (fluent interface).
-            let returns_self = method.return_type.as_ref().map(|r| {
-                r.contains("Self") || r.contains(&class.name) || r == "&mut Self"
-            }).unwrap_or(false);
+            let returns_self = method
+                .return_type
+                .as_ref()
+                .map(|r| r.contains("Self") || r.contains(&class.name) || r == "&mut Self")
+                .unwrap_or(false);
 
             if is_setter && returns_self {
                 confidence += 0.05;
@@ -1021,11 +1076,18 @@ impl PatternDetector {
         // Bonus for multiple fluent setters.
         if setters.len() >= 3 {
             confidence += 0.15;
-            evidence.push(format!("Has {} setter/configuration methods", setters.len()));
+            evidence.push(format!(
+                "Has {} setter/configuration methods",
+                setters.len()
+            ));
         }
 
         // Check for step builder pattern (interfaces).
-        if class.bases.iter().any(|b| b.to_lowercase().contains("step")) {
+        if class
+            .bases
+            .iter()
+            .any(|b| b.to_lowercase().contains("step"))
+        {
             confidence += 0.1;
             evidence.push("Implements step builder interface".to_string());
         }
@@ -1042,23 +1104,33 @@ impl PatternDetector {
                 target_type,
             };
 
-            Some(PatternMatch::new(pattern, confidence.min(1.0))
-                .with_location(Location::for_class(path.to_path_buf(), class))
-                .with_evidence(evidence))
+            Some(
+                PatternMatch::new(pattern, confidence.min(1.0))
+                    .with_location(Location::for_class(path.to_path_buf(), class))
+                    .with_evidence(evidence),
+            )
         } else {
             None
         }
     }
 
     /// Detect Factory pattern.
-    fn detect_factory(&self, class: &ClassInfo, all_classes: &[ClassInfo],
-                      path: &Path, _lang: &str) -> Option<PatternMatch> {
+    fn detect_factory(
+        &self,
+        class: &ClassInfo,
+        all_classes: &[ClassInfo],
+        path: &Path,
+        _lang: &str,
+    ) -> Option<PatternMatch> {
         let mut confidence: f64 = 0.0;
         let mut evidence = Vec::new();
         let mut create_methods = Vec::new();
         let mut products = Vec::new();
-        let is_abstract = class.decorators.iter().any(|d| d.contains("abstract")) ||
-                          class.bases.iter().any(|b| b.contains("ABC") || b.contains("Abstract"));
+        let is_abstract = class.decorators.iter().any(|d| d.contains("abstract"))
+            || class
+                .bases
+                .iter()
+                .any(|b| b.contains("ABC") || b.contains("Abstract"));
 
         let class_name_lower = class.name.to_lowercase();
 
@@ -1069,7 +1141,15 @@ impl PatternDetector {
         }
 
         // Check for create* methods.
-        let factory_prefixes = ["create", "make", "build", "new", "get", "produce", "manufacture"];
+        let factory_prefixes = [
+            "create",
+            "make",
+            "build",
+            "new",
+            "get",
+            "produce",
+            "manufacture",
+        ];
         for method in &class.methods {
             let method_lower = method.name.to_lowercase();
             if factory_prefixes.iter().any(|p| method_lower.starts_with(p)) {
@@ -1077,13 +1157,15 @@ impl PatternDetector {
                 if let Some(ref ret_type) = method.return_type {
                     let ret_lower = ret_type.to_lowercase();
                     // Check if return type is a known class.
-                    let returns_concrete = all_classes.iter()
+                    let returns_concrete = all_classes
+                        .iter()
                         .any(|c| c.name.eq_ignore_ascii_case(ret_type));
 
-                    if !returns_concrete ||
-                       ret_lower.contains("interface") ||
-                       ret_lower.contains("abstract") ||
-                       ret_lower.contains("protocol") {
+                    if !returns_concrete
+                        || ret_lower.contains("interface")
+                        || ret_lower.contains("abstract")
+                        || ret_lower.contains("protocol")
+                    {
                         confidence += 0.15;
                         create_methods.push(method.name.clone());
                         if !products.contains(ret_type) {
@@ -1128,9 +1210,11 @@ impl PatternDetector {
                 is_abstract,
             };
 
-            Some(PatternMatch::new(pattern, confidence.min(1.0))
-                .with_location(Location::for_class(path.to_path_buf(), class))
-                .with_evidence(evidence))
+            Some(
+                PatternMatch::new(pattern, confidence.min(1.0))
+                    .with_location(Location::for_class(path.to_path_buf(), class))
+                    .with_evidence(evidence),
+            )
         } else {
             None
         }
@@ -1147,10 +1231,11 @@ impl PatternDetector {
         let class_name_lower = class.name.to_lowercase();
 
         // Check for observable/subject naming.
-        if class_name_lower.contains("observable") ||
-           class_name_lower.contains("subject") ||
-           class_name_lower.contains("publisher") ||
-           class_name_lower.contains("emitter") {
+        if class_name_lower.contains("observable")
+            || class_name_lower.contains("subject")
+            || class_name_lower.contains("publisher")
+            || class_name_lower.contains("emitter")
+        {
             confidence += 0.25;
             evidence.push("Class name suggests observable pattern".to_string());
         }
@@ -1159,14 +1244,19 @@ impl PatternDetector {
         let collection_patterns = ["listener", "observer", "subscriber", "handler", "callback"];
         for field in &class.fields {
             let field_lower = field.name.to_lowercase();
-            let type_lower = field.field_type.as_ref()
+            let type_lower = field
+                .field_type
+                .as_ref()
                 .map(|t| t.to_lowercase())
                 .unwrap_or_default();
 
-            if collection_patterns.iter().any(|p| field_lower.contains(p)) ||
-               (type_lower.contains("list") || type_lower.contains("vec") ||
-                type_lower.contains("set") || type_lower.contains("array")) &&
-               collection_patterns.iter().any(|p| type_lower.contains(p)) {
+            if collection_patterns.iter().any(|p| field_lower.contains(p))
+                || (type_lower.contains("list")
+                    || type_lower.contains("vec")
+                    || type_lower.contains("set")
+                    || type_lower.contains("array"))
+                    && collection_patterns.iter().any(|p| type_lower.contains(p))
+            {
                 confidence += 0.2;
                 evidence.push(format!("Has observer collection: {}", field.name));
 
@@ -1175,7 +1265,7 @@ impl PatternDetector {
                     // Extract type from generic like List<Observer>.
                     if let Some(start) = ft.find('<') {
                         if let Some(end) = ft.find('>') {
-                            let inner = &ft[start+1..end];
+                            let inner = &ft[start + 1..end];
                             if !observers.contains(&inner.to_string()) {
                                 observers.push(inner.to_string());
                             }
@@ -1192,22 +1282,34 @@ impl PatternDetector {
         for method in &class.methods {
             let method_lower = method.name.to_lowercase();
 
-            if subscribe_patterns.iter().any(|p| method_lower.contains(p)) &&
-               collection_patterns.iter().any(|p| method_lower.contains(p)) {
+            if subscribe_patterns.iter().any(|p| method_lower.contains(p))
+                && collection_patterns.iter().any(|p| method_lower.contains(p))
+            {
                 confidence += 0.15;
                 subscribe_methods.push(method.name.clone());
                 evidence.push(format!("Has subscribe method: {}", method.name));
             }
 
-            if unsubscribe_patterns.iter().any(|p| method_lower.contains(p)) &&
-               collection_patterns.iter().any(|p| method_lower.contains(p)) {
+            if unsubscribe_patterns
+                .iter()
+                .any(|p| method_lower.contains(p))
+                && collection_patterns.iter().any(|p| method_lower.contains(p))
+            {
                 confidence += 0.1;
                 subscribe_methods.push(method.name.clone());
             }
         }
 
         // Check for notify method.
-        let notify_patterns = ["notify", "emit", "fire", "trigger", "dispatch", "publish", "broadcast"];
+        let notify_patterns = [
+            "notify",
+            "emit",
+            "fire",
+            "trigger",
+            "dispatch",
+            "publish",
+            "broadcast",
+        ];
         for method in &class.methods {
             let method_lower = method.name.to_lowercase();
             if notify_patterns.iter().any(|p| method_lower.contains(p)) {
@@ -1225,17 +1327,24 @@ impl PatternDetector {
                 subscribe_methods,
             };
 
-            Some(PatternMatch::new(pattern, confidence.min(1.0))
-                .with_location(Location::for_class(path.to_path_buf(), class))
-                .with_evidence(evidence))
+            Some(
+                PatternMatch::new(pattern, confidence.min(1.0))
+                    .with_location(Location::for_class(path.to_path_buf(), class))
+                    .with_evidence(evidence),
+            )
         } else {
             None
         }
     }
 
     /// Detect Decorator pattern.
-    fn detect_decorator(&self, class: &ClassInfo, all_classes: &[ClassInfo],
-                        path: &Path, _lang: &str) -> Option<PatternMatch> {
+    fn detect_decorator(
+        &self,
+        class: &ClassInfo,
+        all_classes: &[ClassInfo],
+        path: &Path,
+        _lang: &str,
+    ) -> Option<PatternMatch> {
         let mut confidence: f64 = 0.0;
         let mut evidence = Vec::new();
         let mut base_interface = String::new();
@@ -1254,12 +1363,13 @@ impl PatternDetector {
             // Check if any field has the same type as a base class.
             for field in &class.fields {
                 if let Some(ref field_type) = field.field_type {
-                    if field_type == base ||
-                       field_type.contains(base) ||
-                       base.contains(field_type) {
+                    if field_type == base || field_type.contains(base) || base.contains(field_type)
+                    {
                         confidence += 0.35;
-                        evidence.push(format!("Has wrapped component field: {} of type {}",
-                                              field.name, field_type));
+                        evidence.push(format!(
+                            "Has wrapped component field: {} of type {}",
+                            field.name, field_type
+                        ));
                         base_interface = base.clone();
                         component_field = Some(field.name.clone());
                         break;
@@ -1269,9 +1379,10 @@ impl PatternDetector {
 
             // Check constructor parameters for component injection.
             for method in &class.methods {
-                let is_ctor = method.name == "__init__" || method.name == "new" ||
-                             method.name.to_lowercase() == class_name_lower ||
-                             method.name == "constructor";
+                let is_ctor = method.name == "__init__"
+                    || method.name == "new"
+                    || method.name.to_lowercase() == class_name_lower
+                    || method.name == "constructor";
                 if is_ctor {
                     for param in &method.params {
                         if param.contains(base) {
@@ -1287,17 +1398,19 @@ impl PatternDetector {
         // This is a heuristic based on method matching.
         if !base_interface.is_empty() {
             if let Some(base_class) = all_classes.iter().find(|c| c.name == base_interface) {
-                let base_method_names: HashSet<_> = base_class.methods.iter()
-                    .map(|m| m.name.as_str())
-                    .collect();
-                let class_method_names: HashSet<_> = class.methods.iter()
-                    .map(|m| m.name.as_str())
-                    .collect();
+                let base_method_names: HashSet<_> =
+                    base_class.methods.iter().map(|m| m.name.as_str()).collect();
+                let class_method_names: HashSet<_> =
+                    class.methods.iter().map(|m| m.name.as_str()).collect();
 
-                let shared_methods: usize = base_method_names.intersection(&class_method_names).count();
+                let shared_methods: usize =
+                    base_method_names.intersection(&class_method_names).count();
                 if shared_methods >= 2 {
                     confidence += 0.1;
-                    evidence.push(format!("Shares {} methods with base interface", shared_methods));
+                    evidence.push(format!(
+                        "Shares {} methods with base interface",
+                        shared_methods
+                    ));
                 }
             }
         }
@@ -1309,9 +1422,11 @@ impl PatternDetector {
                 component_field,
             };
 
-            Some(PatternMatch::new(pattern, confidence.min(1.0))
-                .with_location(Location::for_class(path.to_path_buf(), class))
-                .with_evidence(evidence))
+            Some(
+                PatternMatch::new(pattern, confidence.min(1.0))
+                    .with_location(Location::for_class(path.to_path_buf(), class))
+                    .with_evidence(evidence),
+            )
         } else {
             None
         }
@@ -1339,20 +1454,26 @@ impl PatternDetector {
                 let field_type_lower = field_type.to_lowercase();
 
                 // Check if field type is different from all base classes.
-                let is_different_from_bases = class.bases.iter()
+                let is_different_from_bases = class
+                    .bases
+                    .iter()
                     .all(|b| !field_type.contains(b) && !b.contains(field_type));
 
                 if is_different_from_bases && !class.bases.is_empty() {
                     confidence += 0.25;
-                    evidence.push(format!("Wraps {} while implementing different interface", field_type));
+                    evidence.push(format!(
+                        "Wraps {} while implementing different interface",
+                        field_type
+                    ));
                     adaptee = field_type.clone();
                     target_interface = class.bases.first().cloned();
                 }
 
                 // Common adaptee naming patterns.
-                if field_type_lower.contains("adaptee") ||
-                   field.name.to_lowercase().contains("adaptee") ||
-                   field.name.to_lowercase().contains("wrapped") {
+                if field_type_lower.contains("adaptee")
+                    || field.name.to_lowercase().contains("adaptee")
+                    || field.name.to_lowercase().contains("wrapped")
+                {
                     confidence += 0.2;
                     evidence.push(format!("Has adaptee field: {}", field.name));
                     adaptee = field_type.clone();
@@ -1367,9 +1488,11 @@ impl PatternDetector {
                 target_interface,
             };
 
-            Some(PatternMatch::new(pattern, confidence.min(1.0))
-                .with_location(Location::for_class(path.to_path_buf(), class))
-                .with_evidence(evidence))
+            Some(
+                PatternMatch::new(pattern, confidence.min(1.0))
+                    .with_location(Location::for_class(path.to_path_buf(), class))
+                    .with_evidence(evidence),
+            )
         } else {
             None
         }
@@ -1415,7 +1538,10 @@ impl PatternDetector {
                 for base in &class.bases {
                     if field_type == base || field_type.contains(base) {
                         confidence += 0.3;
-                        evidence.push(format!("Has subject field: {} of type {}", field.name, field_type));
+                        evidence.push(format!(
+                            "Has subject field: {} of type {}",
+                            field.name, field_type
+                        ));
                         subject = field_type.clone();
                         break;
                     }
@@ -1424,8 +1550,11 @@ impl PatternDetector {
 
             // Check for subject/real naming.
             let field_lower = field.name.to_lowercase();
-            if field_lower.contains("subject") || field_lower.contains("real") ||
-               field_lower.contains("target") || field_lower.contains("wrapped") {
+            if field_lower.contains("subject")
+                || field_lower.contains("real")
+                || field_lower.contains("target")
+                || field_lower.contains("wrapped")
+            {
                 confidence += 0.15;
                 if let Some(ref ft) = field.field_type {
                     subject = ft.clone();
@@ -1436,8 +1565,10 @@ impl PatternDetector {
         // Check for lazy loading indicators.
         let has_lazy = class.methods.iter().any(|m| {
             let name_lower = m.name.to_lowercase();
-            name_lower.contains("lazy") || name_lower.contains("ensure") ||
-            name_lower.contains("initialize") || name_lower.contains("load")
+            name_lower.contains("lazy")
+                || name_lower.contains("ensure")
+                || name_lower.contains("initialize")
+                || name_lower.contains("load")
         });
         if has_lazy {
             confidence += 0.1;
@@ -1449,8 +1580,10 @@ impl PatternDetector {
         // Check for access control methods.
         let has_access_control = class.methods.iter().any(|m| {
             let name_lower = m.name.to_lowercase();
-            name_lower.contains("check") || name_lower.contains("authorize") ||
-            name_lower.contains("validate") || name_lower.contains("permission")
+            name_lower.contains("check")
+                || name_lower.contains("authorize")
+                || name_lower.contains("validate")
+                || name_lower.contains("permission")
         });
         if has_access_control {
             confidence += 0.1;
@@ -1466,17 +1599,24 @@ impl PatternDetector {
                 proxy_type,
             };
 
-            Some(PatternMatch::new(pattern, confidence.min(1.0))
-                .with_location(Location::for_class(path.to_path_buf(), class))
-                .with_evidence(evidence))
+            Some(
+                PatternMatch::new(pattern, confidence.min(1.0))
+                    .with_location(Location::for_class(path.to_path_buf(), class))
+                    .with_evidence(evidence),
+            )
         } else {
             None
         }
     }
 
     /// Detect Command pattern.
-    fn detect_command(&self, class: &ClassInfo, all_classes: &[ClassInfo],
-                      path: &Path, _lang: &str) -> Option<PatternMatch> {
+    fn detect_command(
+        &self,
+        class: &ClassInfo,
+        all_classes: &[ClassInfo],
+        path: &Path,
+        _lang: &str,
+    ) -> Option<PatternMatch> {
         let mut confidence: f64 = 0.0;
         let mut evidence = Vec::new();
         let mut execute_method = String::new();
@@ -1485,17 +1625,24 @@ impl PatternDetector {
         let class_name_lower = class.name.to_lowercase();
 
         // Check for command naming.
-        if class_name_lower.ends_with("command") || class_name_lower.ends_with("action") ||
-           class_name_lower.ends_with("handler") {
+        if class_name_lower.ends_with("command")
+            || class_name_lower.ends_with("action")
+            || class_name_lower.ends_with("handler")
+        {
             confidence += 0.25;
             evidence.push("Class name suggests command pattern".to_string());
         }
 
         // Check for execute method.
-        let execute_patterns = ["execute", "run", "invoke", "call", "handle", "perform", "do"];
+        let execute_patterns = [
+            "execute", "run", "invoke", "call", "handle", "perform", "do",
+        ];
         for method in &class.methods {
             let method_lower = method.name.to_lowercase();
-            if execute_patterns.iter().any(|p| method_lower == *p || method_lower.starts_with(p)) {
+            if execute_patterns
+                .iter()
+                .any(|p| method_lower == *p || method_lower.starts_with(p))
+            {
                 confidence += 0.25;
                 evidence.push(format!("Has execute method: {}", method.name));
                 execute_method = method.name.clone();
@@ -1512,8 +1659,9 @@ impl PatternDetector {
         // Check for receiver field (command encapsulates receiver).
         let has_receiver = class.fields.iter().any(|f| {
             let name_lower = f.name.to_lowercase();
-            name_lower.contains("receiver") || name_lower.contains("target") ||
-            name_lower.contains("handler")
+            name_lower.contains("receiver")
+                || name_lower.contains("target")
+                || name_lower.contains("handler")
         });
         if has_receiver {
             confidence += 0.1;
@@ -1523,8 +1671,7 @@ impl PatternDetector {
         // Check if class implements Command interface.
         let implements_command = class.bases.iter().any(|b| {
             let b_lower = b.to_lowercase();
-            b_lower.contains("command") || b_lower.contains("handler") ||
-            b_lower.contains("action")
+            b_lower.contains("command") || b_lower.contains("handler") || b_lower.contains("action")
         });
         if implements_command {
             confidence += 0.2;
@@ -1533,8 +1680,13 @@ impl PatternDetector {
 
         if confidence >= 0.4 && !execute_method.is_empty() {
             // Try to find command interface and other implementations.
-            let interface = class.bases.first().cloned().unwrap_or_else(|| "Command".to_string());
-            let commands: Vec<String> = all_classes.iter()
+            let interface = class
+                .bases
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Command".to_string());
+            let commands: Vec<String> = all_classes
+                .iter()
                 .filter(|c| c.name != class.name && c.bases.contains(&interface))
                 .map(|c| c.name.clone())
                 .collect();
@@ -1546,25 +1698,30 @@ impl PatternDetector {
                 has_undo,
             };
 
-            Some(PatternMatch::new(pattern, confidence.min(1.0))
-                .with_location(Location::for_class(path.to_path_buf(), class))
-                .with_evidence(evidence))
+            Some(
+                PatternMatch::new(pattern, confidence.min(1.0))
+                    .with_location(Location::for_class(path.to_path_buf(), class))
+                    .with_evidence(evidence),
+            )
         } else {
             None
         }
     }
 
     /// Detect Strategy pattern (multiple implementations of an interface).
-    fn detect_strategy(&self, classes: &[ClassInfo], path: &Path, _lang: &str) -> Vec<PatternMatch> {
+    fn detect_strategy(
+        &self,
+        classes: &[ClassInfo],
+        path: &Path,
+        _lang: &str,
+    ) -> Vec<PatternMatch> {
         let mut patterns = Vec::new();
 
         // Group classes by base interface.
         let mut interface_impls: FxHashMap<String, Vec<&ClassInfo>> = FxHashMap::default();
         for class in classes {
             for base in &class.bases {
-                interface_impls.entry(base.clone())
-                    .or_default()
-                    .push(class);
+                interface_impls.entry(base.clone()).or_default().push(class);
             }
         }
 
@@ -1579,8 +1736,11 @@ impl PatternDetector {
 
             // Check if interface name suggests strategy.
             let interface_lower = interface.to_lowercase();
-            if interface_lower.contains("strategy") || interface_lower.contains("policy") ||
-               interface_lower.contains("algorithm") || interface_lower.contains("handler") {
+            if interface_lower.contains("strategy")
+                || interface_lower.contains("policy")
+                || interface_lower.contains("algorithm")
+                || interface_lower.contains("handler")
+            {
                 confidence += 0.3;
                 evidence.push("Interface name suggests strategy pattern".to_string());
             }
@@ -1591,13 +1751,14 @@ impl PatternDetector {
 
             // Check if implementations have similar method signatures.
             if implementations.len() >= 2 {
-                let first_methods: HashSet<_> = implementations[0].methods.iter()
+                let first_methods: HashSet<_> = implementations[0]
+                    .methods
+                    .iter()
                     .map(|m| m.name.as_str())
                     .collect();
                 let all_have_same_methods = implementations.iter().skip(1).all(|impl_class| {
-                    let impl_methods: HashSet<_> = impl_class.methods.iter()
-                        .map(|m| m.name.as_str())
-                        .collect();
+                    let impl_methods: HashSet<_> =
+                        impl_class.methods.iter().map(|m| m.name.as_str()).collect();
                     !first_methods.is_disjoint(&impl_methods)
                 });
                 if all_have_same_methods {
@@ -1609,11 +1770,14 @@ impl PatternDetector {
             // Check for context class that uses the interface.
             let context = classes.iter().find(|c| {
                 c.fields.iter().any(|f| {
-                    f.field_type.as_ref().map(|t| t == &interface).unwrap_or(false)
-                }) ||
-                c.methods.iter().any(|m| {
-                    m.params.iter().any(|p| p.contains(&interface))
-                })
+                    f.field_type
+                        .as_ref()
+                        .map(|t| t == &interface)
+                        .unwrap_or(false)
+                }) || c
+                    .methods
+                    .iter()
+                    .any(|m| m.params.iter().any(|p| p.contains(&interface)))
             });
 
             if context.is_some() {
@@ -1622,9 +1786,8 @@ impl PatternDetector {
             }
 
             if confidence >= 0.4 {
-                let impl_names: Vec<String> = implementations.iter()
-                    .map(|c| c.name.clone())
-                    .collect();
+                let impl_names: Vec<String> =
+                    implementations.iter().map(|c| c.name.clone()).collect();
 
                 let pattern = DesignPattern::Strategy {
                     interface: interface.clone(),
@@ -1637,9 +1800,11 @@ impl PatternDetector {
                     locations.push(Location::for_class(path.to_path_buf(), impl_class));
                 }
 
-                patterns.push(PatternMatch::new(pattern, confidence.min(1.0))
-                    .with_locations(locations)
-                    .with_evidence(evidence));
+                patterns.push(
+                    PatternMatch::new(pattern, confidence.min(1.0))
+                        .with_locations(locations)
+                        .with_evidence(evidence),
+                );
             }
         }
 
@@ -1647,7 +1812,12 @@ impl PatternDetector {
     }
 
     /// Detect Dependency Injection pattern.
-    fn detect_dependency_injection(&self, class: &ClassInfo, path: &Path, _lang: &str) -> Option<PatternMatch> {
+    fn detect_dependency_injection(
+        &self,
+        class: &ClassInfo,
+        path: &Path,
+        _lang: &str,
+    ) -> Option<PatternMatch> {
         let mut confidence: f64 = 0.0;
         let mut evidence = Vec::new();
         let mut dependencies: Vec<(String, String)> = Vec::new();
@@ -1655,13 +1825,17 @@ impl PatternDetector {
         // Find constructor.
         let constructor = class.methods.iter().find(|m| {
             let name = m.name.to_lowercase();
-            name == "__init__" || name == "new" || name == "constructor" ||
-            name == class.name.to_lowercase()
+            name == "__init__"
+                || name == "new"
+                || name == "constructor"
+                || name == class.name.to_lowercase()
         });
 
         if let Some(ctor) = constructor {
             // Check for interface-typed parameters (excluding self/this).
-            let meaningful_params: Vec<_> = ctor.params.iter()
+            let meaningful_params: Vec<_> = ctor
+                .params
+                .iter()
                 .filter(|p| !p.contains("self") && !p.contains("this"))
                 .collect();
 
@@ -1670,7 +1844,10 @@ impl PatternDetector {
                 // Common formats: "name: Type", "Type name", "name"
                 let parts: Vec<&str> = param.split(':').collect();
                 let (name, type_hint) = if parts.len() >= 2 {
-                    (parts[0].trim().to_string(), Some(parts[1].trim().to_string()))
+                    (
+                        parts[0].trim().to_string(),
+                        Some(parts[1].trim().to_string()),
+                    )
                 } else {
                     (param.trim().to_string(), None)
                 };
@@ -1678,9 +1855,12 @@ impl PatternDetector {
                 if let Some(ref t) = type_hint {
                     // Check if type looks like an interface (not primitive).
                     let t_lower = t.to_lowercase();
-                    let is_primitive = ["int", "str", "string", "bool", "boolean", "float",
-                                        "double", "void", "none", "null"].iter()
-                        .any(|p| t_lower == *p);
+                    let is_primitive = [
+                        "int", "str", "string", "bool", "boolean", "float", "double", "void",
+                        "none", "null",
+                    ]
+                    .iter()
+                    .any(|p| t_lower == *p);
 
                     if !is_primitive && !t.starts_with(char::is_lowercase) {
                         dependencies.push((name, t.clone()));
@@ -1691,7 +1871,13 @@ impl PatternDetector {
         }
 
         // Check for DI decorators/annotations.
-        let di_decorators = ["inject", "autowired", "autowire", "dependency", "injectable"];
+        let di_decorators = [
+            "inject",
+            "autowired",
+            "autowire",
+            "dependency",
+            "injectable",
+        ];
         for decorator in &class.decorators {
             let dec_lower = decorator.to_lowercase();
             if di_decorators.iter().any(|d| dec_lower.contains(d)) {
@@ -1701,11 +1887,15 @@ impl PatternDetector {
         }
 
         // Check for method injection via setters.
-        let setter_injection = class.methods.iter().filter(|m| {
-            let name_lower = m.name.to_lowercase();
-            (name_lower.starts_with("set_") || name_lower.starts_with("inject_")) &&
-            m.params.len() >= 2 // self + injected dependency
-        }).count();
+        let setter_injection = class
+            .methods
+            .iter()
+            .filter(|m| {
+                let name_lower = m.name.to_lowercase();
+                (name_lower.starts_with("set_") || name_lower.starts_with("inject_"))
+                    && m.params.len() >= 2 // self + injected dependency
+            })
+            .count();
 
         if setter_injection > 0 {
             confidence += 0.1 * setter_injection as f64;
@@ -1733,16 +1923,23 @@ impl PatternDetector {
                 dependencies,
             };
 
-            Some(PatternMatch::new(pattern, confidence.min(1.0))
-                .with_location(Location::for_class(path.to_path_buf(), class))
-                .with_evidence(evidence))
+            Some(
+                PatternMatch::new(pattern, confidence.min(1.0))
+                    .with_location(Location::for_class(path.to_path_buf(), class))
+                    .with_evidence(evidence),
+            )
         } else {
             None
         }
     }
 
     /// Detect Repository pattern.
-    fn detect_repository(&self, class: &ClassInfo, path: &Path, _lang: &str) -> Option<PatternMatch> {
+    fn detect_repository(
+        &self,
+        class: &ClassInfo,
+        path: &Path,
+        _lang: &str,
+    ) -> Option<PatternMatch> {
         let mut confidence: f64 = 0.0;
         let mut evidence = Vec::new();
         let mut entity_type = None;
@@ -1764,7 +1961,11 @@ impl PatternDetector {
                     // Capitalize first letter.
                     let mut chars = e.chars();
                     if let Some(first) = chars.next() {
-                        entity_type = Some(format!("{}{}", first.to_uppercase(), chars.collect::<String>()));
+                        entity_type = Some(format!(
+                            "{}{}",
+                            first.to_uppercase(),
+                            chars.collect::<String>()
+                        ));
                     }
                 }
             }
@@ -1778,11 +1979,21 @@ impl PatternDetector {
 
         // Check for CRUD methods.
         let crud_patterns = [
-            ("find", "read"), ("get", "read"), ("fetch", "read"), ("load", "read"),
-            ("save", "write"), ("create", "write"), ("add", "write"), ("insert", "write"),
-            ("update", "write"), ("modify", "write"),
-            ("delete", "write"), ("remove", "write"),
-            ("list", "read"), ("all", "read"), ("count", "read"),
+            ("find", "read"),
+            ("get", "read"),
+            ("fetch", "read"),
+            ("load", "read"),
+            ("save", "write"),
+            ("create", "write"),
+            ("add", "write"),
+            ("insert", "write"),
+            ("update", "write"),
+            ("modify", "write"),
+            ("delete", "write"),
+            ("remove", "write"),
+            ("list", "read"),
+            ("all", "read"),
+            ("count", "read"),
         ];
 
         for method in &class.methods {
@@ -1797,12 +2008,16 @@ impl PatternDetector {
         }
 
         // Higher confidence for having multiple CRUD operations.
-        let unique_operations: HashSet<_> = crud_methods.iter()
+        let unique_operations: HashSet<_> = crud_methods
+            .iter()
             .filter_map(|m| {
                 let m_lower = m.to_lowercase();
                 if m_lower.contains("find") || m_lower.contains("get") || m_lower.contains("load") {
                     Some("read")
-                } else if m_lower.contains("save") || m_lower.contains("create") || m_lower.contains("insert") {
+                } else if m_lower.contains("save")
+                    || m_lower.contains("create")
+                    || m_lower.contains("insert")
+                {
                     Some("create")
                 } else if m_lower.contains("update") || m_lower.contains("modify") {
                     Some("update")
@@ -1816,7 +2031,11 @@ impl PatternDetector {
 
         if unique_operations.len() >= 3 {
             confidence += 0.2;
-            evidence.push(format!("Has {} CRUD operations: {:?}", unique_operations.len(), unique_operations));
+            evidence.push(format!(
+                "Has {} CRUD operations: {:?}",
+                unique_operations.len(),
+                unique_operations
+            ));
         }
 
         // Check for entity type in methods or fields.
@@ -1824,8 +2043,11 @@ impl PatternDetector {
             for method in &class.methods {
                 if let Some(ref ret) = method.return_type {
                     let ret_lower = ret.to_lowercase();
-                    if !ret_lower.contains("list") && !ret_lower.contains("vec") &&
-                       !ret_lower.contains("option") && ret.starts_with(char::is_uppercase) {
+                    if !ret_lower.contains("list")
+                        && !ret_lower.contains("vec")
+                        && !ret_lower.contains("option")
+                        && ret.starts_with(char::is_uppercase)
+                    {
                         entity_type = Some(ret.clone());
                         break;
                     }
@@ -1840,9 +2062,11 @@ impl PatternDetector {
                 methods: crud_methods,
             };
 
-            Some(PatternMatch::new(pattern, confidence.min(1.0))
-                .with_location(Location::for_class(path.to_path_buf(), class))
-                .with_evidence(evidence))
+            Some(
+                PatternMatch::new(pattern, confidence.min(1.0))
+                    .with_location(Location::for_class(path.to_path_buf(), class))
+                    .with_evidence(evidence),
+            )
         } else {
             None
         }
@@ -1888,28 +2112,28 @@ impl PatternDetector {
 /// Check if a file is a test file based on path patterns.
 fn is_test_file(path: &Path) -> bool {
     let path_str = path.to_string_lossy().to_lowercase();
-    path_str.contains("/test/") ||
-    path_str.contains("/tests/") ||
-    path_str.contains("_test.") ||
-    path_str.contains("_spec.") ||
-    path_str.contains(".test.") ||
-    path_str.contains(".spec.") ||
-    path_str.contains("/test_") ||
-    path_str.contains("/__tests__/")
+    path_str.contains("/test/")
+        || path_str.contains("/tests/")
+        || path_str.contains("_test.")
+        || path_str.contains("_spec.")
+        || path_str.contains(".test.")
+        || path_str.contains(".spec.")
+        || path_str.contains("/test_")
+        || path_str.contains("/__tests__/")
 }
 
 /// Check if a file is generated based on path patterns.
 fn is_generated_file(path: &Path) -> bool {
     let path_str = path.to_string_lossy().to_lowercase();
-    path_str.contains("/generated/") ||
-    path_str.contains("/gen/") ||
-    path_str.contains(".generated.") ||
-    path_str.contains(".g.") ||
-    path_str.contains("_generated") ||
-    path_str.contains("/build/") ||
-    path_str.contains("/dist/") ||
-    path_str.contains("/node_modules/") ||
-    path_str.contains("__pycache__")
+    path_str.contains("/generated/")
+        || path_str.contains("/gen/")
+        || path_str.contains(".generated.")
+        || path_str.contains(".g.")
+        || path_str.contains("_generated")
+        || path_str.contains("/build/")
+        || path_str.contains("/dist/")
+        || path_str.contains("/node_modules/")
+        || path_str.contains("__pycache__")
 }
 
 // =============================================================================
@@ -1958,11 +2182,26 @@ pub fn detect_patterns(
 pub fn format_pattern_summary(analysis: &PatternAnalysis) -> String {
     let mut output = String::new();
 
-    output.push_str(&format!("Design Pattern Analysis: {}\n", analysis.path.display()));
-    output.push_str(&format!("Files scanned: {}\n", analysis.stats.files_scanned));
-    output.push_str(&format!("Files with patterns: {}\n", analysis.stats.files_with_patterns));
-    output.push_str(&format!("Total patterns detected: {}\n", analysis.stats.patterns_detected));
-    output.push_str(&format!("Average confidence: {:.1}%\n\n", analysis.stats.average_confidence * 100.0));
+    output.push_str(&format!(
+        "Design Pattern Analysis: {}\n",
+        analysis.path.display()
+    ));
+    output.push_str(&format!(
+        "Files scanned: {}\n",
+        analysis.stats.files_scanned
+    ));
+    output.push_str(&format!(
+        "Files with patterns: {}\n",
+        analysis.stats.files_with_patterns
+    ));
+    output.push_str(&format!(
+        "Total patterns detected: {}\n",
+        analysis.stats.patterns_detected
+    ));
+    output.push_str(&format!(
+        "Average confidence: {:.1}%\n\n",
+        analysis.stats.average_confidence * 100.0
+    ));
 
     if !analysis.stats.by_category.is_empty() {
         output.push_str("By Category:\n");
@@ -1982,15 +2221,27 @@ pub fn format_pattern_summary(analysis: &PatternAnalysis) -> String {
 
     output.push_str("Detected Patterns:\n");
     for pattern_match in &analysis.patterns {
-        output.push_str(&format!("\n  {} (confidence: {:.1}%)\n",
+        output.push_str(&format!(
+            "\n  {} (confidence: {:.1}%)\n",
             pattern_match.pattern.name(),
-            pattern_match.confidence * 100.0));
+            pattern_match.confidence * 100.0
+        ));
 
-        output.push_str(&format!("    Category: {}\n", pattern_match.pattern.category()));
-        output.push_str(&format!("    Primary class: {}\n", pattern_match.pattern.primary_class()));
+        output.push_str(&format!(
+            "    Category: {}\n",
+            pattern_match.pattern.category()
+        ));
+        output.push_str(&format!(
+            "    Primary class: {}\n",
+            pattern_match.pattern.primary_class()
+        ));
 
         if let Some(loc) = pattern_match.primary_location() {
-            output.push_str(&format!("    Location: {}:{}\n", loc.file.display(), loc.line));
+            output.push_str(&format!(
+                "    Location: {}:{}\n",
+                loc.file.display(),
+                loc.line
+            ));
         }
 
         if let Some(ref note) = pattern_match.note {
@@ -2135,7 +2386,12 @@ mod tests {
         ));
 
         assert_eq!(analysis.patterns_of_type("singleton").len(), 1);
-        assert_eq!(analysis.patterns_in_category(PatternCategory::Creational).len(), 2);
+        assert_eq!(
+            analysis
+                .patterns_in_category(PatternCategory::Creational)
+                .len(),
+            2
+        );
         assert_eq!(analysis.high_confidence_patterns().len(), 1);
     }
 
@@ -2159,14 +2415,12 @@ mod tests {
                     ..Default::default()
                 },
             ],
-            fields: vec![
-                FieldInfo {
-                    name: "_instance".to_string(),
-                    is_static: true,
-                    field_type: Some("DatabaseConnection".to_string()),
-                    ..Default::default()
-                },
-            ],
+            fields: vec![FieldInfo {
+                name: "_instance".to_string(),
+                is_static: true,
+                field_type: Some("DatabaseConnection".to_string()),
+                ..Default::default()
+            }],
             language: "python".to_string(),
             ..Default::default()
         };
@@ -2177,7 +2431,10 @@ mod tests {
         assert!(result.is_some());
         let pattern_match = result.unwrap();
         assert!(pattern_match.confidence >= 0.5);
-        assert!(matches!(pattern_match.pattern, DesignPattern::Singleton { .. }));
+        assert!(matches!(
+            pattern_match.pattern,
+            DesignPattern::Singleton { .. }
+        ));
     }
 
     #[test]
@@ -2215,7 +2472,12 @@ mod tests {
         assert!(result.is_some());
         let pattern_match = result.unwrap();
         assert!(pattern_match.confidence >= 0.5);
-        if let DesignPattern::Builder { setters, build_method, .. } = &pattern_match.pattern {
+        if let DesignPattern::Builder {
+            setters,
+            build_method,
+            ..
+        } = &pattern_match.pattern
+        {
             assert_eq!(*build_method, "build");
             assert!(setters.contains(&"with_url".to_string()));
             assert!(setters.contains(&"with_headers".to_string()));
@@ -2245,13 +2507,11 @@ mod tests {
                     ..Default::default()
                 },
             ],
-            fields: vec![
-                FieldInfo {
-                    name: "listeners".to_string(),
-                    field_type: Some("List<Listener>".to_string()),
-                    ..Default::default()
-                },
-            ],
+            fields: vec![FieldInfo {
+                name: "listeners".to_string(),
+                field_type: Some("List<Listener>".to_string()),
+                ..Default::default()
+            }],
             language: "python".to_string(),
             ..Default::default()
         };
@@ -2262,7 +2522,10 @@ mod tests {
         assert!(result.is_some());
         let pattern_match = result.unwrap();
         assert!(pattern_match.confidence >= 0.5);
-        assert!(matches!(pattern_match.pattern, DesignPattern::Observer { .. }));
+        assert!(matches!(
+            pattern_match.pattern,
+            DesignPattern::Observer { .. }
+        ));
     }
 
     #[test]
@@ -2303,7 +2566,12 @@ mod tests {
         assert!(result.is_some());
         let pattern_match = result.unwrap();
         assert!(pattern_match.confidence >= 0.5);
-        if let DesignPattern::Repository { entity_type, methods, .. } = &pattern_match.pattern {
+        if let DesignPattern::Repository {
+            entity_type,
+            methods,
+            ..
+        } = &pattern_match.pattern
+        {
             assert_eq!(*entity_type, Some("User".to_string()));
             assert!(methods.len() >= 3);
         } else {
@@ -2318,21 +2586,24 @@ mod tests {
         analysis.stats.patterns_detected = 2;
         analysis.stats.average_confidence = 0.75;
 
-        analysis.patterns.push(PatternMatch::new(
-            DesignPattern::Singleton {
-                class: "Config".to_string(),
-                instance_method: "getInstance".to_string(),
-                instance_field: None,
-                private_constructor: true,
-            },
-            0.9,
-        ).with_location(Location {
-            file: PathBuf::from("/test/config.py"),
-            line: 10,
-            end_line: Some(30),
-            name: "Config".to_string(),
-            kind: "class".to_string(),
-        }));
+        analysis.patterns.push(
+            PatternMatch::new(
+                DesignPattern::Singleton {
+                    class: "Config".to_string(),
+                    instance_method: "getInstance".to_string(),
+                    instance_field: None,
+                    private_constructor: true,
+                },
+                0.9,
+            )
+            .with_location(Location {
+                file: PathBuf::from("/test/config.py"),
+                line: 10,
+                end_line: Some(30),
+                name: "Config".to_string(),
+                kind: "class".to_string(),
+            }),
+        );
 
         let summary = format_pattern_summary(&analysis);
         assert!(summary.contains("Singleton"));

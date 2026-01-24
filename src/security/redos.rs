@@ -53,7 +53,7 @@ use tree_sitter::{Node, Query, QueryCursor};
 use wide::{u8x32, CmpEq};
 
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
 
 // =============================================================================

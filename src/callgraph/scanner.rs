@@ -21,18 +21,19 @@
 //! dropping them. Errors include permission denied, broken symlinks, and I/O errors.
 //! Users can choose to fail on errors or continue with warnings via `ScanConfig`.
 
-use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 use tracing::{debug, warn};
 
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
 
 /// Minimum number of files before parallel processing is enabled.
@@ -382,14 +383,14 @@ impl ScanConfig {
 struct ExtensionFilter {
     /// Set of allowed extensions (lowercase, without leading dot).
     /// None means accept all files (no extension filtering).
-    extensions: Option<HashSet<String>>,
+    extensions: Option<FxHashSet<String>>,
 }
 
 impl ExtensionFilter {
     /// Create a filter from a set of extensions.
     ///
     /// If the set is empty, filtering is disabled (all files pass).
-    fn new(extensions: HashSet<String>) -> Self {
+    fn new(extensions: FxHashSet<String>) -> Self {
         Self {
             extensions: if extensions.is_empty() {
                 None
@@ -503,7 +504,7 @@ pub struct ScanResult {
     /// Total bytes scanned.
     pub total_bytes: u64,
     /// Number of files by language.
-    pub by_language: std::collections::HashMap<String, usize>,
+    pub by_language: FxHashMap<String, usize>,
     /// Errors encountered during scanning.
     /// Contains details about files/directories that could not be accessed.
     pub errors: Vec<ScanError>,
@@ -517,7 +518,7 @@ impl ScanResult {
             files: Vec::new(),
             metadata: Vec::new(),
             total_bytes: 0,
-            by_language: std::collections::HashMap::new(),
+            by_language: FxHashMap::default(),
             errors: Vec::new(),
             warnings: Vec::new(),
         }
@@ -549,8 +550,8 @@ impl ScanResult {
     }
 
     /// Get the count of errors by kind.
-    pub fn error_counts(&self) -> std::collections::HashMap<ScanErrorKind, usize> {
-        let mut counts = std::collections::HashMap::new();
+    pub fn error_counts(&self) -> FxHashMap<ScanErrorKind, usize> {
+        let mut counts = FxHashMap::default();
         for error in &self.errors {
             *counts.entry(error.kind).or_insert(0) += 1;
         }
@@ -569,11 +570,7 @@ impl ScanResult {
             .map(|(kind, count)| format!("{}: {}", kind, count))
             .collect();
 
-        format!(
-            "{} total errors ({})",
-            self.errors.len(),
-            parts.join(", ")
-        )
+        format!("{} total errors ({})", self.errors.len(), parts.join(", "))
     }
 }
 
@@ -826,7 +823,7 @@ impl ProjectScanner {
     #[allow(dead_code)]
     pub fn scan_extensions_with_errors(&self, extensions: &[&str]) -> Result<ScanResult> {
         // Normalize extensions to lowercase without leading dot for case-insensitive matching
-        let ext_set: std::collections::HashSet<String> = extensions
+        let ext_set: FxHashSet<String> = extensions
             .iter()
             .map(|e| e.trim_start_matches('.').to_lowercase())
             .collect();
@@ -972,7 +969,10 @@ impl ProjectScanner {
                     .par_iter()
                     .filter_map(|scanned| {
                         let cached_lang = scanned.language.map(|s| s.to_string());
-                        match FileMetadata::from_path_with_language(scanned.path.clone(), cached_lang) {
+                        match FileMetadata::from_path_with_language(
+                            scanned.path.clone(),
+                            cached_lang,
+                        ) {
                             Some(meta) => Some(meta),
                             None => {
                                 // Metadata collection failed (likely permission or I/O error)
@@ -981,9 +981,11 @@ impl ProjectScanner {
                                     scanned.path.display()
                                 );
                                 warn!("{}", warning);
-                                if matches!(config.error_handling, ErrorHandling::CollectAndContinue)
-                                {
-                                    errors.lock().unwrap().push(warning);
+                                if matches!(
+                                    config.error_handling,
+                                    ErrorHandling::CollectAndContinue
+                                ) {
+                                    errors.lock().push(warning);
                                 }
                                 None
                             }
@@ -992,7 +994,7 @@ impl ProjectScanner {
                     .collect();
 
                 // Merge collected warnings
-                for warning in errors.into_inner().unwrap() {
+                for warning in errors.into_inner() {
                     result.add_warning(warning);
                 }
 
@@ -1004,7 +1006,9 @@ impl ProjectScanner {
                 // Sequential metadata collection using cached language
                 for scanned in filtered {
                     let cached_lang = scanned.language.map(|s| s.to_string());
-                    if let Some(meta) = FileMetadata::from_path_with_language(scanned.path.clone(), cached_lang) {
+                    if let Some(meta) =
+                        FileMetadata::from_path_with_language(scanned.path.clone(), cached_lang)
+                    {
                         result.add_file(meta.path.clone());
                         result.add_metadata(meta);
                     } else {
@@ -1025,10 +1029,7 @@ impl ProjectScanner {
 
         // Log summary if errors were encountered
         if result.has_errors() {
-            warn!(
-                "Scan completed with errors: {}",
-                result.error_summary()
-            );
+            warn!("Scan completed with errors: {}", result.error_summary());
         }
 
         Ok(result)
@@ -1229,9 +1230,7 @@ impl ProjectScanner {
                     None
                 }
             })
-            .filter(|e| {
-                e.path().is_file() && registry.detect_language(e.path()).is_some()
-            })
+            .filter(|e| e.path().is_file() && registry.detect_language(e.path()).is_some())
             .count();
 
         if error_count > 0 {
@@ -1500,9 +1499,15 @@ mod tests {
             format!("{}", ScanErrorKind::PermissionDenied),
             "permission denied"
         );
-        assert_eq!(format!("{}", ScanErrorKind::BrokenSymlink), "broken symlink");
+        assert_eq!(
+            format!("{}", ScanErrorKind::BrokenSymlink),
+            "broken symlink"
+        );
         assert_eq!(format!("{}", ScanErrorKind::IoError), "I/O error");
-        assert_eq!(format!("{}", ScanErrorKind::DirectoryLoop), "directory loop");
+        assert_eq!(
+            format!("{}", ScanErrorKind::DirectoryLoop),
+            "directory loop"
+        );
         assert_eq!(format!("{}", ScanErrorKind::Other), "other error");
     }
 
@@ -1581,11 +1586,19 @@ mod tests {
 
         // Test with lowercase extension in query
         let py_files = scanner.scan_extensions(&[".py"]).unwrap();
-        assert_eq!(py_files.len(), 4, "Should match all .py variants regardless of case");
+        assert_eq!(
+            py_files.len(),
+            4,
+            "Should match all .py variants regardless of case"
+        );
 
         // Test with uppercase extension in query
         let py_files_upper = scanner.scan_extensions(&[".PY"]).unwrap();
-        assert_eq!(py_files_upper.len(), 4, "Query with .PY should also match all variants");
+        assert_eq!(
+            py_files_upper.len(),
+            4,
+            "Query with .PY should also match all variants"
+        );
 
         // Test without leading dot
         let py_files_no_dot = scanner.scan_extensions(&["py"]).unwrap();
@@ -1607,7 +1620,11 @@ mod tests {
         let config = ScanConfig::for_extensions(&[".rs"]);
         let result = scanner.scan_with_config(&config).unwrap();
 
-        assert_eq!(result.files.len(), 3, "Should match all .rs variants regardless of case");
+        assert_eq!(
+            result.files.len(),
+            3,
+            "Should match all .rs variants regardless of case"
+        );
     }
 
     #[test]

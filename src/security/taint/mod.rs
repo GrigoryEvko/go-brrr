@@ -133,22 +133,16 @@ pub mod types;
 
 // Re-export commonly used types for convenience
 pub use propagation::{
-    FunctionTaintSummary, ImplicitFlowContext, NodeId, PropagationConfig, PropagationEngine,
-    PropagationRule, PropagationRules, TaintFlow, TaintTraceResult, TaintedDFG, TaintedEdge,
-    trace_taint_from_line,
+    PropagationEngine, TaintFlow, TaintedDFG,
 };
 pub use sinks::{
-    get_go_sinks, get_python_sinks, get_rust_sinks, get_sinks_for_language, get_typescript_sinks,
-    SinkCategory, SinkRegistry, TaintSink,
+    get_sinks_for_language,
+    SinkCategory,
 };
 pub use sources::{
-    get_go_sources, get_python_sources, get_rust_sources, get_sources_for_language,
-    get_typescript_sources, MatchStrategy, PythonSourceDetector, SourceRegistry, TaintSource,
-    TypeScriptSourceDetector,
+    get_sources_for_language, TaintSource,
 };
-pub use types::{
-    Location, PropagationStep, TaintLabel, TaintPropagation, TaintState, TaintedValue,
-};
+pub use types::TaintLabel;
 
 // =============================================================================
 // Convenience Functions
@@ -264,6 +258,9 @@ pub fn get_sanitizers_for_sink(category: SinkCategory) -> &'static [&'static str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::sinks::{get_python_sinks, get_typescript_sinks};
+    use super::sources::{get_python_sources, get_typescript_sources};
+    use super::types::{Location, TaintedValue, TaintState};
 
     #[test]
     fn test_is_taint_source() {
@@ -350,7 +347,10 @@ mod tests {
             .any(|s| s.category == SinkCategory::SqlInjection));
 
         // Check sanitizer compatibility
-        let sql_sink = sql_matches.iter().find(|s| s.category == SinkCategory::SqlInjection).unwrap();
+        let sql_sink = sql_matches
+            .iter()
+            .find(|s| s.category == SinkCategory::SqlInjection)
+            .unwrap();
         assert!(sql_sink.accepts_sanitizer(sinks::SanitizerContext::SqlParameterized));
         assert!(!sql_sink.accepts_sanitizer(sinks::SanitizerContext::HtmlEscape));
     }
@@ -367,9 +367,7 @@ mod tests {
         // Find XSS sink
         let xss_matches = sinks.find_matches("innerHTML");
         assert!(!xss_matches.is_empty());
-        assert!(xss_matches
-            .iter()
-            .any(|s| s.category == SinkCategory::XSS));
+        assert!(xss_matches.iter().any(|s| s.category == SinkCategory::XSS));
     }
 
     #[test]
@@ -393,10 +391,7 @@ mod tests {
         assert!(prop_taint.unwrap().has_label(&TaintLabel::FileContent));
 
         // Set and check collection taint
-        state.set_collection(
-            "arr",
-            TaintedValue::new(TaintLabel::NetworkData, loc),
-        );
+        state.set_collection("arr", TaintedValue::new(TaintLabel::NetworkData, loc));
         let coll_taint = state.get_collection("arr");
         assert!(coll_taint.is_some());
         assert!(coll_taint.unwrap().has_label(&TaintLabel::NetworkData));

@@ -27,14 +27,14 @@
 //! - Format strings: `cursor.execute("SELECT * FROM users WHERE id = %s" % user_id)`
 //! - Template literals: `db.query(`SELECT * FROM users WHERE id = ${userId}`)`
 
-use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor, Tree};
 
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
 
 // =============================================================================
@@ -180,7 +180,7 @@ pub struct ScanResult {
     /// Number of SQL sinks found
     pub sinks_found: usize,
     /// Counts by severity
-    pub severity_counts: HashMap<String, usize>,
+    pub severity_counts: FxHashMap<String, usize>,
     /// Language detected
     pub language: String,
 }
@@ -248,9 +248,9 @@ const TYPESCRIPT_SQL_SINKS: &[(&str, SqlSinkType)] = &[
 /// SQL Injection detector for multiple languages.
 pub struct SqlInjectionDetector {
     /// Python SQL sink patterns (method_name -> sink_type)
-    python_sinks: HashMap<String, SqlSinkType>,
+    python_sinks: FxHashMap<String, SqlSinkType>,
     /// TypeScript SQL sink patterns
-    typescript_sinks: HashMap<String, SqlSinkType>,
+    typescript_sinks: FxHashMap<String, SqlSinkType>,
 }
 
 impl Default for SqlInjectionDetector {
@@ -262,12 +262,12 @@ impl Default for SqlInjectionDetector {
 impl SqlInjectionDetector {
     /// Create a new SQL injection detector.
     pub fn new() -> Self {
-        let mut python_sinks = HashMap::new();
+        let mut python_sinks = FxHashMap::default();
         for (name, sink_type) in PYTHON_SQL_SINKS {
             python_sinks.insert((*name).to_string(), *sink_type);
         }
 
-        let mut typescript_sinks = HashMap::new();
+        let mut typescript_sinks = FxHashMap::default();
         for (name, sink_type) in TYPESCRIPT_SQL_SINKS {
             typescript_sinks.insert((*name).to_string(), *sink_type);
         }
@@ -302,10 +302,12 @@ impl SqlInjectionDetector {
 
         let source = std::fs::read(path).map_err(|e| BrrrError::io_with_path(e, path))?;
         let mut parser = lang.parser_for_path(path)?;
-        let tree = parser.parse(&source, None).ok_or_else(|| BrrrError::Parse {
-            file: file_path.to_string(),
-            message: "Failed to parse file".to_string(),
-        })?;
+        let tree = parser
+            .parse(&source, None)
+            .ok_or_else(|| BrrrError::Parse {
+                file: file_path.to_string(),
+                message: "Failed to parse file".to_string(),
+            })?;
 
         let lang_name = lang.name();
         match lang_name {
@@ -343,7 +345,7 @@ impl SqlInjectionDetector {
         builder.add_custom_ignore_filename(".brrrignore");
         builder.hidden(true);
 
-        let extensions: HashSet<&str> = match language {
+        let extensions: FxHashSet<&str> = match language {
             Some("python") => ["py"].iter().copied().collect(),
             Some("typescript") => ["ts", "tsx", "js", "jsx", "mjs", "cjs"]
                 .iter()
@@ -379,7 +381,7 @@ impl SqlInjectionDetector {
         }
 
         // Count by severity
-        let mut severity_counts: HashMap<String, usize> = HashMap::new();
+        let mut severity_counts: FxHashMap<String, usize> = FxHashMap::default();
         for finding in &findings {
             *severity_counts
                 .entry(finding.severity.to_string())
@@ -424,9 +426,8 @@ impl SqlInjectionDetector {
         "#;
 
         let ts_lang = tree.language();
-        let query = Query::new(&ts_lang, query_str).map_err(|e| {
-            BrrrError::TreeSitter(format!("Failed to create Python query: {}", e))
-        })?;
+        let query = Query::new(&ts_lang, query_str)
+            .map_err(|e| BrrrError::TreeSitter(format!("Failed to create Python query: {}", e)))?;
 
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&query, tree.root_node(), source);
@@ -440,7 +441,11 @@ impl SqlInjectionDetector {
         while let Some(match_) = matches.next() {
             // Get call node
             let call_node: Option<Node> = match call_idx {
-                Some(idx) => match_.captures.iter().find(|c| c.index == idx).map(|c| c.node),
+                Some(idx) => match_
+                    .captures
+                    .iter()
+                    .find(|c| c.index == idx)
+                    .map(|c| c.node),
                 None => None,
             };
 
@@ -765,7 +770,11 @@ impl SqlInjectionDetector {
 
         while let Some(match_) = matches.next() {
             let call_node: Option<Node> = match call_idx {
-                Some(idx) => match_.captures.iter().find(|c| c.index == idx).map(|c| c.node),
+                Some(idx) => match_
+                    .captures
+                    .iter()
+                    .find(|c| c.index == idx)
+                    .map(|c| c.node),
                 None => None,
             };
 
@@ -856,10 +865,7 @@ impl SqlInjectionDetector {
         if self.has_typescript_params(args_node, source) {
             let query_text = self.node_text(first_arg, source);
             // Check for parameterized placeholders ($1, ?, :name)
-            if query_text.contains('$')
-                || query_text.contains('?')
-                || query_text.contains(':')
-            {
+            if query_text.contains('$') || query_text.contains('?') || query_text.contains(':') {
                 return None; // Safe parameterized query
             }
         }
@@ -1291,18 +1297,14 @@ impl SqlInjectionDetector {
     /// Generate remediation advice.
     fn generate_remediation(&self, pattern: &UnsafePattern, language: &str) -> String {
         match (pattern, language) {
-            (_, "python") => {
-                "Use parameterized queries with placeholders:\n\
+            (_, "python") => "Use parameterized queries with placeholders:\n\
                  cursor.execute(\"SELECT * FROM users WHERE id = ?\", (user_id,))\n\
                  Or use SQLAlchemy ORM methods with proper escaping."
-                    .to_string()
-            }
-            (_, "typescript" | "javascript") => {
-                "Use parameterized queries with placeholders:\n\
+                .to_string(),
+            (_, "typescript" | "javascript") => "Use parameterized queries with placeholders:\n\
                  db.query(\"SELECT * FROM users WHERE id = $1\", [userId])\n\
                  Or use an ORM like Prisma, TypeORM, or Knex with proper parameter binding."
-                    .to_string()
-            }
+                .to_string(),
             _ => "Use parameterized queries instead of string interpolation.".to_string(),
         }
     }
@@ -1394,7 +1396,10 @@ def get_user(user_id):
             .scan_file(file.path().to_str().unwrap())
             .expect("Scan should succeed");
 
-        assert!(!findings.is_empty(), "Should detect percent format injection");
+        assert!(
+            !findings.is_empty(),
+            "Should detect percent format injection"
+        );
         let finding = &findings[0];
         assert_eq!(finding.pattern, UnsafePattern::PercentFormat);
     }
@@ -1553,7 +1558,10 @@ async function getUser(userId: string) {
             .scan_file(file.path().to_str().unwrap())
             .expect("Scan should succeed");
 
-        assert!(!findings.is_empty(), "Should detect Prisma raw query injection");
+        assert!(
+            !findings.is_empty(),
+            "Should detect Prisma raw query injection"
+        );
     }
 
     // =========================================================================
@@ -1564,10 +1572,12 @@ async function getUser(userId: string) {
     fn test_extract_fstring_variables() {
         let detector = SqlInjectionDetector::new();
 
-        let vars = detector.extract_fstring_variables(r#"f"SELECT * FROM users WHERE id = {user_id}""#);
+        let vars =
+            detector.extract_fstring_variables(r#"f"SELECT * FROM users WHERE id = {user_id}""#);
         assert_eq!(vars, vec!["user_id"]);
 
-        let vars = detector.extract_fstring_variables(r#"f"SELECT * FROM {table} WHERE {col} = {val}""#);
+        let vars =
+            detector.extract_fstring_variables(r#"f"SELECT * FROM {table} WHERE {col} = {val}""#);
         assert_eq!(vars, vec!["table", "col", "val"]);
 
         let vars = detector.extract_fstring_variables(r#"f"value: {x:.2f}""#);

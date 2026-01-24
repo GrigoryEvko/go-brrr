@@ -41,12 +41,12 @@
 //! - `escape(user_input)` / `encodeURIComponent(user_input)` (encoded)
 //! - `xss(user_input)` / `sanitizeHtml(user_input)` (library sanitization)
 
-use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use aho_corasick::AhoCorasick;
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor, Tree};
@@ -55,118 +55,28 @@ use tree_sitter::{Node, Query, QueryCursor, Tree};
 /// Single automaton search instead of 15+ sequential contains() calls.
 static HTML_PATTERNS: Lazy<AhoCorasick> = Lazy::new(|| {
     AhoCorasick::new([
-        "&lt;",
-        "&gt;",
-        "<div",
-        "<span",
-        "<p>",
-        "<a ",
-        "<script",
-        "<img",
-        "<iframe",
-        "<svg",
-        "<style",
-        "<form",
-        "<input",
-        "<button",
-        "<table",
-        "<li>",
-        "<ul>",
-        "<ol>",
-        "<h1",
-        "<h2",
-        "<br",
-        "<hr",
+        "&lt;", "&gt;", "<div", "<span", "<p>", "<a ", "<script", "<img", "<iframe", "<svg",
+        "<style", "<form", "<input", "<button", "<table", "<li>", "<ul>", "<ol>", "<h1", "<h2",
+        "<br", "<hr",
     ])
     .expect("Invalid HTML patterns")
 });
 
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
+// Re-export common types for backward compatibility
+pub use crate::security::common::{Confidence, Severity, SourceLocation};
 use crate::util::format_query_error;
+
+/// Type alias for backward compatibility - use SourceLocation from common module
+pub type Location = SourceLocation;
 
 // =============================================================================
 // Type Definitions
 // =============================================================================
 
-/// Severity level for XSS findings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Severity {
-    /// Informational - may not be exploitable but worth reviewing
-    Info,
-    /// Low severity - limited impact or requires specific conditions
-    Low,
-    /// Medium severity - potential for significant impact
-    Medium,
-    /// High severity - likely exploitable with serious impact
-    High,
-    /// Critical - easily exploitable with severe consequences
-    Critical,
-}
-
-impl std::fmt::Display for Severity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Info => write!(f, "INFO"),
-            Self::Low => write!(f, "LOW"),
-            Self::Medium => write!(f, "MEDIUM"),
-            Self::High => write!(f, "HIGH"),
-            Self::Critical => write!(f, "CRITICAL"),
-        }
-    }
-}
-
-impl std::str::FromStr for Severity {
-    type Err = String;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "info" => Ok(Self::Info),
-            "low" => Ok(Self::Low),
-            "medium" => Ok(Self::Medium),
-            "high" => Ok(Self::High),
-            "critical" => Ok(Self::Critical),
-            _ => Err(format!("Unknown severity: {}", s)),
-        }
-    }
-}
-
-/// Confidence level for the finding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Confidence {
-    /// Low confidence - pattern match only, no data flow confirmation
-    Low,
-    /// Medium confidence - some data flow indicators but incomplete path
-    Medium,
-    /// High confidence - clear data flow from source to sink
-    High,
-}
-
-impl std::fmt::Display for Confidence {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Low => write!(f, "LOW"),
-            Self::Medium => write!(f, "MEDIUM"),
-            Self::High => write!(f, "HIGH"),
-        }
-    }
-}
-
-impl std::str::FromStr for Confidence {
-    type Err = String;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "low" => Ok(Self::Low),
-            "medium" => Ok(Self::Medium),
-            "high" => Ok(Self::High),
-            _ => Err(format!("Unknown confidence: {}", s)),
-        }
-    }
-}
+// Severity and Confidence are imported from crate::security::common
 
 /// Type of XSS sink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -242,26 +152,8 @@ impl std::fmt::Display for XSSContext {
     }
 }
 
-/// Source location in code.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Location {
-    /// File path
-    pub file: String,
-    /// Line number (1-indexed)
-    pub line: usize,
-    /// Column number (1-indexed)
-    pub column: usize,
-    /// End line number (1-indexed)
-    pub end_line: usize,
-    /// End column number (1-indexed)
-    pub end_column: usize,
-}
-
-impl std::fmt::Display for Location {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}:{}", self.file, self.line, self.column)
-    }
-}
+// Note: Location is now a type alias to SourceLocation from crate::security::common
+// This provides unified location types across all security modules
 
 /// A XSS vulnerability finding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -301,7 +193,7 @@ pub struct XSSScanResult {
     /// Number of XSS sinks found
     pub sinks_found: usize,
     /// Counts by severity
-    pub severity_counts: HashMap<String, usize>,
+    pub severity_counts: FxHashMap<String, usize>,
     /// Language detected
     pub language: String,
 }
@@ -468,14 +360,14 @@ const SAFE_PROPERTIES: &[&str] = &[
     "textContent",
     "innerText",
     "nodeValue",
-    "value",      // input.value
+    "value", // input.value
     "className",
     "id",
     "name",
     "placeholder",
     "title",
     "alt",
-    "data",       // dataset properties
+    "data", // dataset properties
 ];
 
 /// Sanitization functions that make input safe.
@@ -717,19 +609,19 @@ const USER_INPUT_SOURCE_QUERY: &str = r#"
 /// XSS vulnerability detector.
 pub struct XSSDetector {
     /// DOM property sinks (name -> sink info)
-    dom_property_sinks: HashMap<String, &'static XSSSink>,
+    dom_property_sinks: FxHashMap<String, &'static XSSSink>,
     /// DOM method sinks
-    dom_method_sinks: HashMap<String, &'static XSSSink>,
+    dom_method_sinks: FxHashMap<String, &'static XSSSink>,
     /// jQuery method sinks
-    jquery_sinks: HashMap<String, &'static XSSSink>,
+    jquery_sinks: FxHashMap<String, &'static XSSSink>,
     /// Code execution sinks
-    code_sinks: HashMap<String, &'static XSSSink>,
+    code_sinks: FxHashMap<String, &'static XSSSink>,
     /// Timer sinks
-    timer_sinks: HashMap<String, &'static XSSSink>,
+    timer_sinks: FxHashMap<String, &'static XSSSink>,
     /// Safe properties to ignore
-    safe_properties: HashSet<String>,
+    safe_properties: FxHashSet<String>,
     /// Sanitization functions
-    sanitization_functions: HashSet<String>,
+    sanitization_functions: FxHashSet<String>,
 }
 
 impl Default for XSSDetector {
@@ -741,33 +633,37 @@ impl Default for XSSDetector {
 impl XSSDetector {
     /// Create a new XSS detector with default configuration.
     pub fn new() -> Self {
-        let mut dom_property_sinks = HashMap::new();
+        let mut dom_property_sinks = FxHashMap::default();
         for sink in DOM_PROPERTY_SINKS {
             dom_property_sinks.insert(sink.name.to_string(), sink);
         }
 
-        let mut dom_method_sinks = HashMap::new();
+        let mut dom_method_sinks = FxHashMap::default();
         for sink in DOM_METHOD_SINKS {
             dom_method_sinks.insert(sink.name.to_string(), sink);
         }
 
-        let mut jquery_sinks = HashMap::new();
+        let mut jquery_sinks = FxHashMap::default();
         for sink in JQUERY_METHOD_SINKS {
             jquery_sinks.insert(sink.name.to_string(), sink);
         }
 
-        let mut code_sinks = HashMap::new();
+        let mut code_sinks = FxHashMap::default();
         for sink in CODE_EXECUTION_SINKS {
             code_sinks.insert(sink.name.to_string(), sink);
         }
 
-        let mut timer_sinks = HashMap::new();
+        let mut timer_sinks = FxHashMap::default();
         for sink in TIMER_SINKS {
             timer_sinks.insert(sink.name.to_string(), sink);
         }
 
-        let safe_properties: HashSet<String> = SAFE_PROPERTIES.iter().map(|s| (*s).to_string()).collect();
-        let sanitization_functions: HashSet<String> = SANITIZATION_FUNCTIONS.iter().map(|s| (*s).to_string()).collect();
+        let safe_properties: FxHashSet<String> =
+            SAFE_PROPERTIES.iter().map(|s| (*s).to_string()).collect();
+        let sanitization_functions: FxHashSet<String> = SANITIZATION_FUNCTIONS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
 
         Self {
             dom_property_sinks,
@@ -811,10 +707,12 @@ impl XSSDetector {
 
         let source = std::fs::read(file_path).map_err(|e| BrrrError::io_with_path(e, file_path))?;
         let mut parser = lang.parser_for_path(file_path)?;
-        let tree = parser.parse(&source, None).ok_or_else(|| BrrrError::Parse {
-            file: file_path.display().to_string(),
-            message: "Failed to parse file".to_string(),
-        })?;
+        let tree = parser
+            .parse(&source, None)
+            .ok_or_else(|| BrrrError::Parse {
+                file: file_path.display().to_string(),
+                message: "Failed to parse file".to_string(),
+            })?;
 
         let file_path_str = file_path.display().to_string();
         self.scan_typescript(&tree, &source, &file_path_str)
@@ -838,9 +736,9 @@ impl XSSDetector {
             )));
         }
 
-        let path_str = dir_path.to_str().ok_or_else(|| {
-            BrrrError::InvalidArgument("Invalid path encoding".to_string())
-        })?;
+        let path_str = dir_path
+            .to_str()
+            .ok_or_else(|| BrrrError::InvalidArgument("Invalid path encoding".to_string()))?;
 
         let scanner = ProjectScanner::new(path_str)?;
         let config = match language {
@@ -851,7 +749,7 @@ impl XSSDetector {
         let scan_result = scanner.scan_with_config(&config)?;
 
         // Filter to JS/TS files
-        let js_ts_extensions: HashSet<&str> = ["js", "jsx", "ts", "tsx", "mjs", "cjs", "vue"]
+        let js_ts_extensions: FxHashSet<&str> = ["js", "jsx", "ts", "tsx", "mjs", "cjs", "vue"]
             .iter()
             .copied()
             .collect();
@@ -879,9 +777,11 @@ impl XSSDetector {
         let sinks_found = all_findings.len();
 
         // Count by severity
-        let mut severity_counts: HashMap<String, usize> = HashMap::new();
+        let mut severity_counts: FxHashMap<String, usize> = FxHashMap::default();
         for finding in &all_findings {
-            *severity_counts.entry(finding.severity.to_string()).or_insert(0) += 1;
+            *severity_counts
+                .entry(finding.severity.to_string())
+                .or_insert(0) += 1;
         }
 
         let detected_lang = language.unwrap_or("javascript/typescript").to_string();
@@ -911,11 +811,16 @@ impl XSSDetector {
 
         // Select query based on file extension (TSX/JSX have jsx_attribute support)
         let is_jsx = file_path.ends_with(".tsx") || file_path.ends_with(".jsx");
-        let query_str = if is_jsx { TSX_XSS_SINK_QUERY } else { TYPESCRIPT_XSS_SINK_QUERY };
+        let query_str = if is_jsx {
+            TSX_XSS_SINK_QUERY
+        } else {
+            TYPESCRIPT_XSS_SINK_QUERY
+        };
 
         // Create and execute the query
-        let query = Query::new(&ts_lang, query_str)
-            .map_err(|e| BrrrError::TreeSitter(format_query_error("typescript", "xss_sink", query_str, &e)))?;
+        let query = Query::new(&ts_lang, query_str).map_err(|e| {
+            BrrrError::TreeSitter(format_query_error("typescript", "xss_sink", query_str, &e))
+        })?;
 
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&query, tree.root_node(), source);
@@ -974,11 +879,7 @@ impl XSSDetector {
                 if let Some(prop) = prop_name {
                     if self.dom_property_sinks.contains_key(prop) {
                         if let Some(finding) = self.analyze_dom_property_sink(
-                            sink_node,
-                            prop,
-                            value_node,
-                            source,
-                            file_path,
+                            sink_node, prop, value_node, source, file_path,
                         ) {
                             findings.push(finding);
                         }
@@ -989,22 +890,14 @@ impl XSSDetector {
                 if let Some(method) = method_name {
                     if self.dom_method_sinks.contains_key(method) {
                         if let Some(finding) = self.analyze_dom_method_sink(
-                            sink_node,
-                            method,
-                            args_node,
-                            source,
-                            file_path,
+                            sink_node, method, args_node, source, file_path,
                         ) {
                             findings.push(finding);
                         }
                     } else if self.jquery_sinks.contains_key(method) {
-                        if let Some(finding) = self.analyze_jquery_sink(
-                            sink_node,
-                            method,
-                            args_node,
-                            source,
-                            file_path,
-                        ) {
+                        if let Some(finding) = self
+                            .analyze_jquery_sink(sink_node, method, args_node, source, file_path)
+                        {
                             findings.push(finding);
                         }
                     }
@@ -1014,22 +907,14 @@ impl XSSDetector {
                 if let Some(func) = func_name {
                     if self.code_sinks.contains_key(func) {
                         if let Some(finding) = self.analyze_code_execution_sink(
-                            sink_node,
-                            func,
-                            args_node,
-                            source,
-                            file_path,
+                            sink_node, func, args_node, source, file_path,
                         ) {
                             findings.push(finding);
                         }
                     } else if self.timer_sinks.contains_key(func) {
-                        if let Some(finding) = self.analyze_timer_sink(
-                            sink_node,
-                            func,
-                            args_node,
-                            source,
-                            file_path,
-                        ) {
+                        if let Some(finding) =
+                            self.analyze_timer_sink(sink_node, func, args_node, source, file_path)
+                        {
                             findings.push(finding);
                         }
                     }
@@ -1039,11 +924,7 @@ impl XSSDetector {
                 if let Some(ctor) = ctor_name {
                     if self.code_sinks.contains_key(ctor) {
                         if let Some(finding) = self.analyze_code_execution_sink(
-                            sink_node,
-                            ctor,
-                            args_node,
-                            source,
-                            file_path,
+                            sink_node, ctor, args_node, source, file_path,
                         ) {
                             findings.push(finding);
                         }
@@ -1053,11 +934,9 @@ impl XSSDetector {
                 // Handle React dangerouslySetInnerHTML
                 if let Some(attr) = attr_name {
                     if attr == "dangerouslySetInnerHTML" {
-                        if let Some(finding) = self.analyze_react_dangerous_html(
-                            sink_node,
-                            source,
-                            file_path,
-                        ) {
+                        if let Some(finding) =
+                            self.analyze_react_dangerous_html(sink_node, source, file_path)
+                        {
                             findings.push(finding);
                         }
                     }
@@ -1070,11 +949,9 @@ impl XSSDetector {
                     .and_then(|idx| match_.captures.iter().find(|c| c.index == idx))
                     .map(|c| c.node)
                 {
-                    if let Some(finding) = self.analyze_template_literal_html(
-                        sink_node,
-                        source,
-                        file_path,
-                    ) {
+                    if let Some(finding) =
+                        self.analyze_template_literal_html(sink_node, source, file_path)
+                    {
                         findings.push(finding);
                     }
                 }
@@ -1108,7 +985,10 @@ impl XSSDetector {
         }
 
         // Check if value is a literal (safe)
-        if value_node.map(|n| self.is_safe_literal(n, source)).unwrap_or(false) {
+        if value_node
+            .map(|n| self.is_safe_literal(n, source))
+            .unwrap_or(false)
+        {
             return None;
         }
 
@@ -1117,18 +997,21 @@ impl XSSDetector {
         // If no taint indicators and low confidence, skip
         if confidence == Confidence::Low && tainted_vars.is_empty() {
             // Still report if it's a variable (not a literal)
-            if value_node.map(|n| n.kind() == "string" || n.kind() == "template_string").unwrap_or(true) {
+            if value_node
+                .map(|n| n.kind() == "string" || n.kind() == "template_string")
+                .unwrap_or(true)
+            {
                 return None;
             }
         }
 
-        let location = Location {
-            file: file_path.to_string(),
-            line: sink_node.start_position().row + 1,
-            column: sink_node.start_position().column + 1,
-            end_line: sink_node.end_position().row + 1,
-            end_column: sink_node.end_position().column + 1,
-        };
+        let location = Location::new(
+            file_path,
+            sink_node.start_position().row + 1,
+            sink_node.start_position().column + 1,
+            sink_node.end_position().row + 1,
+            sink_node.end_position().column + 1,
+        );
 
         let code_snippet = extract_code_snippet(source, &location);
         let sink_expr = node_text(sink_node, source).to_string();
@@ -1165,7 +1048,11 @@ impl XSSDetector {
         let args_node = args_node?;
 
         // Get the relevant argument (first for write, second for insertAdjacentHTML)
-        let arg_index = if method_name == "insertAdjacentHTML" { 1 } else { 0 };
+        let arg_index = if method_name == "insertAdjacentHTML" {
+            1
+        } else {
+            0
+        };
         let arg_text = self.get_argument_text(args_node, arg_index, source)?;
 
         // Check if sanitized
@@ -1175,19 +1062,20 @@ impl XSSDetector {
 
         let (confidence, tainted_vars) = self.analyze_taint(&arg_text, source);
 
-        let location = Location {
-            file: file_path.to_string(),
-            line: sink_node.start_position().row + 1,
-            column: sink_node.start_position().column + 1,
-            end_line: sink_node.end_position().row + 1,
-            end_column: sink_node.end_position().column + 1,
-        };
+        let location = Location::new(
+            file_path,
+            sink_node.start_position().row + 1,
+            sink_node.start_position().column + 1,
+            sink_node.end_position().row + 1,
+            sink_node.end_position().column + 1,
+        );
 
         let code_snippet = extract_code_snippet(source, &location);
         let sink_expr = node_text(sink_node, source).to_string();
 
         let severity = self.compute_severity(sink_def.severity, confidence, &tainted_vars);
-        let description = self.generate_description(method_name, sink_def.description, &tainted_vars);
+        let description =
+            self.generate_description(method_name, sink_def.description, &tainted_vars);
         let remediation = self.generate_remediation(sink_def.sink_type);
 
         Some(XSSFinding {
@@ -1238,19 +1126,20 @@ impl XSSDetector {
 
         let (confidence, tainted_vars) = self.analyze_taint(&arg_text, source);
 
-        let location = Location {
-            file: file_path.to_string(),
-            line: sink_node.start_position().row + 1,
-            column: sink_node.start_position().column + 1,
-            end_line: sink_node.end_position().row + 1,
-            end_column: sink_node.end_position().column + 1,
-        };
+        let location = Location::new(
+            file_path,
+            sink_node.start_position().row + 1,
+            sink_node.start_position().column + 1,
+            sink_node.end_position().row + 1,
+            sink_node.end_position().column + 1,
+        );
 
         let code_snippet = extract_code_snippet(source, &location);
         let sink_expr = node_text(sink_node, source).to_string();
 
         let severity = self.compute_severity(sink_def.severity, confidence, &tainted_vars);
-        let description = self.generate_description(method_name, sink_def.description, &tainted_vars);
+        let description =
+            self.generate_description(method_name, sink_def.description, &tainted_vars);
         let remediation = self.generate_remediation(sink_def.sink_type);
 
         Some(XSSFinding {
@@ -1283,7 +1172,8 @@ impl XSSDetector {
         let arg_text = self.get_argument_text(args_node, 0, source)?;
 
         // Check if it's a literal (slightly safer but still risky)
-        let is_literal = arg_text.starts_with('"') || arg_text.starts_with('\'') || arg_text.starts_with('`');
+        let is_literal =
+            arg_text.starts_with('"') || arg_text.starts_with('\'') || arg_text.starts_with('`');
 
         let (mut confidence, tainted_vars) = self.analyze_taint(&arg_text, source);
 
@@ -1292,13 +1182,13 @@ impl XSSDetector {
             confidence = Confidence::Low;
         }
 
-        let location = Location {
-            file: file_path.to_string(),
-            line: sink_node.start_position().row + 1,
-            column: sink_node.start_position().column + 1,
-            end_line: sink_node.end_position().row + 1,
-            end_column: sink_node.end_position().column + 1,
-        };
+        let location = Location::new(
+            file_path,
+            sink_node.start_position().row + 1,
+            sink_node.start_position().column + 1,
+            sink_node.end_position().row + 1,
+            sink_node.end_position().column + 1,
+        );
 
         let code_snippet = extract_code_snippet(source, &location);
         let sink_expr = node_text(sink_node, source).to_string();
@@ -1349,13 +1239,13 @@ impl XSSDetector {
 
         let (confidence, tainted_vars) = self.analyze_taint(&arg_text, source);
 
-        let location = Location {
-            file: file_path.to_string(),
-            line: sink_node.start_position().row + 1,
-            column: sink_node.start_position().column + 1,
-            end_line: sink_node.end_position().row + 1,
-            end_column: sink_node.end_position().column + 1,
-        };
+        let location = Location::new(
+            file_path,
+            sink_node.start_position().row + 1,
+            sink_node.start_position().column + 1,
+            sink_node.end_position().row + 1,
+            sink_node.end_position().column + 1,
+        );
 
         let code_snippet = extract_code_snippet(source, &location);
         let sink_expr = node_text(sink_node, source).to_string();
@@ -1408,13 +1298,13 @@ impl XSSDetector {
 
         let (confidence, tainted_vars) = self.analyze_taint(value_text, source);
 
-        let location = Location {
-            file: file_path.to_string(),
-            line: sink_node.start_position().row + 1,
-            column: sink_node.start_position().column + 1,
-            end_line: sink_node.end_position().row + 1,
-            end_column: sink_node.end_position().column + 1,
-        };
+        let location = Location::new(
+            file_path,
+            sink_node.start_position().row + 1,
+            sink_node.start_position().column + 1,
+            sink_node.end_position().row + 1,
+            sink_node.end_position().column + 1,
+        );
 
         let code_snippet = extract_code_snippet(source, &location);
 
@@ -1424,7 +1314,10 @@ impl XSSDetector {
             if tainted_vars.is_empty() {
                 "Value should be sanitized before use.".to_string()
             } else {
-                format!("Variables {} may contain user-controlled data.", tainted_vars.join(", "))
+                format!(
+                    "Variables {} may contain user-controlled data.",
+                    tainted_vars.join(", ")
+                )
             }
         );
 
@@ -1474,13 +1367,13 @@ impl XSSDetector {
             return None;
         }
 
-        let location = Location {
-            file: file_path.to_string(),
-            line: template_node.start_position().row + 1,
-            column: template_node.start_position().column + 1,
-            end_line: template_node.end_position().row + 1,
-            end_column: template_node.end_position().column + 1,
-        };
+        let location = Location::new(
+            file_path,
+            template_node.start_position().row + 1,
+            template_node.start_position().column + 1,
+            template_node.end_position().row + 1,
+            template_node.end_position().column + 1,
+        );
 
         let code_snippet = extract_code_snippet(source, &location);
 
@@ -1535,19 +1428,23 @@ impl XSSDetector {
                     if !value.is_empty() && !self.is_sanitized(value) {
                         let (confidence, tainted_vars) = self.analyze_taint(value, source);
 
-                        let location = Location {
-                            file: file_path.to_string(),
-                            line: line_idx + 1,
-                            column: vh_pos + 1,
-                            end_line: line_idx + 1,
-                            end_column: vh_pos + 6 + start + value.len(),
-                        };
+                        let location = Location::new(
+                            file_path,
+                            line_idx + 1,
+                            vh_pos + 1,
+                            line_idx + 1,
+                            vh_pos + 6 + start + value.len(),
+                        );
 
                         let code_snippet = Some(format!("{:4} | {}", line_idx + 1, line));
 
                         findings.push(XSSFinding {
                             location,
-                            severity: self.compute_severity(Severity::High, confidence, &tainted_vars),
+                            severity: self.compute_severity(
+                                Severity::High,
+                                confidence,
+                                &tainted_vars,
+                            ),
                             sink_type: XSSSinkType::VueVHtml,
                             context: XSSContext::HtmlContent,
                             sink_expression: format!("v-html=\"{}\"", value),
@@ -1582,19 +1479,23 @@ impl XSSDetector {
                     if !value.is_empty() && !self.is_sanitized(value) {
                         let (confidence, tainted_vars) = self.analyze_taint(value, source);
 
-                        let location = Location {
-                            file: file_path.to_string(),
-                            line: line_idx + 1,
-                            column: ang_pos + 1,
-                            end_line: line_idx + 1,
-                            end_column: ang_pos + 11 + start + value.len(),
-                        };
+                        let location = Location::new(
+                            file_path,
+                            line_idx + 1,
+                            ang_pos + 1,
+                            line_idx + 1,
+                            ang_pos + 11 + start + value.len(),
+                        );
 
                         let code_snippet = Some(format!("{:4} | {}", line_idx + 1, line));
 
                         findings.push(XSSFinding {
                             location,
-                            severity: self.compute_severity(Severity::High, confidence, &tainted_vars),
+                            severity: self.compute_severity(
+                                Severity::High,
+                                confidence,
+                                &tainted_vars,
+                            ),
                             sink_type: XSSSinkType::AngularInnerHtml,
                             context: XSSContext::HtmlContent,
                             sink_expression: format!("[innerHTML]=\"{}\"", value),
@@ -1625,9 +1526,9 @@ impl XSSDetector {
     /// Check if value appears to be sanitized.
     fn is_sanitized(&self, value: &str) -> bool {
         let lower = value.to_lowercase();
-        self.sanitization_functions.iter().any(|func| {
-            lower.contains(&func.to_lowercase())
-        })
+        self.sanitization_functions
+            .iter()
+            .any(|func| lower.contains(&func.to_lowercase()))
     }
 
     /// Check if a node is a safe literal (static string without interpolation).
@@ -1642,7 +1543,9 @@ impl XSSDetector {
             "template_string" => {
                 // Template string is only safe if no substitutions
                 let mut cursor = node.walk();
-                let has_substitution = node.children(&mut cursor).any(|c| c.kind() == "template_substitution");
+                let has_substitution = node
+                    .children(&mut cursor)
+                    .any(|c| c.kind() == "template_substitution");
                 !has_substitution
             }
             _ => false,
@@ -1684,19 +1587,48 @@ impl XSSDetector {
 
         // Known user input sources
         let user_input_patterns = [
-            "location.search", "location.hash", "location.href", "location.pathname",
-            "document.URL", "document.documentURI", "document.referrer", "document.cookie",
-            "window.name", "window.location",
-            "localStorage", "sessionStorage",
+            "location.search",
+            "location.hash",
+            "location.href",
+            "location.pathname",
+            "document.URL",
+            "document.documentURI",
+            "document.referrer",
+            "document.cookie",
+            "window.name",
+            "window.location",
+            "localStorage",
+            "sessionStorage",
             "URLSearchParams",
-            "event.data", "postMessage",
-            "req.body", "req.query", "req.params", "request.body", "request.query",
-            "params.", "query.", "body.",
-            "fetch", "XMLHttpRequest", "axios",
-            "getElementById", "querySelector", "querySelectorAll",
-            "input", "textarea", "select",
-            ".value", ".innerHTML", ".outerHTML",
-            "user", "userData", "userInput", "data", "content", "html", "markup",
+            "event.data",
+            "postMessage",
+            "req.body",
+            "req.query",
+            "req.params",
+            "request.body",
+            "request.query",
+            "params.",
+            "query.",
+            "body.",
+            "fetch",
+            "XMLHttpRequest",
+            "axios",
+            "getElementById",
+            "querySelector",
+            "querySelectorAll",
+            "input",
+            "textarea",
+            "select",
+            ".value",
+            ".innerHTML",
+            ".outerHTML",
+            "user",
+            "userData",
+            "userInput",
+            "data",
+            "content",
+            "html",
+            "markup",
         ];
 
         let lower = value.to_lowercase();
@@ -1752,7 +1684,12 @@ impl XSSDetector {
                 .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '_')
                 .collect();
-            if !identifier.is_empty() && identifier != "true" && identifier != "false" && identifier != "null" && identifier != "undefined" {
+            if !identifier.is_empty()
+                && identifier != "true"
+                && identifier != "false"
+                && identifier != "null"
+                && identifier != "undefined"
+            {
                 tainted_vars.push(identifier);
             }
         }
@@ -1761,7 +1698,12 @@ impl XSSDetector {
     }
 
     /// Compute final severity based on sink severity, confidence, and taint.
-    fn compute_severity(&self, base_severity: Severity, confidence: Confidence, tainted_vars: &[String]) -> Severity {
+    fn compute_severity(
+        &self,
+        base_severity: Severity,
+        confidence: Confidence,
+        tainted_vars: &[String],
+    ) -> Severity {
         // Start with base severity
         let mut severity = base_severity;
 
@@ -1784,16 +1726,16 @@ impl XSSDetector {
         if !tainted_vars.is_empty() {
             let has_direct_user_input = tainted_vars.iter().any(|v| {
                 let lower = v.to_lowercase();
-                lower.contains("location") ||
-                lower.contains("document.url") ||
-                lower.contains("cookie") ||
-                lower.contains("postmessage") ||
-                lower.contains("localstorage") ||
-                lower.contains("sessionstorage") ||
-                lower.contains("req.") ||
-                lower.contains("request.") ||
-                lower.contains("params") ||
-                lower.contains("query")
+                lower.contains("location")
+                    || lower.contains("document.url")
+                    || lower.contains("cookie")
+                    || lower.contains("postmessage")
+                    || lower.contains("localstorage")
+                    || lower.contains("sessionstorage")
+                    || lower.contains("req.")
+                    || lower.contains("request.")
+                    || lower.contains("params")
+                    || lower.contains("query")
             });
 
             if has_direct_user_input && severity < Severity::Critical {
@@ -1805,13 +1747,14 @@ impl XSSDetector {
     }
 
     /// Generate description for the finding.
-    fn generate_description(&self, sink_name: &str, sink_desc: &str, tainted_vars: &[String]) -> String {
+    fn generate_description(
+        &self,
+        sink_name: &str,
+        sink_desc: &str,
+        tainted_vars: &[String],
+    ) -> String {
         if tainted_vars.is_empty() {
-            format!(
-                "{} sink detected. {}",
-                sink_name,
-                sink_desc
-            )
+            format!("{} sink detected. {}", sink_name, sink_desc)
         } else {
             format!(
                 "{} sink with potentially tainted variables: {}. {}",
@@ -1927,9 +1870,11 @@ pub fn scan_xss(path: &Path, language: Option<&str>) -> Result<XSSScanResult> {
         let findings = detector.scan_file(path)?;
         let sinks_found = findings.len();
 
-        let mut severity_counts: HashMap<String, usize> = HashMap::new();
+        let mut severity_counts: FxHashMap<String, usize> = FxHashMap::default();
         for finding in &findings {
-            *severity_counts.entry(finding.severity.to_string()).or_insert(0) += 1;
+            *severity_counts
+                .entry(finding.severity.to_string())
+                .or_insert(0) += 1;
         }
 
         Ok(XSSScanResult {
@@ -2107,9 +2052,18 @@ function insertContent(html) {
         let detector = XSSDetector::new();
 
         // Verify jQuery sinks are configured
-        assert!(detector.jquery_sinks.contains_key("html"), "Should have html in jQuery sinks");
-        assert!(detector.jquery_sinks.contains_key("append"), "Should have append in jQuery sinks");
-        assert!(detector.jquery_sinks.contains_key("prepend"), "Should have prepend in jQuery sinks");
+        assert!(
+            detector.jquery_sinks.contains_key("html"),
+            "Should have html in jQuery sinks"
+        );
+        assert!(
+            detector.jquery_sinks.contains_key("append"),
+            "Should have append in jQuery sinks"
+        );
+        assert!(
+            detector.jquery_sinks.contains_key("prepend"),
+            "Should have prepend in jQuery sinks"
+        );
     }
 
     #[test]
@@ -2122,7 +2076,10 @@ function appendContent(userHtml) {
         let file = create_temp_file(source, ".js");
         let findings = scan_file_xss(file.path()).expect("Scan should succeed");
 
-        assert!(!findings.is_empty(), "Should detect jQuery .append() with HTML XSS");
+        assert!(
+            !findings.is_empty(),
+            "Should detect jQuery .append() with HTML XSS"
+        );
     }
 
     // =========================================================================
@@ -2154,7 +2111,10 @@ function createFunction(body) {
         let file = create_temp_file(source, ".js");
         let findings = scan_file_xss(file.path()).expect("Scan should succeed");
 
-        assert!(!findings.is_empty(), "Should detect Function constructor XSS");
+        assert!(
+            !findings.is_empty(),
+            "Should detect Function constructor XSS"
+        );
         assert_eq!(findings[0].sink_type, XSSSinkType::CodeExecution);
     }
 
@@ -2169,8 +2129,14 @@ function createFunction(body) {
         let detector = XSSDetector::new();
 
         // Verify timer sinks are configured
-        assert!(detector.timer_sinks.contains_key("setTimeout"), "Should have setTimeout in timer sinks");
-        assert!(detector.timer_sinks.contains_key("setInterval"), "Should have setInterval in timer sinks");
+        assert!(
+            detector.timer_sinks.contains_key("setTimeout"),
+            "Should have setTimeout in timer sinks"
+        );
+        assert!(
+            detector.timer_sinks.contains_key("setInterval"),
+            "Should have setInterval in timer sinks"
+        );
 
         // Verify the sink has correct severity
         let timeout_sink = detector.timer_sinks.get("setTimeout").unwrap();
@@ -2188,7 +2154,10 @@ function delayedAction() {
         let file = create_temp_file(source, ".js");
         let findings = scan_file_xss(file.path()).expect("Scan should succeed");
 
-        assert!(findings.is_empty(), "Should NOT detect setTimeout with function (safe)");
+        assert!(
+            findings.is_empty(),
+            "Should NOT detect setTimeout with function (safe)"
+        );
     }
 
     // =========================================================================
@@ -2205,8 +2174,14 @@ function Component({ userContent }) {
         let file = create_temp_file(source, ".tsx");
         let findings = scan_file_xss(file.path()).expect("Scan should succeed");
 
-        assert!(!findings.is_empty(), "Should detect dangerouslySetInnerHTML XSS");
-        assert_eq!(findings[0].sink_type, XSSSinkType::ReactDangerouslySetInnerHtml);
+        assert!(
+            !findings.is_empty(),
+            "Should detect dangerouslySetInnerHTML XSS"
+        );
+        assert_eq!(
+            findings[0].sink_type,
+            XSSSinkType::ReactDangerouslySetInnerHtml
+        );
     }
 
     #[test]
@@ -2219,7 +2194,10 @@ function Component({ userContent }) {
         let file = create_temp_file(source, ".tsx");
         let findings = scan_file_xss(file.path()).expect("Scan should succeed");
 
-        assert!(findings.is_empty(), "Should NOT detect sanitized dangerouslySetInnerHTML");
+        assert!(
+            findings.is_empty(),
+            "Should NOT detect sanitized dangerouslySetInnerHTML"
+        );
     }
 
     // =========================================================================
@@ -2238,7 +2216,10 @@ function render(userName) {
         let findings = scan_file_xss(file.path()).expect("Scan should succeed");
 
         // Should detect both the template literal and innerHTML
-        assert!(!findings.is_empty(), "Should detect template literal HTML XSS");
+        assert!(
+            !findings.is_empty(),
+            "Should detect template literal HTML XSS"
+        );
     }
 
     // =========================================================================
@@ -2286,7 +2267,10 @@ document.body.innerHTML = search;
 
         assert!(!findings.is_empty(), "Should detect XSS");
         // Finding should be present - confidence level depends on taint analysis depth
-        assert!(findings[0].sink_type == XSSSinkType::Dom, "Should be DOM XSS");
+        assert!(
+            findings[0].sink_type == XSSSinkType::Dom,
+            "Should be DOM XSS"
+        );
     }
 
     // =========================================================================
@@ -2324,7 +2308,10 @@ document.body.innerHTML = search;
     fn test_sink_type_display() {
         assert_eq!(XSSSinkType::Dom.to_string(), "dom");
         assert_eq!(XSSSinkType::DocumentWrite.to_string(), "document_write");
-        assert_eq!(XSSSinkType::ReactDangerouslySetInnerHtml.to_string(), "react_dangerously_set_inner_html");
+        assert_eq!(
+            XSSSinkType::ReactDangerouslySetInnerHtml.to_string(),
+            "react_dangerously_set_inner_html"
+        );
         assert_eq!(XSSSinkType::CodeExecution.to_string(), "code_execution");
     }
 
@@ -2378,13 +2365,7 @@ document.body.innerHTML = search;
 
     #[test]
     fn test_location_display() {
-        let loc = Location {
-            file: "test.js".to_string(),
-            line: 10,
-            column: 5,
-            end_line: 10,
-            end_column: 30,
-        };
+        let loc = Location::new("test.js", 10, 5, 10, 30);
         assert_eq!(format!("{}", loc), "test.js:10:5");
     }
 
@@ -2407,12 +2388,21 @@ eval(userInput);
         let findings = scan_file_xss(file.path()).expect("Scan should succeed");
 
         // Should detect multiple vulnerabilities
-        assert!(findings.len() >= 3, "Should detect multiple XSS vulnerabilities");
+        assert!(
+            findings.len() >= 3,
+            "Should detect multiple XSS vulnerabilities"
+        );
 
         // Check for different sink types
-        let sink_types: HashSet<_> = findings.iter().map(|f| f.sink_type).collect();
-        assert!(sink_types.contains(&XSSSinkType::Dom), "Should have DOM sink");
-        assert!(sink_types.contains(&XSSSinkType::DocumentWrite), "Should have document.write sink");
+        let sink_types: FxHashSet<_> = findings.iter().map(|f| f.sink_type).collect();
+        assert!(
+            sink_types.contains(&XSSSinkType::Dom),
+            "Should have DOM sink"
+        );
+        assert!(
+            sink_types.contains(&XSSSinkType::DocumentWrite),
+            "Should have document.write sink"
+        );
     }
 
     #[test]
@@ -2422,26 +2412,42 @@ eval(userInput);
 
         // Create vulnerable file
         let vuln_path = dir.path().join("vulnerable.js");
-        std::fs::write(&vuln_path, r#"
+        std::fs::write(
+            &vuln_path,
+            r#"
 const x = location.search;
 document.body.innerHTML = x;
-"#).expect("Failed to write file");
+"#,
+        )
+        .expect("Failed to write file");
 
         // Create safe file
         let safe_path = dir.path().join("safe.js");
-        std::fs::write(&safe_path, r#"
+        std::fs::write(
+            &safe_path,
+            r#"
 const x = location.search;
 document.body.textContent = x;
-"#).expect("Failed to write file");
+"#,
+        )
+        .expect("Failed to write file");
 
         let result = scan_xss(dir.path(), None).expect("Scan should succeed");
 
         // Should scan at least 1 file (the files we created)
         assert!(result.files_scanned >= 1, "Should scan at least one file");
         // Should find the innerHTML vulnerability
-        assert!(!result.findings.is_empty(), "Should find vulnerability in vulnerable.js");
+        assert!(
+            !result.findings.is_empty(),
+            "Should find vulnerability in vulnerable.js"
+        );
         // Verify we found an innerHTML sink
-        assert!(result.findings.iter().any(|f| f.sink_type == XSSSinkType::Dom),
-            "Should detect DOM XSS in vulnerable.js");
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.sink_type == XSSSinkType::Dom),
+            "Should detect DOM XSS in vulnerable.js"
+        );
     }
 }

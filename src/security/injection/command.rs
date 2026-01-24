@@ -30,72 +30,25 @@
 //! - Glob expansion: `*`, `?`, `[`, `]`
 //! - Quote escape: `'`, `"`, `\`
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor, Tree};
 
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
 use crate::util::format_query_error;
+
+// Re-export common types for backward compatibility and internal use
+pub use crate::security::common::{Confidence, Severity, SourceLocation};
 
 // =============================================================================
 // Type Definitions
 // =============================================================================
-
-/// Severity level for security findings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Severity {
-    /// Informational - may not be exploitable but worth reviewing
-    Info,
-    /// Low severity - limited impact or requires specific conditions
-    Low,
-    /// Medium severity - potential for significant impact
-    Medium,
-    /// High severity - likely exploitable with serious impact
-    High,
-    /// Critical - easily exploitable with severe consequences
-    Critical,
-}
-
-impl std::fmt::Display for Severity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Info => write!(f, "INFO"),
-            Self::Low => write!(f, "LOW"),
-            Self::Medium => write!(f, "MEDIUM"),
-            Self::High => write!(f, "HIGH"),
-            Self::Critical => write!(f, "CRITICAL"),
-        }
-    }
-}
-
-/// Confidence level for the finding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Confidence {
-    /// Low confidence - pattern match only, no data flow confirmation
-    Low,
-    /// Medium confidence - some data flow indicators but incomplete path
-    Medium,
-    /// High confidence - clear data flow from source to sink
-    High,
-}
-
-impl std::fmt::Display for Confidence {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Low => write!(f, "LOW"),
-            Self::Medium => write!(f, "MEDIUM"),
-            Self::High => write!(f, "HIGH"),
-        }
-    }
-}
 
 /// Type of injection vulnerability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -116,27 +69,6 @@ impl std::fmt::Display for InjectionKind {
             Self::ArgumentInjection => write!(f, "argument_injection"),
             Self::CodeInjection => write!(f, "code_injection"),
         }
-    }
-}
-
-/// Source location in code.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SourceLocation {
-    /// File path
-    pub file: String,
-    /// Line number (1-indexed)
-    pub line: usize,
-    /// Column number (1-indexed)
-    pub column: usize,
-    /// End line number (1-indexed)
-    pub end_line: usize,
-    /// End column number (1-indexed)
-    pub end_column: usize,
-}
-
-impl std::fmt::Display for SourceLocation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}:{}", self.file, self.line, self.column)
     }
 }
 
@@ -1342,10 +1274,13 @@ const JAVA_SINK_QUERY: &str = r#"
 /// # Returns
 ///
 /// Vector of command injection findings.
-pub fn scan_command_injection(path: &Path, language: Option<&str>) -> Result<Vec<CommandInjectionFinding>> {
-    let path_str = path.to_str().ok_or_else(|| {
-        BrrrError::InvalidArgument("Invalid path encoding".to_string())
-    })?;
+pub fn scan_command_injection(
+    path: &Path,
+    language: Option<&str>,
+) -> Result<Vec<CommandInjectionFinding>> {
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| BrrrError::InvalidArgument("Invalid path encoding".to_string()))?;
 
     let scanner = ProjectScanner::new(path_str)?;
     let config = match language {
@@ -1359,9 +1294,7 @@ pub fn scan_command_injection(path: &Path, language: Option<&str>) -> Result<Vec
     // Process files in parallel
     let findings: Vec<CommandInjectionFinding> = files
         .par_iter()
-        .filter_map(|file| {
-            scan_file_command_injection(file, language).ok()
-        })
+        .filter_map(|file| scan_file_command_injection(file, language).ok())
         .flatten()
         .collect();
 
@@ -1378,7 +1311,10 @@ pub fn scan_command_injection(path: &Path, language: Option<&str>) -> Result<Vec
 /// # Returns
 ///
 /// Vector of command injection findings in this file.
-pub fn scan_file_command_injection(file: &Path, language: Option<&str>) -> Result<Vec<CommandInjectionFinding>> {
+pub fn scan_file_command_injection(
+    file: &Path,
+    language: Option<&str>,
+) -> Result<Vec<CommandInjectionFinding>> {
     let registry = LanguageRegistry::global();
 
     // Detect language
@@ -1386,14 +1322,14 @@ pub fn scan_file_command_injection(file: &Path, language: Option<&str>) -> Resul
         Some(lang_name) => registry
             .get_by_name(lang_name)
             .ok_or_else(|| BrrrError::UnsupportedLanguage(lang_name.to_string()))?,
-        None => registry
-            .detect_language(file)
-            .ok_or_else(|| BrrrError::UnsupportedLanguage(
+        None => registry.detect_language(file).ok_or_else(|| {
+            BrrrError::UnsupportedLanguage(
                 file.extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or("unknown")
                     .to_string(),
-            ))?,
+            )
+        })?,
     };
 
     let lang_name = lang.name();
@@ -1407,22 +1343,31 @@ pub fn scan_file_command_injection(file: &Path, language: Option<&str>) -> Resul
     // Parse the file
     let source = std::fs::read(file).map_err(|e| BrrrError::io_with_path(e, file))?;
     let mut parser = lang.parser_for_path(file)?;
-    let tree = parser.parse(&source, None).ok_or_else(|| BrrrError::Parse {
-        file: file.display().to_string(),
-        message: "Failed to parse file".to_string(),
-    })?;
+    let tree = parser
+        .parse(&source, None)
+        .ok_or_else(|| BrrrError::Parse {
+            file: file.display().to_string(),
+            message: "Failed to parse file".to_string(),
+        })?;
 
     let ts_lang = tree.language();
     let file_path = file.display().to_string();
 
     // Find sinks
-    let sinks = find_sinks(&tree, &source, &ts_lang, sink_query_str, lang_name, &file_path)?;
+    let sinks = find_sinks(
+        &tree,
+        &source,
+        &ts_lang,
+        sink_query_str,
+        lang_name,
+        &file_path,
+    )?;
 
     // Find taint sources if query is available
     let taint_sources = if let Some(taint_query) = taint_query_str {
         find_taint_sources(&tree, &source, &ts_lang, taint_query, lang_name, &file_path)?
     } else {
-        HashMap::new()
+        FxHashMap::default()
     };
 
     // Analyze each sink for potential injection
@@ -1462,7 +1407,7 @@ fn find_sinks(
     query_str: &str,
     lang_name: &str,
     file_path: &str,
-) -> Result<HashMap<SourceLocation, SinkInfo>> {
+) -> Result<FxHashMap<SourceLocation, SinkInfo>> {
     let query = Query::new(ts_lang, query_str)
         .map_err(|e| BrrrError::TreeSitter(format_query_error(lang_name, "sink", query_str, &e)))?;
 
@@ -1474,7 +1419,7 @@ fn find_sinks(
     let func_idx = query.capture_index_for_name("func");
     let args_idx = query.capture_index_for_name("args");
 
-    let mut sinks = HashMap::new();
+    let mut sinks = FxHashMap::default();
 
     while let Some(match_) = matches.next() {
         let sink_node = sink_idx
@@ -1496,26 +1441,28 @@ fn find_sinks(
                 column: sink_node.start_position().column + 1,
                 end_line: sink_node.end_position().row + 1,
                 end_column: sink_node.end_position().column + 1,
+                snippet: None,
             };
 
             let function_name = func_node
                 .map(|n| node_text(n, source).to_string())
                 .unwrap_or_else(|| "unknown".to_string());
 
-            let first_arg_text = args_node.and_then(|args| {
-                extract_first_argument(args, source)
-            });
+            let first_arg_text = args_node.and_then(|args| extract_first_argument(args, source));
 
             let has_shell_true = args_node
                 .map(|args| check_shell_true(args, source, lang_name))
                 .unwrap_or(false);
 
-            sinks.insert(location, SinkInfo {
-                function_name,
-                arguments_node: args_node.map(|n| n.range()),
-                first_arg_text,
-                has_shell_true,
-            });
+            sinks.insert(
+                location,
+                SinkInfo {
+                    function_name,
+                    arguments_node: args_node.map(|n| n.range()),
+                    first_arg_text,
+                    has_shell_true,
+                },
+            );
         }
     }
 
@@ -1530,16 +1477,17 @@ fn find_taint_sources(
     query_str: &str,
     lang_name: &str,
     file_path: &str,
-) -> Result<HashMap<String, Vec<TaintSource>>> {
-    let query = Query::new(ts_lang, query_str)
-        .map_err(|e| BrrrError::TreeSitter(format_query_error(lang_name, "taint_source", query_str, &e)))?;
+) -> Result<FxHashMap<String, Vec<TaintSource>>> {
+    let query = Query::new(ts_lang, query_str).map_err(|e| {
+        BrrrError::TreeSitter(format_query_error(lang_name, "taint_source", query_str, &e))
+    })?;
 
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&query, tree.root_node(), source);
 
     let source_idx = query.capture_index_for_name("source");
 
-    let mut sources: HashMap<String, Vec<TaintSource>> = HashMap::new();
+    let mut sources: FxHashMap<String, Vec<TaintSource>> = FxHashMap::default();
 
     while let Some(match_) = matches.next() {
         if let Some(idx) = source_idx {
@@ -1548,8 +1496,8 @@ fn find_taint_sources(
                 let text = node_text(node, source);
 
                 // Try to extract variable name from assignment context
-                let variable = extract_assigned_variable(node, source)
-                    .unwrap_or_else(|| text.to_string());
+                let variable =
+                    extract_assigned_variable(node, source).unwrap_or_else(|| text.to_string());
 
                 let kind = classify_taint_source(text, lang_name);
 
@@ -1559,6 +1507,7 @@ fn find_taint_sources(
                     column: node.start_position().column + 1,
                     end_line: node.end_position().row + 1,
                     end_column: node.end_position().column + 1,
+                    snippet: None,
                 };
 
                 let taint = TaintSource {
@@ -1605,7 +1554,10 @@ fn extract_assigned_variable(node: Node, source: &[u8]) -> Option<String> {
     let mut current = node;
     while let Some(parent) = current.parent() {
         match parent.kind() {
-            "assignment" | "assignment_statement" | "variable_declaration" | "lexical_declaration" => {
+            "assignment"
+            | "assignment_statement"
+            | "variable_declaration"
+            | "lexical_declaration" => {
                 // Get the left side of assignment
                 let mut cursor = parent.walk();
                 for child in parent.children(&mut cursor) {
@@ -1633,17 +1585,22 @@ fn extract_assigned_variable(node: Node, source: &[u8]) -> Option<String> {
 fn analyze_sink(
     sink: &SinkInfo,
     location: &SourceLocation,
-    taint_sources: &HashMap<String, Vec<TaintSource>>,
+    taint_sources: &FxHashMap<String, Vec<TaintSource>>,
     source: &[u8],
     tree: &Tree,
     lang_name: &str,
     file_path: &str,
 ) -> Option<CommandInjectionFinding> {
     let known_sinks = get_command_sinks(lang_name);
-    let sink_def = known_sinks.iter().find(|s| s.function == sink.function_name)?;
+    let sink_def = known_sinks
+        .iter()
+        .find(|s| s.function == sink.function_name)?;
 
     // Determine injection kind
-    let kind = if sink.function_name == "eval" || sink.function_name == "exec" || sink.function_name == "compile" {
+    let kind = if sink.function_name == "eval"
+        || sink.function_name == "exec"
+        || sink.function_name == "compile"
+    {
         InjectionKind::CodeInjection
     } else if sink_def.shell_by_default || sink.has_shell_true {
         InjectionKind::CommandInjection
@@ -1702,7 +1659,7 @@ fn analyze_sink(
 /// Analyze an argument for taint propagation.
 fn analyze_argument_taint(
     arg_text: &str,
-    taint_sources: &HashMap<String, Vec<TaintSource>>,
+    taint_sources: &FxHashMap<String, Vec<TaintSource>>,
     _tree: &Tree,
     _source: &[u8],
     _file_path: &str,
@@ -1710,51 +1667,45 @@ fn analyze_argument_taint(
     // Check for direct taint (variable matches a taint source)
     for (var_name, sources) in taint_sources {
         if arg_text.contains(var_name) {
-            return (
-                var_name.clone(),
-                Confidence::High,
-                sources.clone(),
-            );
+            return (var_name.clone(), Confidence::High, sources.clone());
         }
     }
 
     // Check for suspicious patterns even without direct taint tracking
     let suspicious_patterns = [
-        "request", "req", "params", "query", "body", "input",
-        "argv", "args", "env", "getenv", "user", "data",
-        "stdin", "file", "read", "form",
+        "request", "req", "params", "query", "body", "input", "argv", "args", "env", "getenv",
+        "user", "data", "stdin", "file", "read", "form",
     ];
 
     let lower = arg_text.to_lowercase();
     for pattern in suspicious_patterns {
         if lower.contains(pattern) {
-            return (
-                arg_text.to_string(),
-                Confidence::Medium,
-                vec![],
-            );
+            return (arg_text.to_string(), Confidence::Medium, vec![]);
         }
     }
 
     // Check for string concatenation or interpolation with variables
-    if arg_text.contains('+') || arg_text.contains("format") ||
-       arg_text.contains('%') || arg_text.contains('{') ||
-       arg_text.contains('$') || arg_text.contains('`') {
-        return (
-            arg_text.to_string(),
-            Confidence::Medium,
-            vec![],
-        );
+    if arg_text.contains('+')
+        || arg_text.contains("format")
+        || arg_text.contains('%')
+        || arg_text.contains('{')
+        || arg_text.contains('$')
+        || arg_text.contains('`')
+    {
+        return (arg_text.to_string(), Confidence::Medium, vec![]);
     }
 
     // If it's a variable (not a literal), flag with low confidence
-    if !arg_text.starts_with('"') && !arg_text.starts_with('\'') &&
-       !arg_text.starts_with('[') && !arg_text.chars().next().map(|c| c.is_numeric()).unwrap_or(false) {
-        return (
-            arg_text.to_string(),
-            Confidence::Low,
-            vec![],
-        );
+    if !arg_text.starts_with('"')
+        && !arg_text.starts_with('\'')
+        && !arg_text.starts_with('[')
+        && !arg_text
+            .chars()
+            .next()
+            .map(|c| c.is_numeric())
+            .unwrap_or(false)
+    {
+        return (arg_text.to_string(), Confidence::Low, vec![]);
     }
 
     (arg_text.to_string(), Confidence::Low, vec![])
@@ -1911,10 +1862,13 @@ def handle_request(request):
     os.system(cmd)  # Direct injection
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_command_injection(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_command_injection(file.path(), Some("python")).expect("Scan should succeed");
 
-        assert!(!findings.is_empty(), "Should detect os.system vulnerability");
+        assert!(
+            !findings.is_empty(),
+            "Should detect os.system vulnerability"
+        );
         let finding = &findings[0];
         assert_eq!(finding.sink_function, "system");
         assert_eq!(finding.kind, InjectionKind::CommandInjection);
@@ -1932,8 +1886,8 @@ def handle_request(request):
     os.system(command)  # Indirect injection via concatenation
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_command_injection(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_command_injection(file.path(), Some("python")).expect("Scan should succeed");
 
         assert!(!findings.is_empty(), "Should detect indirect injection");
         // Even without full taint tracking, os.system is a dangerous sink
@@ -1950,10 +1904,13 @@ def run_command(user_input):
     subprocess.run(user_input, shell=True)  # Dangerous!
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_command_injection(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_command_injection(file.path(), Some("python")).expect("Scan should succeed");
 
-        assert!(!findings.is_empty(), "Should detect subprocess with shell=True");
+        assert!(
+            !findings.is_empty(),
+            "Should detect subprocess with shell=True"
+        );
         let finding = &findings[0];
         assert_eq!(finding.kind, InjectionKind::CommandInjection);
     }
@@ -1968,13 +1925,15 @@ def run_safe(filename):
     subprocess.run(['cat', filename], shell=False)
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_command_injection(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_command_injection(file.path(), Some("python")).expect("Scan should succeed");
 
         // Should still detect but with lower severity (argument injection possible)
         if !findings.is_empty() {
-            assert!(findings[0].kind == InjectionKind::ArgumentInjection ||
-                    findings[0].severity <= Severity::Medium);
+            assert!(
+                findings[0].kind == InjectionKind::ArgumentInjection
+                    || findings[0].severity <= Severity::Medium
+            );
         }
     }
 
@@ -1985,8 +1944,8 @@ def calculate(expression):
     return eval(expression)  # Code injection!
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_command_injection(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_command_injection(file.path(), Some("python")).expect("Scan should succeed");
 
         assert!(!findings.is_empty(), "Should detect eval vulnerability");
         let finding = &findings[0];
@@ -2002,8 +1961,8 @@ def run_code(code):
     exec(code)  # Code injection!
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_command_injection(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_command_injection(file.path(), Some("python")).expect("Scan should succeed");
 
         assert!(!findings.is_empty(), "Should detect exec vulnerability");
         assert_eq!(findings[0].kind, InjectionKind::CodeInjection);
@@ -2019,8 +1978,8 @@ def main():
     os.system(cmd)
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_command_injection(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_command_injection(file.path(), Some("python")).expect("Scan should succeed");
 
         assert!(!findings.is_empty(), "Should detect input() to os.system");
     }
@@ -2047,9 +2006,13 @@ function runCommand(userInput: string) {
 
         assert!(!findings.is_empty(), "Should detect child_process.exec");
         // Find the CommandInjection finding (there may be multiple findings)
-        let cmd_injection = findings.iter().find(|f| f.kind == InjectionKind::CommandInjection);
-        assert!(cmd_injection.is_some() || findings[0].sink_function == "exec",
-            "Should detect command injection or exec sink");
+        let cmd_injection = findings
+            .iter()
+            .find(|f| f.kind == InjectionKind::CommandInjection);
+        assert!(
+            cmd_injection.is_some() || findings[0].sink_function == "exec",
+            "Should detect command injection or exec sink"
+        );
     }
 
     #[test]
@@ -2105,10 +2068,13 @@ func runCommand(userInput string) {
 }
 "#;
         let file = create_temp_file(source, ".go");
-        let findings = scan_file_command_injection(file.path(), Some("go"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_command_injection(file.path(), Some("go")).expect("Scan should succeed");
 
-        assert!(!findings.is_empty(), "Should detect exec.Command with user input");
+        assert!(
+            !findings.is_empty(),
+            "Should detect exec.Command with user input"
+        );
     }
 
     // =========================================================================
@@ -2125,8 +2091,8 @@ void execute(char* userInput) {
 }
 "#;
         let file = create_temp_file(source, ".c");
-        let findings = scan_file_command_injection(file.path(), Some("c"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_command_injection(file.path(), Some("c")).expect("Scan should succeed");
 
         assert!(!findings.is_empty(), "Should detect system() call");
         assert_eq!(findings[0].kind, InjectionKind::CommandInjection);
@@ -2144,8 +2110,8 @@ void readOutput(char* cmd) {
 }
 "#;
         let file = create_temp_file(source, ".c");
-        let findings = scan_file_command_injection(file.path(), Some("c"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_command_injection(file.path(), Some("c")).expect("Scan should succeed");
 
         assert!(!findings.is_empty(), "Should detect popen() call");
     }
@@ -2166,10 +2132,13 @@ fn run_command(user_input: &str) {
 }
 "#;
         let file = create_temp_file(source, ".rs");
-        let findings = scan_file_command_injection(file.path(), Some("rust"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_command_injection(file.path(), Some("rust")).expect("Scan should succeed");
 
-        assert!(!findings.is_empty(), "Should detect Command::new with user input");
+        assert!(
+            !findings.is_empty(),
+            "Should detect Command::new with user input"
+        );
     }
 
     // =========================================================================
@@ -2186,8 +2155,8 @@ public class CommandRunner {
 }
 "#;
         let file = create_temp_file(source, ".java");
-        let findings = scan_file_command_injection(file.path(), Some("java"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_command_injection(file.path(), Some("java")).expect("Scan should succeed");
 
         // Note: Java Runtime.exec detection depends on tree-sitter-java grammar details
         // This test verifies the scan completes without error; detection may vary
@@ -2217,7 +2186,16 @@ public class CommandRunner {
     #[test]
     fn test_get_command_sinks_coverage() {
         // Ensure we have sinks defined for all supported languages
-        let languages = ["python", "typescript", "javascript", "go", "rust", "c", "cpp", "java"];
+        let languages = [
+            "python",
+            "typescript",
+            "javascript",
+            "go",
+            "rust",
+            "c",
+            "cpp",
+            "java",
+        ];
         for lang in languages {
             let sinks = get_command_sinks(lang);
             assert!(!sinks.is_empty(), "Should have sinks for {}", lang);
@@ -2266,13 +2244,7 @@ public class CommandRunner {
 
     #[test]
     fn test_source_location_display() {
-        let loc = SourceLocation {
-            file: "test.py".to_string(),
-            line: 10,
-            column: 5,
-            end_line: 10,
-            end_column: 20,
-        };
+        let loc = SourceLocation::new("test.py", 10, 5, 10, 20);
         assert_eq!(format!("{}", loc), "test.py:10:5");
     }
 }

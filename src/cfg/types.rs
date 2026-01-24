@@ -1,8 +1,9 @@
 //! CFG type definitions.
 
+use fixedbitset::FixedBitSet;
 use once_cell::sync::OnceCell;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 
 /// Cached adjacency lists for O(1) successor/predecessor lookups.
 ///
@@ -12,9 +13,9 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug)]
 pub struct AdjacencyCache {
     /// BlockId -> list of successor BlockIds (outgoing edges)
-    successors: HashMap<BlockId, Vec<BlockId>>,
+    successors: FxHashMap<BlockId, Vec<BlockId>>,
     /// BlockId -> list of predecessor BlockIds (incoming edges)
-    predecessors: HashMap<BlockId, Vec<BlockId>>,
+    predecessors: FxHashMap<BlockId, Vec<BlockId>>,
 }
 
 /// Errors that can occur during CFG validation.
@@ -139,6 +140,24 @@ pub enum BlockType {
     /// Python: Task spawn point (asyncio.create_task, asyncio.gather, etc.)
     TaskSpawn,
     // =========================================================================
+    // Python generator block types
+    // =========================================================================
+    /// Python: yield expression - generator suspension point
+    /// When yield is encountered, the generator suspends and returns a value.
+    /// Re-entry occurs when next() is called on the generator.
+    YieldPoint,
+    /// Python: yield from expression - delegation to sub-generator
+    /// Transfers control to another iterable/generator, passing values through.
+    /// Bidirectional: send() and throw() are also delegated.
+    YieldFrom,
+    /// Python: Re-entry point after yield (conceptual - where execution resumes)
+    /// Models the point where next(), send(), or throw() resumes execution.
+    GeneratorEntry,
+    /// Python: Async yield point (yield in async generator)
+    /// Combines async suspension semantics with generator protocol.
+    /// Requires async iteration with `async for` or `anext()`.
+    AsyncYieldPoint,
+    // =========================================================================
     // JavaScript/TypeScript async/await and Promise block types
     // =========================================================================
     /// JS/TS: Promise.then() callback block - executes on promise resolution
@@ -159,6 +178,27 @@ pub enum BlockType {
     AsyncGeneratorYield,
     /// JS/TS: for await...of loop header (async iteration)
     ForAwaitOf,
+    // =========================================================================
+    // JavaScript/TypeScript generator block types (function*, async function*)
+    // =========================================================================
+    /// JS/TS: Generator yield suspension point (yield expression in function*)
+    /// The generator pauses execution and returns the yielded value.
+    /// Execution resumes when .next() is called on the iterator.
+    JSYieldPoint,
+    /// JS/TS: Generator yield* delegation (yield* expression)
+    /// Delegates iteration to another iterable or generator.
+    /// The delegated iterator is consumed until exhausted, then control returns.
+    /// Iterator protocol methods (.next(), .return(), .throw()) pass through.
+    JSYieldStar,
+    /// JS/TS: Generator entry/resume point (where .next() resumes)
+    /// Models the state machine transition when the generator resumes.
+    JSGeneratorResume,
+    /// JS/TS: Generator return block (explicit return or iterator.return())
+    /// When .return(value) is called, finally blocks execute before returning.
+    JSGeneratorReturn,
+    /// JS/TS: Generator throw block (iterator.throw() propagation)
+    /// When .throw(error) is called, the error is thrown at the yield point.
+    JSGeneratorThrow,
     // =========================================================================
     // Rust async/await block types
     // =========================================================================
@@ -342,6 +382,29 @@ pub enum EdgeType {
     /// Python: Task join (await on task result)
     TaskJoin,
     // =========================================================================
+    // Python generator edge types
+    // =========================================================================
+    /// Python: Generator yield suspension - control returns to caller with value
+    /// The generator pauses here until next()/send() is called.
+    Yield,
+    /// Python: Generator resume - re-entry point after yield
+    /// Models next(), send(value), or throw(exception) calls from caller.
+    GeneratorResume,
+    /// Python: yield from delegation - control flows to sub-generator
+    /// Values and exceptions flow bidirectionally through this edge.
+    YieldFromDelegate,
+    /// Python: Async generator yield - async version of Yield
+    /// Combines yield suspension with async context.
+    AsyncGeneratorYield,
+    /// Python: Async generator resume - async version of GeneratorResume
+    AsyncGeneratorResume,
+    /// Python: Generator close - cleanup edge (generator.close() called)
+    /// Triggers GeneratorExit exception inside the generator.
+    GeneratorClose,
+    /// Python: StopIteration - generator exhausted (implicit return)
+    /// Control flows here when generator function completes without yield.
+    StopIteration,
+    // =========================================================================
     // JavaScript/TypeScript async/await and Promise edge types
     // =========================================================================
     /// JS/TS: Promise resolved - .then() callback path
@@ -366,6 +429,30 @@ pub enum EdgeType {
     AsyncYield,
     /// JS/TS: Async generator resume edge (after yield)
     AsyncResume,
+    // =========================================================================
+    // JavaScript/TypeScript generator edge types (function*, async function*)
+    // =========================================================================
+    /// JS/TS: Generator yield suspension - control returns to caller with value
+    /// The generator pauses here until .next() is called.
+    JSYield,
+    /// JS/TS: Generator resume - re-entry point after yield
+    /// Models .next(value), .return(value), or .throw(error) calls.
+    JSGeneratorResume,
+    /// JS/TS: yield* delegation - control flows to delegate iterator
+    /// Values and exceptions flow bidirectionally through this edge.
+    JSYieldStarDelegate,
+    /// JS/TS: yield* delegation exhausted - delegate iterator done
+    /// Control returns to the generator after delegate is fully consumed.
+    JSYieldStarExhausted,
+    /// JS/TS: Generator return path (.return() called on iterator)
+    /// Triggers finally blocks before completing iteration.
+    JSGeneratorReturn,
+    /// JS/TS: Generator throw path (.throw() called on iterator)
+    /// Exception is thrown at the yield point inside the generator.
+    JSGeneratorThrow,
+    /// JS/TS: Generator done - iteration complete (StopIteration equivalent)
+    /// Generator function completed, no more values to yield.
+    JSGeneratorDone,
     // =========================================================================
     // Rust async/await edge types
     // =========================================================================
@@ -461,6 +548,14 @@ impl EdgeType {
             EdgeType::AsyncEnterException => "async_enter_exception",
             EdgeType::TaskSpawn => "spawn_task",
             EdgeType::TaskJoin => "join_task",
+            // Python generator edge labels
+            EdgeType::Yield => "yield",
+            EdgeType::GeneratorResume => "resume",
+            EdgeType::YieldFromDelegate => "yield_from",
+            EdgeType::AsyncGeneratorYield => "async_yield",
+            EdgeType::AsyncGeneratorResume => "async_resume",
+            EdgeType::GeneratorClose => "close",
+            EdgeType::StopIteration => "stop_iteration",
             // JavaScript/TypeScript async/await edge labels
             EdgeType::PromiseResolved => "resolved",
             EdgeType::PromiseRejected => "rejected",
@@ -486,6 +581,14 @@ impl EdgeType {
             EdgeType::RustBlocking => "blocking",
             EdgeType::RustLockAcquire => "lock_acquire",
             EdgeType::RustAwaitWithLock => "await_with_lock",
+            // JavaScript/TypeScript generator edge labels
+            EdgeType::JSYield => "js_yield",
+            EdgeType::JSGeneratorResume => "js_resume",
+            EdgeType::JSYieldStarDelegate => "yield_star_delegate",
+            EdgeType::JSYieldStarExhausted => "yield_star_exhausted",
+            EdgeType::JSGeneratorReturn => "js_gen_return",
+            EdgeType::JSGeneratorThrow => "js_gen_throw",
+            EdgeType::JSGeneratorDone => "js_gen_done",
         }
     }
 }
@@ -529,7 +632,12 @@ impl CFGEdge {
     }
 
     /// Create a new edge with type and condition.
-    pub fn with_condition(from: BlockId, to: BlockId, edge_type: EdgeType, condition: String) -> Self {
+    pub fn with_condition(
+        from: BlockId,
+        to: BlockId,
+        edge_type: EdgeType,
+        condition: String,
+    ) -> Self {
         Self {
             from,
             to,
@@ -602,6 +710,14 @@ impl CFGEdge {
             Some("async_enter_exception") => Self::new(from, to, EdgeType::AsyncEnterException),
             Some("spawn_task") => Self::new(from, to, EdgeType::TaskSpawn),
             Some("join_task") => Self::new(from, to, EdgeType::TaskJoin),
+            // Python generator edge labels
+            Some("yield") => Self::new(from, to, EdgeType::Yield),
+            Some("yield_from") => Self::new(from, to, EdgeType::YieldFromDelegate),
+            Some("gen_resume") => Self::new(from, to, EdgeType::GeneratorResume),
+            Some("async_gen_yield") => Self::new(from, to, EdgeType::AsyncGeneratorYield),
+            Some("async_gen_resume") => Self::new(from, to, EdgeType::AsyncGeneratorResume),
+            Some("gen_close") => Self::new(from, to, EdgeType::GeneratorClose),
+            Some("stop_iteration") => Self::new(from, to, EdgeType::StopIteration),
             // JavaScript/TypeScript async/await edge labels
             Some("resolved") => Self::new(from, to, EdgeType::PromiseResolved),
             Some("rejected") => Self::new(from, to, EdgeType::PromiseRejected),
@@ -627,6 +743,14 @@ impl CFGEdge {
             Some("blocking") => Self::new(from, to, EdgeType::RustBlocking),
             Some("lock_acquire") => Self::new(from, to, EdgeType::RustLockAcquire),
             Some("await_with_lock") => Self::new(from, to, EdgeType::RustAwaitWithLock),
+            // JavaScript/TypeScript generator edge labels
+            Some("js_yield") => Self::new(from, to, EdgeType::JSYield),
+            Some("js_resume") => Self::new(from, to, EdgeType::JSGeneratorResume),
+            Some("yield_star_delegate") => Self::new(from, to, EdgeType::JSYieldStarDelegate),
+            Some("yield_star_exhausted") => Self::new(from, to, EdgeType::JSYieldStarExhausted),
+            Some("js_gen_return") => Self::new(from, to, EdgeType::JSGeneratorReturn),
+            Some("js_gen_throw") => Self::new(from, to, EdgeType::JSGeneratorThrow),
+            Some("js_gen_done") => Self::new(from, to, EdgeType::JSGeneratorDone),
             Some(s) if s.starts_with("goto ") => {
                 Self::with_condition(from, to, EdgeType::Goto, s.to_string())
             }
@@ -641,9 +765,9 @@ impl CFGEdge {
     ///
     /// Returns the condition if present, otherwise the default label for the edge type.
     pub fn label(&self) -> String {
-        self.condition.clone().unwrap_or_else(|| {
-            self.edge_type.default_label().to_string()
-        })
+        self.condition
+            .clone()
+            .unwrap_or_else(|| self.edge_type.default_label().to_string())
     }
 }
 
@@ -653,7 +777,7 @@ pub struct CFGInfo {
     /// Function name
     pub function_name: String,
     /// All blocks indexed by ID
-    pub blocks: HashMap<BlockId, CFGBlock>,
+    pub blocks: FxHashMap<BlockId, CFGBlock>,
     /// All edges
     pub edges: Vec<CFGEdge>,
     /// Entry block
@@ -687,8 +811,8 @@ pub struct CFGInfo {
     /// Stores control flow graphs for inner functions and closures defined
     /// within this function. Maps the nested function name to its CFGInfo.
     /// This matches Python's `nested_cfgs: dict[str, CFGInfo]` field.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub nested_cfgs: HashMap<String, Box<CFGInfo>>,
+    #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
+    pub nested_cfgs: FxHashMap<String, Box<CFGInfo>>,
     // =========================================================================
     // Python async/await tracking
     // =========================================================================
@@ -706,6 +830,22 @@ pub struct CFGInfo {
     /// Format: Vec<(function_name, line_number)>
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocking_calls: Vec<(String, usize)>,
+    // =========================================================================
+    // Generator tracking (Python function* / JS function* / async function*)
+    // =========================================================================
+    /// Whether this is a generator function (function* in JS/TS, yield in Python).
+    /// Generator functions return an iterator that yields values on demand.
+    #[serde(default)]
+    pub is_generator: bool,
+    /// Whether this is an async generator function (async function* in JS/TS, async def with yield in Python).
+    /// Async generators combine async/await with the iterator protocol.
+    #[serde(default)]
+    pub is_async_generator: bool,
+    /// Number of yield points in this generator function.
+    /// Each yield creates a suspension point where execution can pause.
+    /// Higher counts indicate more complex state machines.
+    #[serde(default)]
+    pub yield_count: usize,
     // =========================================================================
     // Performance optimization: Lazy adjacency list cache
     // =========================================================================
@@ -734,6 +874,9 @@ impl Clone for CFGInfo {
             is_async: self.is_async,
             await_points: self.await_points,
             blocking_calls: self.blocking_calls.clone(),
+            is_generator: self.is_generator,
+            is_async_generator: self.is_async_generator,
+            yield_count: self.yield_count,
             // Reset cache on clone - will be rebuilt lazily if needed
             adjacency_cache: OnceCell::new(),
         }
@@ -744,16 +887,19 @@ impl Default for CFGInfo {
     fn default() -> Self {
         Self {
             function_name: String::new(),
-            blocks: HashMap::new(),
+            blocks: FxHashMap::default(),
             edges: Vec::new(),
             entry: BlockId(0),
             exits: Vec::new(),
             decision_points: 0,
             comprehension_decision_points: 0,
-            nested_cfgs: HashMap::new(),
+            nested_cfgs: FxHashMap::default(),
             is_async: false,
             await_points: 0,
             blocking_calls: Vec::new(),
+            is_generator: false,
+            is_async_generator: false,
+            yield_count: 0,
             adjacency_cache: OnceCell::new(),
         }
     }
@@ -774,7 +920,7 @@ impl CFGInfo {
     #[must_use]
     pub fn new(
         function_name: String,
-        blocks: HashMap<BlockId, CFGBlock>,
+        blocks: FxHashMap<BlockId, CFGBlock>,
         edges: Vec<CFGEdge>,
         entry: BlockId,
         exits: Vec<BlockId>,
@@ -787,10 +933,13 @@ impl CFGInfo {
             exits,
             decision_points: 0,
             comprehension_decision_points: 0,
-            nested_cfgs: HashMap::new(),
+            nested_cfgs: FxHashMap::default(),
             is_async: false,
             await_points: 0,
             blocking_calls: Vec::new(),
+            is_generator: false,
+            is_async_generator: false,
+            yield_count: 0,
             adjacency_cache: OnceCell::new(),
         }
     }
@@ -802,7 +951,7 @@ impl CFGInfo {
     #[allow(clippy::too_many_arguments)]
     pub fn with_details(
         function_name: String,
-        blocks: HashMap<BlockId, CFGBlock>,
+        blocks: FxHashMap<BlockId, CFGBlock>,
         edges: Vec<CFGEdge>,
         entry: BlockId,
         exits: Vec<BlockId>,
@@ -820,10 +969,13 @@ impl CFGInfo {
             exits,
             decision_points,
             comprehension_decision_points,
-            nested_cfgs: HashMap::new(),
+            nested_cfgs: FxHashMap::default(),
             is_async,
             await_points,
             blocking_calls,
+            is_generator: false,
+            is_async_generator: false,
+            yield_count: 0,
             adjacency_cache: OnceCell::new(),
         }
     }
@@ -879,10 +1031,10 @@ impl CFGInfo {
     /// Time: O(E) where E = number of edges
     /// Space: O(E) for storing all edge endpoints
     fn build_adjacency(&self) -> AdjacencyCache {
-        let mut successors: HashMap<BlockId, Vec<BlockId>> =
-            HashMap::with_capacity(self.blocks.len());
-        let mut predecessors: HashMap<BlockId, Vec<BlockId>> =
-            HashMap::with_capacity(self.blocks.len());
+        let mut successors: FxHashMap<BlockId, Vec<BlockId>> =
+            FxHashMap::with_capacity_and_hasher(self.blocks.len(), Default::default());
+        let mut predecessors: FxHashMap<BlockId, Vec<BlockId>> =
+            FxHashMap::with_capacity_and_hasher(self.blocks.len(), Default::default());
 
         for edge in &self.edges {
             successors.entry(edge.from).or_default().push(edge.to);
@@ -1180,8 +1332,9 @@ impl CFGInfo {
     /// An edge to a node currently in the recursion stack is a back edge.
     #[allow(dead_code)]
     pub fn has_back_edge(&self) -> bool {
-        let mut visited = HashSet::new();
-        let mut stack = HashSet::new();
+        let capacity = self.blocks.len();
+        let mut visited = FixedBitSet::with_capacity(capacity);
+        let mut stack = FixedBitSet::with_capacity(capacity);
         self.has_back_edge_dfs(self.entry, &mut visited, &mut stack)
     }
 
@@ -1193,24 +1346,24 @@ impl CFGInfo {
     fn has_back_edge_dfs(
         &self,
         node: BlockId,
-        visited: &mut HashSet<BlockId>,
-        stack: &mut HashSet<BlockId>,
+        visited: &mut FixedBitSet,
+        stack: &mut FixedBitSet,
     ) -> bool {
-        visited.insert(node);
-        stack.insert(node);
+        visited.insert(node.0);
+        stack.insert(node.0);
 
         for &succ in self.successors(node) {
-            if !visited.contains(&succ) {
+            if !visited.contains(succ.0) {
                 if self.has_back_edge_dfs(succ, visited, stack) {
                     return true;
                 }
-            } else if stack.contains(&succ) {
+            } else if stack.contains(succ.0) {
                 // Found a back edge: edge to ancestor in DFS tree
                 return true;
             }
         }
 
-        stack.remove(&node);
+        stack.set(node.0, false);
         false
     }
 
@@ -1238,8 +1391,8 @@ impl CFGInfo {
     /// # Returns
     /// Set of all reachable block IDs (includes the start block)
     #[allow(dead_code)]
-    pub fn reachable_from(&self, start: BlockId) -> HashSet<BlockId> {
-        let mut reachable = HashSet::new();
+    pub fn reachable_from(&self, start: BlockId) -> FxHashSet<BlockId> {
+        let mut reachable = FxHashSet::default();
         let mut queue = vec![start];
 
         while let Some(node) = queue.pop() {
@@ -1274,7 +1427,7 @@ impl CFGInfo {
         let back_edges = self.find_back_edges();
 
         // Build in-degree map (excluding back edges)
-        let mut in_degree: HashMap<BlockId, usize> = HashMap::new();
+        let mut in_degree: FxHashMap<BlockId, usize> = FxHashMap::default();
         for block_id in self.blocks.keys() {
             in_degree.insert(*block_id, 0);
         }
@@ -1325,10 +1478,11 @@ impl CFGInfo {
     ///
     /// # Returns
     /// Set of (from, to) block ID pairs representing back edges.
-    fn find_back_edges(&self) -> HashSet<(BlockId, BlockId)> {
-        let mut back_edges = HashSet::new();
-        let mut visited = HashSet::new();
-        let mut stack = HashSet::new();
+    fn find_back_edges(&self) -> FxHashSet<(BlockId, BlockId)> {
+        let mut back_edges = FxHashSet::default();
+        let capacity = self.blocks.len();
+        let mut visited = FixedBitSet::with_capacity(capacity);
+        let mut stack = FixedBitSet::with_capacity(capacity);
         self.find_back_edges_dfs(self.entry, &mut visited, &mut stack, &mut back_edges);
         back_edges
     }
@@ -1337,23 +1491,23 @@ impl CFGInfo {
     fn find_back_edges_dfs(
         &self,
         node: BlockId,
-        visited: &mut HashSet<BlockId>,
-        stack: &mut HashSet<BlockId>,
-        back_edges: &mut HashSet<(BlockId, BlockId)>,
+        visited: &mut FixedBitSet,
+        stack: &mut FixedBitSet,
+        back_edges: &mut FxHashSet<(BlockId, BlockId)>,
     ) {
-        visited.insert(node);
-        stack.insert(node);
+        visited.insert(node.0);
+        stack.insert(node.0);
 
         for &succ in self.successors(node) {
-            if !visited.contains(&succ) {
+            if !visited.contains(succ.0) {
                 self.find_back_edges_dfs(succ, visited, stack, back_edges);
-            } else if stack.contains(&succ) {
+            } else if stack.contains(succ.0) {
                 // Found a back edge
                 back_edges.insert((node, succ));
             }
         }
 
-        stack.remove(&node);
+        stack.set(node.0, false);
     }
 
     /// Get the block containing a specific line number.
@@ -1418,7 +1572,10 @@ impl CFGInfo {
 
             // If one block only starts at this line while another ends at it,
             // prefer the one that ends (the definition is in the ending block)
-            match (ends_at_line_a && !starts_at_line_a, ends_at_line_b && !starts_at_line_b) {
+            match (
+                ends_at_line_a && !starts_at_line_a,
+                ends_at_line_b && !starts_at_line_b,
+            ) {
                 (true, false) => return std::cmp::Ordering::Less,
                 (false, true) => return std::cmp::Ordering::Greater,
                 _ => {}

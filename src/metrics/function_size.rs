@@ -70,8 +70,12 @@ use tree_sitter::{Node, Tree};
 
 use crate::ast::AstExtractor;
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
+use crate::metrics::node_types::{
+    BRANCH_NODE_TYPES, FUNCTION_NODE_TYPES, RETURN_NODE_TYPES, STATEMENT_NODE_TYPES,
+    VARIABLE_DECL_TYPES,
+};
 
 // =============================================================================
 // THRESHOLDS
@@ -200,7 +204,9 @@ impl SizeIssue {
     #[must_use]
     pub fn description(&self) -> String {
         match self {
-            Self::TooLong { sloc, threshold, .. } => {
+            Self::TooLong {
+                sloc, threshold, ..
+            } => {
                 format!(
                     "Function is too long: {} SLOC (threshold: {})",
                     sloc, threshold
@@ -209,10 +215,7 @@ impl SizeIssue {
             Self::TooManyParams {
                 count, threshold, ..
             } => {
-                format!(
-                    "Too many parameters: {} (threshold: {})",
-                    count, threshold
-                )
+                format!("Too many parameters: {} (threshold: {})", count, threshold)
             }
             Self::TooManyVariables {
                 count, threshold, ..
@@ -662,119 +665,6 @@ impl std::str::FromStr for SizeSortBy {
 // AST ANALYSIS
 // =============================================================================
 
-/// Node types that represent statements in various languages.
-const STATEMENT_NODE_TYPES: &[&str] = &[
-    // Python
-    "expression_statement",
-    "return_statement",
-    "if_statement",
-    "for_statement",
-    "while_statement",
-    "try_statement",
-    "with_statement",
-    "assert_statement",
-    "raise_statement",
-    "pass_statement",
-    "break_statement",
-    "continue_statement",
-    "import_statement",
-    "import_from_statement",
-    "global_statement",
-    "nonlocal_statement",
-    "delete_statement",
-    "match_statement",
-    // TypeScript/JavaScript
-    "return_statement",
-    "switch_statement",
-    "for_in_statement",
-    "do_statement",
-    "throw_statement",
-    "variable_declaration",
-    "lexical_declaration",
-    // Rust
-    "let_declaration",
-    "return_expression",
-    "if_expression",
-    "match_expression",
-    "for_expression",
-    "while_expression",
-    "loop_expression",
-    "break_expression",
-    "continue_expression",
-    "macro_invocation",
-    // Go
-    "go_statement",
-    "select_statement",
-    "defer_statement",
-    "var_declaration",
-    "short_var_declaration",
-    "assignment_statement",
-    // Java
-    "switch_expression",
-    "enhanced_for_statement",
-    "local_variable_declaration",
-    // C/C++
-    "goto_statement",
-    "declaration",
-    "compound_statement",
-];
-
-/// Node types for return statements.
-const RETURN_NODE_TYPES: &[&str] = &[
-    "return_statement",  // Python, TS/JS, Go, Java, C/C++
-    "return_expression", // Rust
-    "throw_statement",   // TS/JS, Java - counts as exit point
-    "raise_statement",   // Python - counts as exit point
-];
-
-/// Node types for branching constructs.
-const BRANCH_NODE_TYPES: &[&str] = &[
-    "if_statement",
-    "if_expression",
-    "elif_clause",
-    "else_if_clause",
-    "switch_statement",
-    "switch_expression",
-    "match_expression",
-    "match_statement",
-    "conditional_expression", // ternary
-    "ternary_expression",
-];
-
-/// Node types for variable declarations.
-const VARIABLE_DECL_TYPES: &[&str] = &[
-    // Python
-    "assignment",
-    "augmented_assignment",
-    // TypeScript/JavaScript
-    "variable_declaration",
-    "lexical_declaration",
-    "variable_declarator",
-    // Rust
-    "let_declaration",
-    // Go
-    "var_declaration",
-    "short_var_declaration",
-    "var_spec",
-    // Java
-    "local_variable_declaration",
-    "variable_declarator",
-    // C/C++
-    "declaration",
-    "init_declarator",
-];
-
-/// Node types for function definitions.
-const FUNCTION_NODE_TYPES: &[&str] = &[
-    "function_definition",    // Python
-    "function_declaration",   // TS/JS, Go
-    "method_definition",      // TS/JS
-    "arrow_function",         // TS/JS
-    "function_item",          // Rust
-    "method_declaration",     // Go, Java
-    "constructor_declaration", // Java
-];
-
 /// AST-based function size analyzer.
 struct FunctionSizeAnalyzer<'a> {
     source: &'a [u8],
@@ -1101,9 +991,7 @@ pub fn analyze_file_function_size(
 
     // Detect language
     let registry = LanguageRegistry::global();
-    let language = registry
-        .detect_language(path)
-        .map(|l| l.name().to_string());
+    let language = registry.detect_language(path).map(|l| l.name().to_string());
 
     Ok(FunctionSizeAnalysis {
         path: path.to_path_buf(),
@@ -1380,12 +1268,19 @@ fn find_function_node(node: Node, target_line: usize) -> Option<Node> {
 }
 
 /// Sort functions by the specified criteria.
-pub fn sort_functions(functions: &mut [FunctionSizeMetrics], sort_by: SizeSortBy, descending: bool) {
+pub fn sort_functions(
+    functions: &mut [FunctionSizeMetrics],
+    sort_by: SizeSortBy,
+    descending: bool,
+) {
     functions.sort_by(|a, b| {
         let cmp = match sort_by {
             SizeSortBy::Sloc => a.sloc.cmp(&b.sloc),
             SizeSortBy::Params => a.parameters.cmp(&b.parameters),
-            SizeSortBy::Score => a.size_score().partial_cmp(&b.size_score()).unwrap_or(std::cmp::Ordering::Equal),
+            SizeSortBy::Score => a
+                .size_score()
+                .partial_cmp(&b.size_score())
+                .unwrap_or(std::cmp::Ordering::Equal),
             SizeSortBy::Issues => a.issues.len().cmp(&b.issues.len()),
             SizeSortBy::Variables => a.local_variables.cmp(&b.local_variables),
             SizeSortBy::Branches => a.branches.cmp(&b.branches),
@@ -1420,25 +1315,67 @@ mod tests {
 
     #[test]
     fn test_function_category_detection() {
-        assert_eq!(FunctionCategory::from_name("__init__"), FunctionCategory::Constructor);
-        assert_eq!(FunctionCategory::from_name("new"), FunctionCategory::Constructor);
-        assert_eq!(FunctionCategory::from_name("constructor"), FunctionCategory::Constructor);
+        assert_eq!(
+            FunctionCategory::from_name("__init__"),
+            FunctionCategory::Constructor
+        );
+        assert_eq!(
+            FunctionCategory::from_name("new"),
+            FunctionCategory::Constructor
+        );
+        assert_eq!(
+            FunctionCategory::from_name("constructor"),
+            FunctionCategory::Constructor
+        );
 
-        assert_eq!(FunctionCategory::from_name("test_something"), FunctionCategory::Test);
-        assert_eq!(FunctionCategory::from_name("TestSomething"), FunctionCategory::Test);
-        assert_eq!(FunctionCategory::from_name("something_test"), FunctionCategory::Test);
+        assert_eq!(
+            FunctionCategory::from_name("test_something"),
+            FunctionCategory::Test
+        );
+        assert_eq!(
+            FunctionCategory::from_name("TestSomething"),
+            FunctionCategory::Test
+        );
+        assert_eq!(
+            FunctionCategory::from_name("something_test"),
+            FunctionCategory::Test
+        );
 
-        assert_eq!(FunctionCategory::from_name("configure_app"), FunctionCategory::Configuration);
-        assert_eq!(FunctionCategory::from_name("setup_database"), FunctionCategory::Configuration);
-        assert_eq!(FunctionCategory::from_name("setup"), FunctionCategory::Configuration);
+        assert_eq!(
+            FunctionCategory::from_name("configure_app"),
+            FunctionCategory::Configuration
+        );
+        assert_eq!(
+            FunctionCategory::from_name("setup_database"),
+            FunctionCategory::Configuration
+        );
+        assert_eq!(
+            FunctionCategory::from_name("setup"),
+            FunctionCategory::Configuration
+        );
 
-        assert_eq!(FunctionCategory::from_name("create_user"), FunctionCategory::Factory);
-        assert_eq!(FunctionCategory::from_name("build_config"), FunctionCategory::Factory);
+        assert_eq!(
+            FunctionCategory::from_name("create_user"),
+            FunctionCategory::Factory
+        );
+        assert_eq!(
+            FunctionCategory::from_name("build_config"),
+            FunctionCategory::Factory
+        );
 
-        assert_eq!(FunctionCategory::from_name("on_click"), FunctionCategory::Handler);
-        assert_eq!(FunctionCategory::from_name("handle_event"), FunctionCategory::Handler);
+        assert_eq!(
+            FunctionCategory::from_name("on_click"),
+            FunctionCategory::Handler
+        );
+        assert_eq!(
+            FunctionCategory::from_name("handle_event"),
+            FunctionCategory::Handler
+        );
 
-        assert_eq!(FunctionCategory::from_name("process_data"), FunctionCategory::Normal);
+        assert_eq!(
+            FunctionCategory::from_name("process_data"),
+            FunctionCategory::Normal
+        );
     }
 
     #[test]
@@ -1495,7 +1432,10 @@ def many_params(a, b, c, d, e, f, g, h):
         assert_eq!(analysis.functions.len(), 1);
         assert!(analysis.functions[0].sloc > 30);
         // Should have "too long" issue
-        assert!(analysis.functions[0].issues.iter().any(|i| matches!(i, SizeIssue::TooLong { .. })));
+        assert!(analysis.functions[0]
+            .issues
+            .iter()
+            .any(|i| matches!(i, SizeIssue::TooLong { .. })));
     }
 
     #[test]
@@ -1518,7 +1458,10 @@ class MyClass:
         let analysis = result.unwrap();
 
         assert_eq!(analysis.functions.len(), 1);
-        assert_eq!(analysis.functions[0].category, FunctionCategory::Constructor);
+        assert_eq!(
+            analysis.functions[0].category,
+            FunctionCategory::Constructor
+        );
         // Constructor has adjusted thresholds, so 7 params should not be critical
     }
 
@@ -1546,7 +1489,12 @@ class MyClass:
             .iter()
             .filter(|i| matches!(i, SizeIssue::TooLong { .. }))
             .collect();
-        assert!(too_long_issues.is_empty() || too_long_issues.iter().all(|i| i.severity() == SizeSeverity::Warning));
+        assert!(
+            too_long_issues.is_empty()
+                || too_long_issues
+                    .iter()
+                    .all(|i| i.severity() == SizeSeverity::Warning)
+        );
     }
 
     #[test]

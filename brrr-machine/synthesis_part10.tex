@@ -1,0 +1,1034 @@
+% Part X: Incrementality and Scalability
+% Fragment - no preamble or document environment
+
+\part{Incrementality and Scalability}
+\label{part:incrementality}
+
+\begin{pillarbox}[title={Scalability: Two Complementary Strategies}]
+\textbf{10.1 INCREMENTALITY:} Avoid re-analyzing unchanged code
+\begin{itemize}
+    \item Adapton-style demand-driven computation
+    \item Dependency tracking for minimal re-computation
+\end{itemize}
+
+\textbf{10.2 TIME BUDGETS:} Graceful degradation under resource pressure
+\begin{itemize}
+    \item Per-function/file/total budgets
+    \item Adaptive precision levels based on available time
+\end{itemize}
+
+\textbf{Together:} Scale from laptop to datacenter while maintaining useful results.
+\end{pillarbox}
+
+%==================================================
+\chapter{Demand-Driven Incremental Computation}
+\label{ch:demand-driven-incremental}
+%==================================================
+
+\textbf{Papers:} \textbf{[Hammer14]} (Adapton), \textbf{[Wagner98]}
+
+Real-world analysis must be incremental: when a file changes, we shouldn't re-analyze the entire codebase.
+
+%--------------------------------------------------
+\section{The Adapton Model}
+\label{sec:adapton-model}
+%--------------------------------------------------
+
+\begin{definition}[Adapton's Key Insight \textbf{[Hammer14]}]
+Track \emph{dependencies} between computations. When input changes, only recompute \emph{affected} outputs.
+\end{definition}
+
+\subsection{Performance Characteristics}
+
+\textbf{Performance Gains:} $7\times$ to $2000\times$ speedups over naive recomputation for typical edit-reanalyze workflows. Traditional eager IC often incurs $4\times$--$500\times$ \emph{slowdowns} due to unnecessary recomputation.
+
+\subsection{The Demanded Computation Graph (DCG)}
+
+\begin{definition}[Demanded Computation Graph]
+The DCG consists of:
+\begin{itemize}
+    \item \textbf{Nodes:} Thunks (suspended computations) and refs (mutable cells)
+    \item \textbf{Edges:} Dependencies (which thunks read which refs/thunks)
+\end{itemize}
+\end{definition}
+
+\subsection{Adapton Primitives}
+
+\begin{itemize}
+    \item $\texttt{thunk}(e)$ --- Create suspended computation
+    \item $\texttt{force}(t)$ --- Evaluate thunk, cache result, record dependencies
+    \item $\texttt{ref}(v)$ --- Create mutable reference cell
+    \item $\texttt{get}(r)$ --- Read ref (records dependency)
+    \item $\texttt{set}(r,v)$ --- Write ref (triggers dirtying phase)
+\end{itemize}
+
+\subsection{Inner/Outer Layer Separation}
+
+\begin{pillarbox}[title={Critical for Correctness}]
+\textbf{OUTER LAYER (Driver):}
+\begin{itemize}
+    \item Allocates and mutates ref cells (set operations)
+    \item Demands results by forcing thunks
+    \item NOT incrementalized (runs once per change)
+\end{itemize}
+
+\textbf{INNER LAYER (Analysis computations):}
+\begin{itemize}
+    \item May only READ refs (get) and force other thunks
+    \item Cannot allocate new refs or mutate existing ones
+    \item This restriction enables incremental reuse
+\end{itemize}
+\end{pillarbox}
+
+\subsection{Two-Phase Algorithm}
+
+\subsubsection{Phase 1: Dirtying (on input change)}
+
+When $\texttt{set}(r, \textit{new\_value})$ is called:
+\begin{enumerate}
+    \item Mark $r$ as dirty
+    \item Walk \emph{backwards} through DCG edges
+    \item Mark all transitive dependents as dirty
+    \item Stop at thunks that don't depend on $r$
+\end{enumerate}
+
+\subsubsection{Phase 2: Propagation (on demand)}
+
+When $\texttt{force}(t)$ is called on dirty thunk:
+\begin{enumerate}
+    \item Re-execute $t$'s computation
+    \item If result \textbf{unchanged} from cached value: Mark $t$ clean, \emph{don't} propagate to dependents
+    \item If result \textbf{changed}: Update cache, dependents stay dirty until forced
+\end{enumerate}
+
+\begin{theorem}[Key Insight]
+Phase 2 is \emph{lazy} --- only runs when results demanded. This enables ``demand-driven'' incremental computation.
+\end{theorem}
+
+\subsection{Sharing, Swapping, Switching}
+
+Why DCG beats total-order IC:
+\begin{itemize}
+    \item \textbf{SHARING:} Same subcomputation reused in different contexts
+    \item \textbf{SWAPPING:} Reorder computations without invalidating memos
+    \item \textbf{SWITCHING:} Toggle between computations, restore previous results
+\end{itemize}
+
+Traditional IC (Acar's self-adjusting computation) uses \emph{total order}, which prevents these reuse patterns. DCG uses \emph{partial order}.
+
+\subsection{Adapton Example}
+
+\begin{verbatim}
+CPG(file1) ---+---> Analysis1 ---+---> Report
+CPG(file2) ---+                  |
+CPG(file3) -------> Analysis2 ---+
+
+If file1 changes:
+  - DIRTYING: CPG(file1), Analysis1, Report marked dirty
+  - CPG(file2), CPG(file3), Analysis2 stay clean
+
+On Report demand:
+  - force(Report) -> force(Analysis1) -> force(CPG(file1))
+  - CPG(file1) recomputes, Analysis1 recomputes
+  - Analysis2 NOT recomputed (never forced, not dirty)
+\end{verbatim}
+
+%--------------------------------------------------
+\section{Wagner 1998: Optimal Incremental Parsing}
+\label{sec:wagner-incremental-parsing}
+%--------------------------------------------------
+
+\begin{theorem}[Wagner's Incremental Parsing \textbf{[Wagner98]}]
+Optimal algorithm for LR parsing with incremental edits.
+
+\textbf{Complexity:} $\BigO{t + s \lg N}$ where:
+\begin{itemize}
+    \item $t$ = new terminal symbols introduced
+    \item $s$ = modification sites (edit points)
+    \item $N$ = total tree nodes
+\end{itemize}
+
+This is \emph{asymptotically optimal} for incremental LR parsing.
+\end{theorem}
+
+\subsection{Key Technique: Sentential-Form Parsing}
+
+Traditional incremental parsing stores \emph{parse states} in tree nodes. Wagner's approach: \textbf{zero} per-node storage overhead beyond tree structure! Instead: Compute parse states \emph{on demand} via breakdown procedures.
+
+\subsection{Balanced Sequences (Critical Insight)}
+
+\textbf{Problem:} Statement lists like ``\texttt{stmt; stmt; stmt; ...}'' are \emph{linear}. With linear structure, incremental parsing degenerates to $\BigO{N}$.
+
+\textbf{Solution:} Transform grammar to allow \emph{balanced} tree representation.
+\begin{align*}
+\text{Before:} \quad & L^* \to L \; L^* \mid \varepsilon & \text{(right-recursive, linear)} \\
+\text{After:} \quad & L^* \to B \mid \varepsilon; \quad B \to L \mid B \; B & \text{(nondeterministic, balanced)}
+\end{align*}
+
+\textbf{Runtime:} Parser chooses balanced structure during reduce.
+
+\textbf{Result:} Logarithmic access to any statement in a list.
+
+\subsection{Relation to Tree-sitter}
+
+Tree-sitter uses a \emph{different} incremental algorithm (error-recovery-based). Wagner's algorithm is more theoretically optimal but requires grammar transformation. Tree-sitter is more practical for arbitrary grammars.
+
+\textbf{Brrr-machine:} Use tree-sitter for parsing, apply balanced sequence concepts to CPG representation for incremental analysis efficiency.
+
+%--------------------------------------------------
+\section{Incremental Analysis Strategy}
+\label{sec:incremental-analysis-strategy}
+%--------------------------------------------------
+
+The following F* formalization captures the core Adapton abstractions. The key insight is the \texttt{thunk\_state} type which tracks whether a computation is \emph{clean} (cached value is valid), \emph{dirty} (needs recomputation), or \emph{unevaluated} (never computed). The \texttt{deps} field in \texttt{ThunkClean} records which other thunks this computation depends on, enabling transitive invalidation.
+
+\begin{fstarcode}[title={Incremental Analysis (Adapton simplified)}]
+(* ==================================================
+   INCREMENTAL ANALYSIS
+   Source: Adapton (Hammer 2014), simplified
+   ================================================== *)
+module BrrrMachine.Incremental
+
+(* --------------------------------------------------
+   THUNKS --- Cached computations with dependencies
+   -------------------------------------------------- *)
+type thunk_id = nat
+
+type thunk_state (a : Type) =
+  | ThunkClean : value:a -> deps:set thunk_id -> thunk_state a
+  | ThunkDirty : thunk_state a
+  | ThunkUnevaluated : thunk_state a
+
+type thunk (a : Type) = {
+  id : thunk_id;
+  compute : unit -> a;
+  mutable state : thunk_state a;
+}
+
+(* Global thunk registry *)
+let thunk_registry : ref (map thunk_id (exists a. thunk a)) = ref Map.empty
+
+(* --------------------------------------------------
+   CORE OPERATIONS
+   -------------------------------------------------- *)
+(* Create a new thunk *)
+val create_thunk : #a:Type -> (unit -> a) -> thunk a
+let create_thunk #a compute =
+  let id = fresh_thunk_id () in
+  let t = { id; compute; state = ThunkUnevaluated } in
+  thunk_registry := Map.add id (| a, t |) !thunk_registry;
+  t
+
+(* Force a thunk (evaluate if needed) *)
+val force : #a:Type -> thunk a -> a
+let force #a t =
+  match t.state with
+  | ThunkClean v _ -> v
+  | ThunkDirty | ThunkUnevaluated ->
+      (* Track dependencies during evaluation *)
+      push_dependency_context t.id;
+      let result = t.compute () in
+      let deps = pop_dependency_context () in
+      t.state <- ThunkClean result deps;
+      (* Register reverse dependencies *)
+      Set.iter (fun dep_id ->
+        add_dependent dep_id t.id
+      ) deps;
+      result
+
+(* Mark a thunk as dirty *)
+val mark_dirty : thunk_id -> unit
+let rec mark_dirty id =
+  match Map.find id !thunk_registry with
+  | Some (| _, t |) ->
+      begin match t.state with
+      | ThunkClean _ _ ->
+          t.state <- ThunkDirty;
+          (* Propagate to dependents *)
+          let dependents = get_dependents id in
+          Set.iter mark_dirty dependents
+      | _ -> ()
+      end
+  | None -> ()
+\end{fstarcode}
+
+The core operations \texttt{create\_thunk}, \texttt{force}, and \texttt{mark\_dirty} implement the two-phase algorithm:
+\begin{itemize}
+    \item \texttt{force} performs lazy evaluation: if the thunk is clean, return the cached value; otherwise recompute, cache, and record dependencies.
+    \item \texttt{mark\_dirty} performs backward propagation: when a dependency changes, mark all dependent thunks as dirty recursively.
+\end{itemize}
+
+The following code shows how to build an incremental CPG where each file has its own thunk, and the merged CPG thunk depends on all file thunks:
+
+\begin{fstarcode}[title={Incremental CPG Construction}]
+(* --------------------------------------------------
+   INCREMENTAL CPG
+   -------------------------------------------------- *)
+type incremental_cpg = {
+  (* Per-file CPG thunks *)
+  file_cpgs : map string (thunk cpg);
+  (* Merged CPG thunk *)
+  full_cpg : thunk cpg;
+  (* Analysis result thunks *)
+  analyses : map string (thunk analysis_result);
+}
+
+val create_incremental_cpg : list string -> incremental_cpg
+let create_incremental_cpg files =
+  (* Create per-file CPG thunks *)
+  let file_cpgs = List.fold_left (fun m file ->
+    let thunk = create_thunk (fun () -> parse_and_build_cpg file) in
+    Map.add file thunk m
+  ) Map.empty files in
+  (* Create merged CPG thunk *)
+  let full_cpg = create_thunk (fun () ->
+    let cpgs = Map.map force file_cpgs in
+    merge_cpgs (Map.values cpgs)
+  ) in
+  { file_cpgs; full_cpg; analyses = Map.empty }
+
+(* Update when file changes *)
+val file_changed : incremental_cpg -> string -> unit
+let file_changed icpg file =
+  match Map.find file icpg.file_cpgs with
+  | Some thunk -> mark_dirty thunk.id
+  | None -> ()  (* New file, need to add *)
+
+(* Get current CPG (recomputes if dirty) *)
+val get_cpg : incremental_cpg -> cpg
+let get_cpg icpg = force icpg.full_cpg
+\end{fstarcode}
+
+The \texttt{incremental\_cpg} type encapsulates a two-level thunk hierarchy: file-level CPG thunks and the merged full CPG thunk. When \texttt{file\_changed} is called, only the affected file's thunk is marked dirty, and the full CPG thunk (which depends on it) becomes dirty too. On the next \texttt{get\_cpg} call, only the changed file is re-parsed.
+
+Analysis results can also be incrementalized by wrapping them in thunks that depend on the CPG:
+
+\begin{fstarcode}[title={Incremental Analysis Registration}]
+(* --------------------------------------------------
+   INCREMENTAL ANALYSIS
+   -------------------------------------------------- *)
+val add_analysis :
+  incremental_cpg ->
+  name:string ->
+  (cpg -> analysis_result) ->
+  incremental_cpg
+let add_analysis icpg name analyze =
+  let analysis_thunk = create_thunk (fun () ->
+    let cpg = force icpg.full_cpg in
+    analyze cpg
+  ) in
+  { icpg with analyses = Map.add name analysis_thunk icpg.analyses }
+
+val get_analysis : incremental_cpg -> string -> option analysis_result
+let get_analysis icpg name =
+  match Map.find name icpg.analyses with
+  | Some thunk -> Some (force thunk)
+  | None -> None
+\end{fstarcode}
+
+\subsection{Cross-References: Incrementality Integration Points}
+
+\begin{pillarbox}[title={Integration with Other Analysis Components}]
+\textbf{Section 6.5 (Memory Model):}
+Incremental data race detection: When code changes, only re-check happens-before relations affected by the change. Use DCG to track which \texttt{candidate\_execution} components depend on changed CPG nodes.
+
+\textbf{Section 8.1 (Taint Analysis):}
+Incremental taint propagation: When taint sources/sinks change, only recompute IFDS paths through affected graph regions. Use Wagner's balanced sequences for efficient path updates. Use DRedL (Section~\ref{sec:dredl}) for lattice-based incremental IFDS.
+
+\textbf{Section 5.4--5.5 (Shape Analysis):}
+Incremental shape analysis: Cache symbolic heaps per function. When function body changes, invalidate only its footprint summary. Frame rule (Section 7.4) ensures callers reuse unchanged summaries. Use compositional bi-abduction (Section~\ref{sec:infer-deployment}) for summary reuse.
+
+\textbf{Section 12.12 (Bi-Abduction):}
+Compositional analysis enables near-linear scaling \textbf{[Distefano19]}. Function summaries cached and invalidated incrementally. Expected speedup: $65\times$--$243\times$ for typical edit-reanalyze workflows.
+
+\textbf{Part XI (IR):}
+IR node identity preservation enables incremental analysis. When source changes, map old IR nodes to new ones for cache reuse.
+\end{pillarbox}
+
+%--------------------------------------------------
+\section{Incremental Lattice-Based Analysis (DRedL)}
+\label{sec:dredl}
+%--------------------------------------------------
+
+\textbf{Paper:} \textbf{[Szabo18]} --- ``Incrementalizing Lattice-Based Program Analyses in Datalog''
+
+\subsection{The Challenge}
+
+Adapton handles general incremental computation, but program analysis has \emph{special structure}: lattice-based fixpoints. Standard incremental Datalog (DRed algorithm) only supports the powerset lattice. Many practical analyses (interval, points-to with strong updates, string analysis) require \emph{custom lattices} with aggregation.
+
+\subsection{DRedL Key Insight: Increasing Replacements Can Skip Deletion}
+
+When a lattice value changes from $\textit{old\_val}$ to $\textit{new\_val}$:
+\begin{itemize}
+    \item If $\textit{new\_val} \geq \textit{old\_val}$ (in lattice order): \textbf{Increasing Replacement}
+    \begin{itemize}
+        \item The change is \emph{monotonic}
+        \item Skip expensive delete-rederive cycle
+        \item Propagate new value directly
+    \end{itemize}
+\end{itemize}
+
+\subsection{Change Classification}
+
+\textbf{MONOTONIC:}
+\begin{itemize}
+    \item All insertions
+    \item Deletions that are part of increasing replacements (where $\textit{new\_value} \geq \textit{old\_value}$)
+\end{itemize}
+
+\textbf{ANTI-MONOTONIC:}
+\begin{itemize}
+    \item All other deletions
+    \item Require full delete-rederive treatment
+\end{itemize}
+
+\subsection{Three-Phase Algorithm}
+
+\begin{description}
+    \item[Phase 1: ANTI-MONOTONIC (Delete)] \hfill
+    \begin{itemize}
+        \item Process all deletions NOT in increasing replacements
+        \item May over-delete due to cyclic dependencies
+        \item Iterate to fixpoint within each SCC
+    \end{itemize}
+
+    \item[Phase 2: RE-DERIVATION] \hfill
+    \begin{itemize}
+        \item For deleted tuples with positive support count: re-insert
+        \item For deleted aggregates: recompute from remaining aggregands
+        \item Fixes over-deletion from Phase 1
+    \end{itemize}
+
+    \item[Phase 3: MONOTONIC (Insert)] \hfill
+    \begin{itemize}
+        \item Process insertions and increasing replacements
+        \item Standard semi-naive evaluation
+    \end{itemize}
+\end{description}
+
+\subsection{Support Tracking}
+
+\textbf{For non-aggregating relations: SUPPORT COUNTS}
+\begin{itemize}
+    \item Count how many derivations produce each tuple
+    \item Tuple deleted when count reaches 0
+\end{itemize}
+
+\textbf{For aggregating relations: SUPPORT MULTISETS}
+\begin{itemize}
+    \item Track which aggregands contribute to each lattice value
+    \item Recompute aggregate from remaining aggregands on change
+\end{itemize}
+
+\subsection{Performance (from IncA evaluation)}
+
+\begin{itemize}
+    \item Strong-update points-to: 2.5ms median update time
+    \item String analysis: 3.8ms median update time
+    \item Speedup: $65\times$--$243\times$ vs from-scratch recomputation
+    \item Target: sub-second updates for IDE integration
+\end{itemize}
+
+\subsection{F* Formalization of DRedL}
+
+The following F* code formalizes DRedL's lattice requirements. The \texttt{lattice\_requirements} record captures the three key assumptions from Szabo et al.: (A1)~monotonic aggregation, (A2)~finite lattice height for termination, and (A3)~functional aggregation. The \texttt{finite\_height} field uses F*'s \texttt{squash} type to carry a termination proof.
+
+The \texttt{lattice\_change} type distinguishes the four kinds of changes: insertions, deletions, increasing replacements (monotonic), and decreasing changes (anti-monotonic). The key insight is that \texttt{LatticeIncreasingReplace} carries a proof that $\mathit{new\_val} \geq \mathit{old\_val}$, enabling the algorithm to skip deletion.
+
+\begin{fstarcode}[title={Incremental Lattice-Based Analysis (DRedL)}]
+(* ==================================================
+   INCREMENTAL LATTICE-BASED ANALYSIS (DRedL)
+   Source: Szabo et al. 2018
+   ================================================== *)
+module BrrrMachine.Incremental.DRedL
+
+(* --------------------------------------------------
+   LATTICE REQUIREMENTS (DRedL Assumptions A1-A3)
+   -------------------------------------------------- *)
+type lattice_requirements (a : Type) = {
+  leq : a -> a -> bool;                        (* Partial order *)
+  join : a -> a -> a;                          (* Least upper bound *)
+  bot : a;                                     (* Bottom element *)
+  finite_height : squash (has_finite_height leq);  (* Termination guarantee *)
+}
+
+(* Monotonic aggregation: S1 subset S2 ==> aggr(S1) <= aggr(S2) *)
+type monotonic_aggregation (#a:Type) (lat : lattice_requirements a)
+  (aggr : multiset a -> a) =
+  squash (forall s1 s2. Multiset.subset s1 s2 ==> lat.leq (aggr s1) (aggr s2))
+
+(* --------------------------------------------------
+   CHANGE CLASSIFICATION
+   -------------------------------------------------- *)
+type lattice_change (a : Type) =
+  | LatticeInsert : key:grouping_key -> new_val:a -> lattice_change a
+  | LatticeDeletion : key:grouping_key -> old_val:a -> lattice_change a
+  | LatticeIncreasingReplace : key:grouping_key -> old_val:a -> new_val:a ->
+      pf:squash (lat.leq old_val new_val) -> lattice_change a
+  | LatticeDecreasingChange : key:grouping_key -> old_val:a -> new_val:a ->
+      lattice_change a
+
+(* Split changeset into monotonic/anti-monotonic *)
+val split_changes :
+  #a:Type ->
+  lat:lattice_requirements a ->
+  changes:list (lattice_change a) ->
+  (list (lattice_change a) * list (lattice_change a))
+let split_changes #a lat changes =
+  List.partition (fun c ->
+    match c with
+    | LatticeInsert _ _ -> true
+    | LatticeIncreasingReplace _ _ _ _ -> true  (* KEY: treat as monotonic! *)
+    | _ -> false
+  ) changes
+\end{fstarcode}
+
+The \texttt{split\_changes} function is the core of DRedL's change classification. Note the critical line: \texttt{LatticeIncreasingReplace} is treated as \emph{monotonic}, not anti-monotonic. This is the key optimization that avoids expensive delete-rederive cycles for increasing updates.
+
+The support tracking data structures maintain provenance information for each derived tuple:
+
+\begin{fstarcode}[title={DRedL Support Tracking}]
+(* --------------------------------------------------
+   SUPPORT TRACKING
+   -------------------------------------------------- *)
+type support_store = {
+  counts : map (relation_name * tuple) nat;
+  multisets : map (relation_name * grouping_key) (multiset lattice_value);
+}
+
+val add_aggregand :
+  support_store -> relation_name -> grouping_key -> lattice_value ->
+  support_store
+val remove_aggregand :
+  support_store -> relation_name -> grouping_key -> lattice_value ->
+  support_store
+val recompute_aggregate :
+  #lat:lattice_requirements lattice_value ->
+  support_store -> relation_name -> grouping_key ->
+  option lattice_value
+\end{fstarcode}
+
+The \texttt{support\_store} tracks two kinds of information: (1)~\texttt{counts} maps each (relation, tuple) pair to the number of distinct derivations that produce it, and (2)~\texttt{multisets} tracks which aggregands contribute to each lattice value. When a tuple's support count drops to zero, it must be deleted. When aggregands change, the aggregate is recomputed from the remaining multiset.
+
+The main algorithm processes changes through SCCs in topological order, executing the three phases for each component:
+
+\begin{fstarcode}[title={DRedL Main Algorithm}]
+(* --------------------------------------------------
+   MAIN ALGORITHM
+   -------------------------------------------------- *)
+val maintain_incrementally :
+  prog:datalog_program ->
+  state:relation_store ->
+  support:support_store ->
+  changes:changeset ->
+  (relation_store * support_store)
+let maintain_incrementally prog state support changes =
+  (* Process SCCs in topological order *)
+  List.fold_left (fun (st, sup) scc ->
+    maintain_component prog st sup scc changes
+  ) (state, support) prog.sccs
+
+val maintain_component :
+  prog:datalog_program ->
+  state:relation_store ->
+  support:support_store ->
+  component:set relation_name ->
+  changes:changeset ->
+  (relation_store * support_store)
+let maintain_component prog state support component changes =
+  let (mon, anti) = split_changes changes in
+  (* Phase 1: Anti-monotonic to fixpoint *)
+  let (state1, support1, deleted) =
+    anti_monotonic_fixpoint prog state support component anti in
+  (* Phase 2: Re-derive over-deleted *)
+  let (state2, support2) = rederive prog state1 support1 deleted in
+  (* Phase 3: Monotonic *)
+  monotonic_phase prog state2 support2 component mon
+\end{fstarcode}
+
+The \texttt{maintain\_component} function shows the three-phase structure clearly: first anti-monotonic changes (deletions) are processed to fixpoint, then over-deleted tuples are re-derived, and finally monotonic changes (insertions and increasing replacements) are propagated. The correctness theorem states that incremental maintenance produces exactly the same result as from-scratch recomputation:
+
+\begin{fstarcode}[title={DRedL Correctness Theorem}]
+(* --------------------------------------------------
+   CORRECTNESS THEOREM
+   -------------------------------------------------- *)
+val dredl_correctness :
+  prog:datalog_program ->
+  state:relation_store ->
+  support:support_store ->
+  changes:changeset ->
+  Lemma (
+    let (inc_state, _) = maintain_incrementally prog state support changes in
+    let scratch_state = compute_fixpoint_from_scratch prog (apply_changes state changes) in
+    inc_state == scratch_state
+  )
+  [SMTPat (maintain_incrementally prog state support changes)]
+\end{fstarcode}
+
+\subsection{Integration with Adapton (Hierarchical Incrementality)}
+
+\begin{verbatim}
+File-level changes:      Analysis-level changes:
+    |                          |
+    v                          v
++---------+                +---------+
+| Adapton |--------------->|  DRedL  |
+|  (DCG)  | dirty CPG      |(Datalog)|
++---------+                +---------+
+    |                          |
+    v                          v
+  Coarse-grained            Fine-grained
+  (file thunks)             (lattice fixpoints)
+\end{verbatim}
+
+\begin{itemize}
+    \item Use Adapton for \textbf{file-level} incrementality (CPG per file)
+    \item Use DRedL for \textbf{analysis-level} incrementality (within fixpoint)
+    \item \textbf{Result:} Sub-second updates even for large codebases
+\end{itemize}
+
+%--------------------------------------------------
+\section{Diff-Based Industrial Deployment (Infer)}
+\label{sec:infer-deployment}
+%--------------------------------------------------
+
+\textbf{Paper:} \textbf{[Distefano19]} --- ``Scaling Static Analyses at Facebook''
+
+\begin{theorem}[The Key Insight]
+Deployment context matters as much as analysis precision.
+\end{theorem}
+
+\subsection{Traditional (Batch) Deployment}
+
+\begin{enumerate}
+    \item Run analysis
+    \item Generate bug list
+    \item Present to engineers
+\end{enumerate}
+
+\textbf{Result:} Engineers overwhelmed, bugs ignored, 0\% fix rate (``bug bankruptcy'')
+
+\subsection{Diff-Time Deployment (Infer's Model)}
+
+\begin{enumerate}
+    \item Engineer submits code change
+    \item Analysis runs \emph{only} on diff
+    \item Results posted as code review comments
+\end{enumerate}
+
+\textbf{Result:} 70\% fix rate observed at Facebook scale
+
+\subsection{Why Diff-Time Works}
+
+\begin{enumerate}
+    \item \textbf{CONTEXT:} Developer is already reviewing the code
+    \item \textbf{OWNERSHIP:} The bug is in code they just wrote
+    \item \textbf{MANAGEABLE:} Only a few reports, not thousands
+    \item \textbf{TIMELY:} Fix now, not in some future cleanup sprint
+    \item \textbf{INCREMENTAL:} Only recompute for changed code
+\end{enumerate}
+
+\subsection{Bug Bankruptcy Anti-Pattern}
+
+When bug list exceeds $\sim$50--100 items:
+\begin{itemize}
+    \item Engineers stop triaging
+    \item Fix rate approaches 0\%
+    \item Trust in tool decreases
+    \item Technical debt accumulates
+\end{itemize}
+
+\textbf{Prevention:}
+\begin{itemize}
+    \item Cap reports per diff (max 5--10)
+    \item Prioritize by severity AND actionability
+    \item Never let bug lists grow unbounded
+\end{itemize}
+
+\subsection{Compositional Analysis for Scale}
+
+Infer uses bi-abduction (Section 12.12) for compositionality:
+\begin{itemize}
+    \item Each procedure analyzed \emph{independently}
+    \item Summaries capture (precondition, postcondition) pairs
+    \item Interprocedural analysis via summary composition
+    \item Result: Near-linear scaling with codebase size
+\end{itemize}
+
+\begin{definition}[Bi-Abduction Judgment]
+\[
+p * \;?\!M \vdash q * \;?\!F
+\]
+where:
+\begin{itemize}
+    \item $p$ = current state
+    \item $M$ = anti-frame (missing precondition requirement)
+    \item $F$ = frame (unchanged state passed through)
+\end{itemize}
+\end{definition}
+
+\subsection{Scale Achieved at Facebook}
+
+\begin{itemize}
+    \item \textbf{Codebase size:} 10--100 million LOC
+    \item \textbf{Analysis time per diff:} $< 1$ minute
+    \item \textbf{Memory per analysis:} $< 4$GB (enables parallelization)
+    \item \textbf{Bugs found:} 100,000+ fixed before production
+    \item \textbf{Fix rate:} 70\% diff-time vs $\sim$5\% batch
+\end{itemize}
+
+\subsection{Zoncolan (Taint Analysis for Security)}
+
+\begin{itemize}
+    \item \textbf{Codebase:} 100M LOC Hack/PHP
+    \item Taint analysis with custom sources/sinks
+    \item Compositional summary-based propagation
+    \item Outperforms all other security detection methods
+\end{itemize}
+
+\subsection{F* Formalization of Deployment Strategy}
+
+The following F* code formalizes deployment modes and their expected outcomes. The \texttt{deployment\_mode} type captures four distinct scenarios: diff-time (code review integration), batch (periodic runs), IDE-integrated (real-time feedback), and security engineer (deep audits). Each mode has different time/memory budgets and fix rate expectations.
+
+The \texttt{expected\_fix\_rate} function encodes the empirical observation from Facebook: diff-time deployment to all engineers achieves 70\% fix rate, while batch deployment drops to 5\% due to the ``bug bankruptcy'' effect.
+
+\begin{fstarcode}[title={Diff-Based Industrial Deployment}]
+(* ==================================================
+   DIFF-BASED INDUSTRIAL DEPLOYMENT
+   Source: Distefano et al. 2019 (Infer at Facebook)
+   ================================================== *)
+module BrrrMachine.Deployment
+
+(* --------------------------------------------------
+   DEPLOYMENT MODES
+   -------------------------------------------------- *)
+type deployment_mode =
+  | DiffTime : deployment_mode
+      (* Analysis runs on code diff, reports as code review comments *)
+  | BatchOffline : deployment_mode
+      (* Analysis runs periodically, generates bug lists *)
+  | IDE_Integrated : deployment_mode
+      (* Real-time analysis in development environment *)
+  | SecurityEngineer : deployment_mode
+      (* Deep analysis for security team review *)
+
+type target_audience =
+  | AllEngineers : target_audience
+  | SecurityTeam : target_audience
+  | PlatformSpecific : platform:string -> target_audience
+
+(* Expected fix rate based on deployment context *)
+val expected_fix_rate : deployment_mode -> target_audience -> float
+let expected_fix_rate mode audience =
+  match mode, audience with
+  | DiffTime, AllEngineers -> 0.70       (* 70% - Infer empirical *)
+  | DiffTime, SecurityTeam -> 0.85
+  | BatchOffline, AllEngineers -> 0.05   (* Bug bankruptcy effect *)
+  | BatchOffline, SecurityTeam -> 0.40
+  | IDE_Integrated, AllEngineers -> 0.80 (* Immediate context *)
+  | SecurityEngineer, SecurityTeam -> 0.90
+  | _, _ -> 0.30
+\end{fstarcode}
+
+The \texttt{analysis\_budget} type captures the resource constraints for each deployment context. The key insight is that different contexts have dramatically different budgets: diff-time analysis must complete in under a minute with limited memory, while security audits can run for hours with generous resources. The \texttt{max\_report\_count} field prevents ``bug bankruptcy'' by capping how many issues are reported:
+
+\begin{fstarcode}[title={Analysis Budget per Context}]
+(* --------------------------------------------------
+   ANALYSIS BUDGET PER CONTEXT
+   -------------------------------------------------- *)
+type analysis_budget = {
+  time_limit_per_diff : nat;    (* milliseconds *)
+  memory_limit : nat;           (* megabytes *)
+  max_paths_explored : nat;
+  max_report_count : nat;       (* Cap to avoid overwhelming *)
+}
+
+val budget_for_context : deployment_mode -> analysis_budget
+let budget_for_context mode =
+  match mode with
+  | DiffTime -> {
+      time_limit_per_diff = 60000;   (* 1 minute *)
+      memory_limit = 4096;           (* 4GB *)
+      max_paths_explored = 1000;
+      max_report_count = 5;          (* Don't overwhelm reviewer *)
+    }
+  | BatchOffline -> {
+      time_limit_per_diff = 3600000; (* 1 hour *)
+      memory_limit = 32768;          (* 32GB *)
+      max_paths_explored = 100000;
+      max_report_count = 1000;
+    }
+  | IDE_Integrated -> {
+      time_limit_per_diff = 5000;    (* 5 seconds for interactivity *)
+      memory_limit = 512;
+      max_paths_explored = 100;
+      max_report_count = 3;
+    }
+  | SecurityEngineer -> {
+      time_limit_per_diff = 7200000; (* 2 hours *)
+      memory_limit = 65536;
+      max_paths_explored = 1000000;
+      max_report_count = 10000;
+    }
+\end{fstarcode}
+
+The following code shows how to combine incremental analysis with summary caching. The \texttt{invalidation\_set} function computes the transitive closure of affected functions when code changes: directly modified functions plus all their callers (since callee summaries may have changed). The \texttt{incremental\_analyze} function reuses cached summaries for unchanged code and only recomputes what is necessary:
+
+\begin{fstarcode}[title={Incremental Analysis with Summary Caching}]
+(* --------------------------------------------------
+   INCREMENTAL ANALYSIS WITH SUMMARY CACHING
+   -------------------------------------------------- *)
+type change_delta = {
+  added_functions : set func_id;
+  modified_functions : set func_id;
+  deleted_functions : set func_id;
+  modified_callsites : set (func_id * node_id);
+}
+
+type cached_summaries = map func_id procedure_summary
+
+(* Determine what needs recomputation *)
+val invalidation_set :
+  change_delta -> call_graph -> cached_summaries -> set func_id
+let invalidation_set delta cg cache =
+  let directly_changed =
+    Set.union delta.added_functions
+      (Set.union delta.modified_functions delta.deleted_functions) in
+  (* Transitively find affected callers *)
+  let rec find_affected current visited =
+    if Set.is_empty current then visited
+    else
+      let callers = Set.fold (fun f acc ->
+        Set.union acc (get_callers cg f)
+      ) current Set.empty in
+      let new_affected = Set.diff callers visited in
+      find_affected new_affected (Set.union visited new_affected)
+  in
+  find_affected directly_changed directly_changed
+
+(* Incremental analysis - only recompute what's needed *)
+val incremental_analyze :
+  cpg:cpg ->
+  delta:change_delta ->
+  cache:cached_summaries ->
+  budget:analysis_budget ->
+  (cached_summaries * list bug_report)
+let incremental_analyze cpg delta cache budget =
+  let to_recompute = invalidation_set delta (extract_callgraph cpg) cache in
+  (* Reuse unchanged summaries *)
+  let valid_cache = Map.filter (fun f _ -> not (Set.mem f to_recompute)) cache in
+  (* Recompute affected functions *)
+  let new_summaries = analyze_functions_with_cache cpg to_recompute valid_cache in
+  let updated_cache = Map.union valid_cache new_summaries in
+  (* Only report bugs from CHANGED code (diff-time principle) *)
+  let new_bugs = extract_bugs_in_changed_code new_summaries delta in
+  (* Apply report cap *)
+  let capped_bugs = take budget.max_report_count
+    (sort_by_actionability new_bugs) in
+  (updated_cache, capped_bugs)
+\end{fstarcode}
+
+The critical insight from Infer's deployment is that report \emph{quality} determines fix rate. The \texttt{report\_quality} record captures the key dimensions: precise location, execution trace, explanation, and suggested fix. The \texttt{actionability\_score} function weights these factors based on empirical observations---reports involving changed code and short traces are most likely to be fixed:
+
+\begin{fstarcode}[title={Report Quality and Actionability}]
+(* --------------------------------------------------
+   REPORT QUALITY AND ACTIONABILITY
+   -------------------------------------------------- *)
+type report_quality = {
+  has_precise_location : bool;
+  has_trace : bool;
+  has_explanation : bool;
+  has_suggested_fix : bool;
+  trace_length : nat;
+  involves_changed_code : bool;
+}
+
+val actionability_score : bug_report -> report_quality -> float
+let actionability_score report quality =
+  let base = 0.3 in
+  let score = base
+    +. (if quality.has_precise_location then 0.15 else 0.0)
+    +. (if quality.has_trace then 0.20 else 0.0)
+    +. (if quality.has_explanation then 0.10 else 0.0)
+    +. (if quality.has_suggested_fix then 0.15 else 0.0)
+    +. (if quality.involves_changed_code then 0.20 else 0.0)
+    -. (float_of_int quality.trace_length *. 0.01)
+  in
+  min 1.0 (max 0.0 score)
+\end{fstarcode}
+
+\subsection{Industrial Deployment Checklist}
+
+\begin{itemize}
+    \item[$\square$] Diff-time integration with CI/CD pipeline
+    \item[$\square$] Summary caching with invalidation tracking
+    \item[$\square$] Report capping (max 5--10 per diff)
+    \item[$\square$] Actionability scoring and prioritization
+    \item[$\square$] Execution trace in reports
+    \item[$\square$] Suggested fixes where possible
+    \item[$\square$] Time budget enforcement ($< 1$ minute per diff)
+    \item[$\square$] Memory budget enforcement ($< 4$GB)
+    \item[$\square$] Graceful degradation on budget exhaustion
+    \item[$\square$] Metrics: fix rate, time-to-fix, false positive rate
+\end{itemize}
+
+\subsection{Target Metrics}
+
+\begin{itemize}
+    \item \textbf{Fix rate:} 70\%+ for diff-time deployment
+    \item \textbf{Analysis time:} $< 60$ seconds per diff
+    \item \textbf{Memory:} $< 4$GB per analysis worker
+    \item \textbf{Report cap:} 5 per diff (engineering), 1000 per batch (security)
+\end{itemize}
+
+%==================================================
+\chapter{Time Budgets and Graceful Degradation}
+\label{ch:time-budgets}
+%==================================================
+
+IFDS is $\BigO{ED^3}$, but $D$ (domain size) can explode. Pointer analysis on large codebases can run for hours. Real tools need time limits and graceful degradation.
+
+\textbf{Papers:} \textbf{[Tan22]} (Qilin), \textbf{[Sridharan05]} (Demand-driven)
+
+%--------------------------------------------------
+\section{Degradation Strategy}
+\label{sec:degradation-strategy}
+%--------------------------------------------------
+
+\subsection{Time Budgets}
+
+\begin{itemize}
+    \item Per-function budget: 100ms default
+    \item Per-file budget: 10s default
+    \item Total budget: configurable
+\end{itemize}
+
+\subsection{Degradation Levels}
+
+\begin{description}
+    \item[Level 0:] Full precision (Andersen + IFDS + path-sensitive)
+    \item[Level 1:] Reduced precision (Steensgaard + IFDS)
+    \item[Level 2:] Fast approximation (flow-insensitive)
+    \item[Level 3:] Syntactic only (pattern matching)
+\end{description}
+
+\subsection{Adaptive Analysis}
+
+The following pseudo-F* code illustrates the basic strategy for adaptive analysis: attempt full-precision analysis first, but fall back to faster approximations when the time budget is exhausted. This enables graceful degradation rather than complete failure on complex code:
+
+\begin{fstarcode}[title={Adaptive Analysis with Timeout}]
+val analyze_adaptive : cpg -> time_budget:duration -> findings
+let analyze_adaptive cpg budget =
+  let start = now () in
+  try
+    (* Start with full precision *)
+    analyze_full cpg
+  with Timeout ->
+    (* Degrade and continue *)
+    let remaining = budget - (now () - start) in
+    analyze_approximate cpg remaining
+\end{fstarcode}
+
+\subsection{Incremental Results}
+
+\begin{itemize}
+    \item Yield findings as they're discovered
+    \item Don't wait for complete analysis
+    \item Mark findings with ``analysis complete'' vs ``partial''
+\end{itemize}
+
+%--------------------------------------------------
+\section{Implementation TODOs}
+\label{sec:implementation-todos}
+%--------------------------------------------------
+
+\begin{enumerate}
+    \item \textbf{Adaptive precision selection} per function based on complexity
+    \item \textbf{Progress reporting} for long-running analyses
+    \item \textbf{Checkpointing} for resumable analysis
+    \item \textbf{Resource monitoring} (memory, not just time)
+\end{enumerate}
+
+%--------------------------------------------------
+\section{Industrial Lessons}
+\label{sec:industrial-lessons}
+%--------------------------------------------------
+
+\textbf{Source:} \textbf{[Distefano19]}
+
+\subsection{Precision vs Performance Trade-off}
+
+Facebook's Infer made a deliberate choice:
+\begin{quote}
+``We prioritize soundness less and precision more, accepting that some issues would be missed in exchange for fewer false positives.''
+\end{quote}
+
+This is NOT abandoning soundness --- it's a \emph{layered} approach:
+\begin{enumerate}
+    \item \textbf{Core bi-abduction algorithm:} SOUND (formal guarantees)
+    \item \textbf{Industrial deployment:} UNDER-APPROXIMATE (bounded exploration)
+    \begin{itemize}
+        \item Bounded symbolic execution paths
+        \item Timeouts on complex procedures
+        \item Heuristic prioritization
+    \end{itemize}
+\end{enumerate}
+
+\textbf{Result:} Sound for analyzed paths, incomplete overall. Reported bugs are \emph{real} bugs. Some bugs are \emph{missed}.
+
+\subsection{Analysis Profile Configurations}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Profile} & \textbf{Precision} & \textbf{Max Time} & \textbf{Max Reports} \\
+\midrule
+EngineeringProfile (diff-time) & 0.90 & 60s & 5 \\
+SecurityProfile (batch) & 0.50 & 3600s & 1000 \\
+ComplianceProfile (audit) & 0.99 & 7200s & 10000 \\
+\bottomrule
+\end{tabular}
+\caption{Analysis Profile Configurations}
+\label{tab:analysis-profiles}
+\end{table}
+
+\textbf{Goals:}
+\begin{itemize}
+    \item \textbf{EngineeringProfile:} High fix rate (few false positives)
+    \item \textbf{SecurityProfile:} Find all vulnerabilities (accept more FPs for coverage)
+    \item \textbf{ComplianceProfile:} Full audit record (must be confident)
+\end{itemize}
+
+\subsection{Bug Bankruptcy Prevention}
+
+When bug list exceeds $\sim$50--100 items:
+\begin{itemize}
+    \item Engineers stop triaging (overwhelmed)
+    \item Fix rate approaches 0\%
+    \item Trust in tool decreases
+    \item Technical debt accelerates
+\end{itemize}
+
+\textbf{Prevention strategies:}
+\begin{itemize}
+    \item Cap reports per diff (max 5--10)
+    \item Prioritize by severity AND actionability
+    \item Triage queue with assignment
+    \item Regular ``bankruptcy'' cleanup (declare amnesty, start fresh)
+    \item Focus on NEW bugs in changed code
+\end{itemize}
+
+\subsection{Actionability Requirements}
+
+Every bug report must answer:
+\begin{enumerate}
+    \item \textbf{What is wrong?} (Clear error type)
+    \item \textbf{Where is it?} (Precise location)
+    \item \textbf{Why is it wrong?} (Execution trace)
+    \item \textbf{How to fix it?} (Actionable guidance)
+\end{enumerate}
+
+\begin{pillarbox}[title={Critical Observation}]
+Reports without traces have significantly lower fix rates.
+\end{pillarbox}

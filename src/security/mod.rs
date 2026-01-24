@@ -75,31 +75,29 @@
 //! - `# noqa: <ID>`
 //! - `# security-ignore: <ID>`
 
+pub mod common;
 pub mod crypto;
 pub mod deserialization;
 pub mod injection;
+pub mod input_validation;
+pub mod prototype_pollution;
 pub mod redos;
 pub mod sarif;
 pub mod secrets;
+pub mod ssrf;
 pub mod taint;
 pub mod types;
 
 // Re-export unified types
-pub use sarif::SarifLog;
 pub use types::{
     check_suppression, is_suppressed, Confidence, InjectionType, Location, ScanSummary,
     SecurityCategory, SecurityConfig, SecurityFinding, SecurityReport, Severity,
 };
 
+// Re-export common types for injection modules
+pub use common::SourceLocation;
+
 // Re-export individual analyzers for direct access
-pub use crypto::{scan_file_weak_crypto, scan_weak_crypto, WeakCryptoDetector};
-pub use deserialization::scan_deserialization;
-pub use injection::command::{scan_command_injection, scan_file_command_injection};
-pub use injection::path_traversal::{scan_file_path_traversal, scan_path_traversal};
-pub use injection::sql::SqlInjectionDetector;
-pub use injection::xss::{scan_file_xss, scan_xss};
-pub use redos::{scan_redos, ReDoSDetector};
-pub use secrets::scan_secrets;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -108,7 +106,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 
 // =============================================================================
 // Unified Security Scan
@@ -168,12 +166,13 @@ pub fn scan_security(path: impl AsRef<Path>, config: &SecurityConfig) -> Result<
             Box::new(|| run_crypto_scan(path, config)),
             Box::new(|| run_deserialization_scan(path, config)),
             Box::new(|| run_redos_scan(path, config)),
+            Box::new(|| run_log_injection_scan(path, config)),
+            Box::new(|| run_header_injection_scan(path, config)),
+            Box::new(|| run_template_injection_scan(path, config)),
         ];
 
-        let findings_per_analyzer: Vec<Vec<SecurityFinding>> = scanners
-            .par_iter()
-            .map(|scanner| scanner())
-            .collect();
+        let findings_per_analyzer: Vec<Vec<SecurityFinding>> =
+            scanners.par_iter().map(|scanner| scanner()).collect();
 
         for findings in findings_per_analyzer {
             all_findings.extend(findings);
@@ -188,6 +187,9 @@ pub fn scan_security(path: impl AsRef<Path>, config: &SecurityConfig) -> Result<
         all_findings.extend(run_crypto_scan(path, config));
         all_findings.extend(run_deserialization_scan(path, config));
         all_findings.extend(run_redos_scan(path, config));
+        all_findings.extend(run_log_injection_scan(path, config));
+        all_findings.extend(run_header_injection_scan(path, config));
+        all_findings.extend(run_template_injection_scan(path, config));
     }
 
     // Apply suppression detection by reading source files
@@ -221,9 +223,9 @@ fn collect_source_files(path: &Path, config: &SecurityConfig) -> Result<Vec<std:
         return Ok(vec![path.to_path_buf()]);
     }
 
-    let path_str = path.to_str().ok_or_else(|| {
-        BrrrError::InvalidArgument("Invalid path encoding".to_string())
-    })?;
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| BrrrError::InvalidArgument("Invalid path encoding".to_string()))?;
 
     let scan_config = match &config.language {
         Some(lang) => ScanConfig::for_language(lang),
@@ -692,6 +694,195 @@ fn run_redos_scan(path: &Path, config: &SecurityConfig) -> Vec<SecurityFinding> 
         .collect()
 }
 
+/// Run log injection scanner and convert to unified findings.
+fn run_log_injection_scan(path: &Path, config: &SecurityConfig) -> Vec<SecurityFinding> {
+    if let Some(ref cats) = config.categories {
+        if !cats.iter().any(|c| {
+            c.to_lowercase().contains("log")
+                || c.to_lowercase().contains("injection")
+                || c.to_lowercase() == "all"
+        }) {
+            return Vec::new();
+        }
+    }
+
+    let lang_str = config.language.as_deref();
+
+    let result = if path.is_file() {
+        match injection::log_injection::scan_file_log_injection(path, lang_str) {
+            Ok(findings) => findings,
+            Err(_) => return Vec::new(),
+        }
+    } else {
+        match injection::log_injection::scan_log_injection(path, lang_str) {
+            Ok(result) => result.findings,
+            Err(_) => return Vec::new(),
+        }
+    };
+
+    result
+        .into_iter()
+        .map(|f| {
+            let category = SecurityCategory::Other("Log Injection".to_string());
+            SecurityFinding::new(
+                format!("LOG-{:03}", severity_to_id(&f.severity.to_string())),
+                category,
+                convert_log_severity(f.severity),
+                convert_log_confidence(f.confidence),
+                Location::new(
+                    &f.location.file,
+                    f.location.line,
+                    f.location.column,
+                    f.location.end_line,
+                    f.location.end_column,
+                ),
+                format!("Log Injection: {} in {}", f.injection_type, f.log_function),
+                format!(
+                    "Tainted data '{}' reaches logging sink without sanitization",
+                    f.tainted_data
+                ),
+            )
+            .with_remediation(f.remediation)
+            .with_code_snippet(f.code_snippet.unwrap_or_default())
+            .with_cwe(f.cwe_id)
+            .with_metadata("log_function", f.log_function)
+            .with_metadata("injection_type", f.injection_type.to_string())
+            .with_metadata(
+                "uses_structured_logging",
+                f.uses_structured_logging.to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Run header injection scanner and convert to unified findings.
+fn run_header_injection_scan(path: &Path, config: &SecurityConfig) -> Vec<SecurityFinding> {
+    if let Some(ref cats) = config.categories {
+        if !cats.iter().any(|c| {
+            c.to_lowercase().contains("header")
+                || c.to_lowercase().contains("injection")
+                || c.to_lowercase().contains("redirect")
+                || c.to_lowercase().contains("cookie")
+                || c.to_lowercase() == "all"
+        }) {
+            return Vec::new();
+        }
+    }
+
+    let lang_str = config.language.as_deref();
+
+    let result = if path.is_file() {
+        match injection::header_injection::scan_file_header_injection(path, lang_str) {
+            Ok(findings) => findings,
+            Err(_) => return Vec::new(),
+        }
+    } else {
+        match injection::header_injection::scan_header_injection(path, lang_str) {
+            Ok(result) => result.findings,
+            Err(_) => return Vec::new(),
+        }
+    };
+
+    result
+        .into_iter()
+        .map(|f| {
+            let category = SecurityCategory::Other("Header Injection".to_string());
+            SecurityFinding::new(
+                format!("HDR-{:03}", severity_to_id(&f.severity.to_string())),
+                category,
+                convert_header_severity(f.severity),
+                convert_header_confidence(f.confidence),
+                Location::new(
+                    &f.location.file,
+                    f.location.line,
+                    f.location.column,
+                    f.location.end_line,
+                    f.location.end_column,
+                ),
+                format!(
+                    "Header Injection: {} in {}",
+                    f.injection_type, f.sink_function
+                ),
+                format!(
+                    "Tainted value '{}' in header '{}' - {}",
+                    f.tainted_value,
+                    f.header_name,
+                    f.injection_type.description()
+                ),
+            )
+            .with_remediation(f.remediation)
+            .with_code_snippet(f.code_snippet.unwrap_or_default())
+            .with_cwe(f.cwe_id)
+            .with_metadata("sink_function", f.sink_function)
+            .with_metadata("header_name", f.header_name)
+            .with_metadata("injection_type", f.injection_type.to_string())
+            .with_metadata("framework_protected", f.framework_protected.to_string())
+            .with_metadata("encoded_crlf_detected", f.encoded_crlf_detected.to_string())
+        })
+        .collect()
+}
+
+/// Run template injection (SSTI) scanner and convert to unified findings.
+fn run_template_injection_scan(path: &Path, config: &SecurityConfig) -> Vec<SecurityFinding> {
+    if let Some(ref cats) = config.categories {
+        if !cats.iter().any(|c| {
+            c.to_lowercase().contains("template")
+                || c.to_lowercase().contains("ssti")
+                || c.to_lowercase().contains("injection")
+                || c.to_lowercase() == "all"
+        }) {
+            return Vec::new();
+        }
+    }
+
+    let lang_str = config.language.as_deref();
+
+    let result = if path.is_file() {
+        match injection::template_injection::scan_file_template_injection(path, lang_str) {
+            Ok(result) => result.findings,
+            Err(_) => return Vec::new(),
+        }
+    } else {
+        match injection::template_injection::scan_template_injection(path, lang_str) {
+            Ok(result) => result.findings,
+            Err(_) => return Vec::new(),
+        }
+    };
+
+    result
+        .into_iter()
+        .map(|f| {
+            let category = SecurityCategory::Injection(InjectionType::Template);
+            SecurityFinding::new(
+                format!("SSTI-{:03}", severity_to_id(&f.severity.to_string())),
+                category,
+                convert_template_severity(f.severity),
+                convert_template_confidence(f.confidence),
+                Location::new(
+                    &f.location.file,
+                    f.location.line,
+                    f.location.column,
+                    f.location.end_line,
+                    f.location.end_column,
+                ),
+                format!(
+                    "Template Injection ({}) via {}",
+                    f.template_engine, f.sink_function
+                ),
+                f.description.clone(),
+            )
+            .with_remediation(f.remediation)
+            .with_code_snippet(f.code_snippet.unwrap_or_default())
+            .with_cwe(f.cwe_id)
+            .with_metadata("template_engine", f.template_engine.to_string())
+            .with_metadata("injection_type", f.injection_type.to_string())
+            .with_metadata("sink_function", f.sink_function)
+            .with_metadata("tainted_template", f.tainted_template)
+            .with_metadata("tainted_variables", f.tainted_variables.join(", "))
+        })
+        .collect()
+}
+
 // =============================================================================
 // Severity/Confidence Conversion Helpers
 // =============================================================================
@@ -841,6 +1032,60 @@ fn convert_redos_confidence(conf: redos::Confidence) -> Confidence {
     }
 }
 
+fn convert_log_severity(sev: injection::log_injection::Severity) -> Severity {
+    match sev {
+        injection::log_injection::Severity::Critical => Severity::Critical,
+        injection::log_injection::Severity::High => Severity::High,
+        injection::log_injection::Severity::Medium => Severity::Medium,
+        injection::log_injection::Severity::Low => Severity::Low,
+        injection::log_injection::Severity::Info => Severity::Info,
+    }
+}
+
+fn convert_log_confidence(conf: injection::log_injection::Confidence) -> Confidence {
+    match conf {
+        injection::log_injection::Confidence::High => Confidence::High,
+        injection::log_injection::Confidence::Medium => Confidence::Medium,
+        injection::log_injection::Confidence::Low => Confidence::Low,
+    }
+}
+
+fn convert_header_severity(sev: injection::header_injection::Severity) -> Severity {
+    match sev {
+        injection::header_injection::Severity::Critical => Severity::Critical,
+        injection::header_injection::Severity::High => Severity::High,
+        injection::header_injection::Severity::Medium => Severity::Medium,
+        injection::header_injection::Severity::Low => Severity::Low,
+        injection::header_injection::Severity::Info => Severity::Info,
+    }
+}
+
+fn convert_header_confidence(conf: injection::header_injection::Confidence) -> Confidence {
+    match conf {
+        injection::header_injection::Confidence::High => Confidence::High,
+        injection::header_injection::Confidence::Medium => Confidence::Medium,
+        injection::header_injection::Confidence::Low => Confidence::Low,
+    }
+}
+
+fn convert_template_severity(sev: injection::template_injection::Severity) -> Severity {
+    match sev {
+        injection::template_injection::Severity::Critical => Severity::Critical,
+        injection::template_injection::Severity::High => Severity::High,
+        injection::template_injection::Severity::Medium => Severity::Medium,
+        injection::template_injection::Severity::Low => Severity::Low,
+        injection::template_injection::Severity::Info => Severity::Info,
+    }
+}
+
+fn convert_template_confidence(conf: injection::template_injection::Confidence) -> Confidence {
+    match conf {
+        injection::template_injection::Confidence::High => Confidence::High,
+        injection::template_injection::Confidence::Medium => Confidence::Medium,
+        injection::template_injection::Confidence::Low => Confidence::Low,
+    }
+}
+
 impl Confidence {
     /// Convert a float confidence score to Confidence level.
     fn from_float(score: f64) -> Self {
@@ -900,7 +1145,11 @@ impl SecurityReport {
             output.push_str("=== Findings ===\n\n");
 
             for (i, finding) in self.findings.iter().enumerate() {
-                let suppressed_marker = if finding.suppressed { " [SUPPRESSED]" } else { "" };
+                let suppressed_marker = if finding.suppressed {
+                    " [SUPPRESSED]"
+                } else {
+                    ""
+                };
 
                 output.push_str(&format!(
                     "{}. [{}] {} - {}{}\n",

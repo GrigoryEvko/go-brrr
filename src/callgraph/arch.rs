@@ -126,9 +126,9 @@ pub fn analyze_architecture(graph: &CallGraph) -> ArchAnalysis {
         info.outgoing_calls = outgoing;
 
         match (has_callers, has_callees) {
-            (false, true) => entry_functions.push(info),  // Entry point: calls others, not called
-            (true, false) => leaf_functions.push(info),   // Leaf: called, doesn't call others
-            (true, true) => middle_functions.push(info),  // Middle: both
+            (false, true) => entry_functions.push(info), // Entry point: calls others, not called
+            (true, false) => leaf_functions.push(info),  // Leaf: called, doesn't call others
+            (true, true) => middle_functions.push(info), // Middle: both
             (false, false) => orphan_functions.push(info), // Orphan: neither (shouldn't happen often)
         }
     }
@@ -177,7 +177,11 @@ fn detect_cycles(graph: &CallGraph, all_functions: &HashSet<FunctionRef>) -> Vec
     // Create a name-based lookup for simplicity
     let mut name_to_func: HashMap<String, &FunctionRef> = HashMap::new();
     for func in all_functions {
-        let key = func.qualified_name.as_deref().unwrap_or(&func.name).to_string();
+        let key = func
+            .qualified_name
+            .as_deref()
+            .unwrap_or(&func.name)
+            .to_string();
         name_to_func.insert(key, func);
     }
 
@@ -187,7 +191,8 @@ fn detect_cycles(graph: &CallGraph, all_functions: &HashSet<FunctionRef>) -> Vec
             continue;
         }
 
-        let mut stack: Vec<(&FunctionRef, Vec<&FunctionRef>)> = vec![(start_func, vec![start_func])];
+        let mut stack: Vec<(&FunctionRef, Vec<&FunctionRef>)> =
+            vec![(start_func, vec![start_func])];
         let mut in_current_path: HashSet<&FunctionRef> = HashSet::new();
         in_current_path.insert(start_func);
 
@@ -199,7 +204,8 @@ fn detect_cycles(graph: &CallGraph, all_functions: &HashSet<FunctionRef>) -> Vec
                     // Check if callee is in current path (cycle detected)
                     if path.iter().any(|f| f.name == callee.name) {
                         // Found a cycle - extract the cycle portion
-                        let cycle_start_idx = path.iter().position(|f| f.name == callee.name).unwrap();
+                        let cycle_start_idx =
+                            path.iter().position(|f| f.name == callee.name).unwrap();
                         let cycle_funcs: Vec<&FunctionRef> = path[cycle_start_idx..].to_vec();
 
                         // Only add if we haven't seen this cycle before
@@ -217,9 +223,9 @@ fn detect_cycles(graph: &CallGraph, all_functions: &HashSet<FunctionRef>) -> Vec
 
                         // Check if we already recorded this cycle (cycles can be found multiple times)
                         let normalized = normalize_cycle(&cycle_names);
-                        let already_exists = cycles.iter().any(|c: &CycleDependency| {
-                            normalize_cycle(&c.cycle) == normalized
-                        });
+                        let already_exists = cycles
+                            .iter()
+                            .any(|c: &CycleDependency| normalize_cycle(&c.cycle) == normalized);
 
                         if !already_exists && cycle_names.len() > 1 {
                             cycles.push(CycleDependency {
@@ -298,7 +304,8 @@ fn build_layers(
                     // Skip edges that are part of cycles for layering purposes
                     let caller_name = caller.qualified_name.as_deref().unwrap_or(&caller.name);
                     let callee_name = func.qualified_name.as_deref().unwrap_or(&func.name);
-                    !(cycle_functions.contains(caller_name) && cycle_functions.contains(callee_name))
+                    !(cycle_functions.contains(caller_name)
+                        && cycle_functions.contains(callee_name))
                 })
                 .count();
             in_degree.insert(func, count);
@@ -306,10 +313,7 @@ fn build_layers(
 
         // Build adjacency list for callees
         if let Some(callees) = graph.callees.get(func) {
-            func_to_callees.insert(
-                func,
-                callees.iter().collect(),
-            );
+            func_to_callees.insert(func, callees.iter().collect());
         }
     }
 

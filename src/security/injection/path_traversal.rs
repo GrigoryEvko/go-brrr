@@ -54,7 +54,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor, Tree};
 
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
 use crate::util::format_query_error;
 
@@ -66,11 +66,28 @@ use crate::util::format_query_error;
 /// Single-pass multi-pattern matching replaces 18 sequential `.contains()` calls.
 static USER_INPUT_PATTERNS: Lazy<AhoCorasick> = Lazy::new(|| {
     AhoCorasick::new([
-        "request", "req", "params", "query", "body", "input",
-        "user", "filename", "file_name", "filepath", "file_path",
-        "name", "path", "url", "uri", "data", "arg", "param",
-        "stdin", "argv",
-    ]).expect("USER_INPUT_PATTERNS: invalid patterns")
+        "request",
+        "req",
+        "params",
+        "query",
+        "body",
+        "input",
+        "user",
+        "filename",
+        "file_name",
+        "filepath",
+        "file_path",
+        "name",
+        "path",
+        "url",
+        "uri",
+        "data",
+        "arg",
+        "param",
+        "stdin",
+        "argv",
+    ])
+    .expect("USER_INPUT_PATTERNS: invalid patterns")
 });
 
 // =============================================================================
@@ -463,7 +480,8 @@ fn python_sinks() -> Vec<FileSink> {
             path_arg_index: 1, // Second arg is typically user input
             operation_type: FileOperationType::Open,
             severity: Severity::High, // Misconception that join sanitizes
-            description: "os.path.join() does NOT sanitize - still vulnerable to absolute paths and ..",
+            description:
+                "os.path.join() does NOT sanitize - still vulnerable to absolute paths and ..",
         },
         // shutil module
         FileSink {
@@ -1306,10 +1324,13 @@ fn get_sink_query(language: &str) -> Option<&'static str> {
 /// # Returns
 ///
 /// Vector of path traversal findings.
-pub fn scan_path_traversal(path: &Path, language: Option<&str>) -> Result<Vec<PathTraversalFinding>> {
-    let path_str = path.to_str().ok_or_else(|| {
-        BrrrError::InvalidArgument("Invalid path encoding".to_string())
-    })?;
+pub fn scan_path_traversal(
+    path: &Path,
+    language: Option<&str>,
+) -> Result<Vec<PathTraversalFinding>> {
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| BrrrError::InvalidArgument("Invalid path encoding".to_string()))?;
 
     let scanner = ProjectScanner::new(path_str)?;
     let config = match language {
@@ -1323,9 +1344,7 @@ pub fn scan_path_traversal(path: &Path, language: Option<&str>) -> Result<Vec<Pa
     // Process files in parallel
     let findings: Vec<PathTraversalFinding> = files
         .par_iter()
-        .filter_map(|file| {
-            scan_file_path_traversal(file, language).ok()
-        })
+        .filter_map(|file| scan_file_path_traversal(file, language).ok())
         .flatten()
         .collect();
 
@@ -1342,7 +1361,10 @@ pub fn scan_path_traversal(path: &Path, language: Option<&str>) -> Result<Vec<Pa
 /// # Returns
 ///
 /// Vector of path traversal findings in this file.
-pub fn scan_file_path_traversal(file: &Path, language: Option<&str>) -> Result<Vec<PathTraversalFinding>> {
+pub fn scan_file_path_traversal(
+    file: &Path,
+    language: Option<&str>,
+) -> Result<Vec<PathTraversalFinding>> {
     let registry = LanguageRegistry::global();
 
     // Detect language
@@ -1350,35 +1372,45 @@ pub fn scan_file_path_traversal(file: &Path, language: Option<&str>) -> Result<V
         Some(lang_name) => registry
             .get_by_name(lang_name)
             .ok_or_else(|| BrrrError::UnsupportedLanguage(lang_name.to_string()))?,
-        None => registry
-            .detect_language(file)
-            .ok_or_else(|| BrrrError::UnsupportedLanguage(
+        None => registry.detect_language(file).ok_or_else(|| {
+            BrrrError::UnsupportedLanguage(
                 file.extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or("unknown")
                     .to_string(),
-            ))?,
+            )
+        })?,
     };
 
     let lang_name = lang.name();
 
     // Get query for this language
-    let sink_query_str = get_sink_query(lang_name)
-        .ok_or_else(|| BrrrError::UnsupportedLanguage(format!("{} (no path traversal query)", lang_name)))?;
+    let sink_query_str = get_sink_query(lang_name).ok_or_else(|| {
+        BrrrError::UnsupportedLanguage(format!("{} (no path traversal query)", lang_name))
+    })?;
 
     // Parse the file
     let source = std::fs::read(file).map_err(|e| BrrrError::io_with_path(e, file))?;
     let mut parser = lang.parser_for_path(file)?;
-    let tree = parser.parse(&source, None).ok_or_else(|| BrrrError::Parse {
-        file: file.display().to_string(),
-        message: "Failed to parse file".to_string(),
-    })?;
+    let tree = parser
+        .parse(&source, None)
+        .ok_or_else(|| BrrrError::Parse {
+            file: file.display().to_string(),
+            message: "Failed to parse file".to_string(),
+        })?;
 
     let ts_lang = tree.language();
     let file_path = file.display().to_string();
 
     // Find sinks and analyze
-    find_path_traversal_vulnerabilities(&tree, &source, &ts_lang, sink_query_str, lang_name, &file_path)
+    find_path_traversal_vulnerabilities(
+        &tree,
+        &source,
+        &ts_lang,
+        sink_query_str,
+        lang_name,
+        &file_path,
+    )
 }
 
 /// Internal function to find path traversal vulnerabilities in parsed tree.
@@ -1390,8 +1422,14 @@ fn find_path_traversal_vulnerabilities(
     lang_name: &str,
     file_path: &str,
 ) -> Result<Vec<PathTraversalFinding>> {
-    let query = Query::new(ts_lang, query_str)
-        .map_err(|e| BrrrError::TreeSitter(format_query_error(lang_name, "path_traversal", query_str, &e)))?;
+    let query = Query::new(ts_lang, query_str).map_err(|e| {
+        BrrrError::TreeSitter(format_query_error(
+            lang_name,
+            "path_traversal",
+            query_str,
+            &e,
+        ))
+    })?;
 
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&query, tree.root_node(), source);
@@ -1470,7 +1508,9 @@ fn find_path_traversal_vulnerabilities(
         if let Some(idx) = join_sink_idx {
             if let Some(capture) = match_.captures.iter().find(|c| c.index == idx) {
                 let call_node = capture.node;
-                let args_node = args_idx.and_then(|i| match_.captures.iter().find(|c| c.index == i)).map(|c| c.node);
+                let args_node = args_idx
+                    .and_then(|i| match_.captures.iter().find(|c| c.index == i))
+                    .map(|c| c.node);
 
                 if let Some(args) = args_node {
                     let (path_expr, vars) = extract_path_argument(args, source, 1);
@@ -1503,28 +1543,37 @@ fn find_path_traversal_vulnerabilities(
         if let Some(idx) = sink_idx {
             if let Some(capture) = match_.captures.iter().find(|c| c.index == idx) {
                 let call_node = capture.node;
-                let func_node = func_idx.and_then(|i| match_.captures.iter().find(|c| c.index == i)).map(|c| c.node);
-                let args_node = args_idx.and_then(|i| match_.captures.iter().find(|c| c.index == i)).map(|c| c.node);
+                let func_node = func_idx
+                    .and_then(|i| match_.captures.iter().find(|c| c.index == i))
+                    .map(|c| c.node);
+                let args_node = args_idx
+                    .and_then(|i| match_.captures.iter().find(|c| c.index == i))
+                    .map(|c| c.node);
 
-                let func_name = func_node
-                    .map(|n| node_text(n, source))
-                    .unwrap_or("unknown");
+                let func_name = func_node.map(|n| node_text(n, source)).unwrap_or("unknown");
 
                 // Find matching sink definition
-                let sink_def = known_sinks.iter().find(|s| s.function == func_name || s.function.ends_with(&format!("::{}", func_name)));
+                let sink_def = known_sinks.iter().find(|s| {
+                    s.function == func_name || s.function.ends_with(&format!("::{}", func_name))
+                });
 
                 if let Some(args) = args_node {
                     let path_arg_idx = sink_def.map(|s| s.path_arg_index).unwrap_or(0);
                     let (path_expr, vars) = extract_path_argument(args, source, path_arg_idx);
 
                     // Skip if this looks like safe validation is nearby
-                    let has_validation = check_nearby_validation(&validation_patterns, call_node, &vars);
+                    let has_validation =
+                        check_nearby_validation(&validation_patterns, call_node, &vars);
 
                     if !has_validation && !vars.is_empty() {
-                        let operation_type = sink_def.map(|s| s.operation_type).unwrap_or(FileOperationType::Open);
-                        let base_severity = sink_def.map(|s| s.severity).unwrap_or(Severity::Medium);
+                        let operation_type = sink_def
+                            .map(|s| s.operation_type)
+                            .unwrap_or(FileOperationType::Open);
+                        let base_severity =
+                            sink_def.map(|s| s.severity).unwrap_or(Severity::Medium);
 
-                        let (confidence, pattern) = analyze_path_expression(&path_expr, &vars, lang_name);
+                        let (confidence, pattern) =
+                            analyze_path_expression(&path_expr, &vars, lang_name);
 
                         // Adjust severity based on confidence
                         let severity = if confidence == Confidence::High {
@@ -1563,7 +1612,9 @@ fn find_path_traversal_vulnerabilities(
         if let Some(idx) = path_new_idx {
             if let Some(capture) = match_.captures.iter().find(|c| c.index == idx) {
                 let call_node = capture.node;
-                let args_node = args_idx.and_then(|i| match_.captures.iter().find(|c| c.index == i)).map(|c| c.node);
+                let args_node = args_idx
+                    .and_then(|i| match_.captures.iter().find(|c| c.index == i))
+                    .map(|c| c.node);
 
                 if let Some(args) = args_node {
                     let (path_expr, vars) = extract_path_argument(args, source, 0);
@@ -1636,7 +1687,11 @@ fn extract_code_snippet(source: &[u8], node: Node) -> Option<String> {
 }
 
 /// Extract the path argument from function call.
-fn extract_path_argument(args_node: Node, source: &[u8], arg_index: usize) -> (String, Vec<String>) {
+fn extract_path_argument(
+    args_node: Node,
+    source: &[u8],
+    arg_index: usize,
+) -> (String, Vec<String>) {
     let mut positional_args = Vec::new();
     let mut cursor = args_node.walk();
 
@@ -1674,7 +1729,10 @@ fn collect_variables_recursive(node: Node, source: &[u8], vars: &mut Vec<String>
     if node.kind() == "identifier" {
         let name = node_text(node, source).to_string();
         // Filter out common non-user-input identifiers
-        let ignore_list = ["True", "False", "None", "self", "cls", "os", "fs", "path", "shutil", "ioutil", "filepath", "std"];
+        let ignore_list = [
+            "True", "False", "None", "self", "cls", "os", "fs", "path", "shutil", "ioutil",
+            "filepath", "std",
+        ];
         if !ignore_list.contains(&name.as_str()) && !name.is_empty() {
             vars.push(name);
         }
@@ -1702,7 +1760,11 @@ fn looks_like_user_input(expr: &str, vars: &[String]) -> bool {
     }
 
     // Also flag if it's just a variable (not a literal)
-    if !vars.is_empty() && !expr.starts_with('"') && !expr.starts_with('\'') && !expr.starts_with('`') {
+    if !vars.is_empty()
+        && !expr.starts_with('"')
+        && !expr.starts_with('\'')
+        && !expr.starts_with('`')
+    {
         return true;
     }
 
@@ -1710,10 +1772,23 @@ fn looks_like_user_input(expr: &str, vars: &[String]) -> bool {
 }
 
 /// Analyze path expression to determine confidence and pattern.
-fn analyze_path_expression(expr: &str, vars: &[String], _lang: &str) -> (Confidence, VulnerablePattern) {
+fn analyze_path_expression(
+    expr: &str,
+    vars: &[String],
+    _lang: &str,
+) -> (Confidence, VulnerablePattern) {
     let suspicious = [
-        "request", "req", "params", "query", "body", "input",
-        "user", "filename", "file_name", "filepath", "file_path",
+        "request",
+        "req",
+        "params",
+        "query",
+        "body",
+        "input",
+        "user",
+        "filename",
+        "file_name",
+        "filepath",
+        "file_path",
     ];
 
     let lower = expr.to_lowercase();
@@ -1796,7 +1871,9 @@ fn find_validation_patterns(_tree: &Tree, source: &[u8], lang: &str) -> HashSet<
         }
         "c" | "cpp" => {
             // realpath + strncmp/strstr
-            if source_str.contains("realpath") && (source_str.contains("strncmp") || source_str.contains("strstr")) {
+            if source_str.contains("realpath")
+                && (source_str.contains("strncmp") || source_str.contains("strstr"))
+            {
                 validated_vars.insert("_validated_".to_string());
             }
             // basename
@@ -1811,7 +1888,11 @@ fn find_validation_patterns(_tree: &Tree, source: &[u8], lang: &str) -> HashSet<
 }
 
 /// Check if there's validation nearby for the given variables.
-fn check_nearby_validation(validation_patterns: &HashSet<String>, _node: Node, _vars: &[String]) -> bool {
+fn check_nearby_validation(
+    validation_patterns: &HashSet<String>,
+    _node: Node,
+    _vars: &[String],
+) -> bool {
     // If we detected validation patterns in the file, lower confidence
     // This is a heuristic - could be improved with actual data flow tracking
     !validation_patterns.is_empty()
@@ -1944,12 +2025,24 @@ fn generate_description(func_name: &str, pattern: &VulnerablePattern, vars: &[St
 }
 
 /// Generate remediation advice.
-fn generate_remediation(lang: &str, operation_type: FileOperationType, pattern: &VulnerablePattern) -> String {
+fn generate_remediation(
+    lang: &str,
+    operation_type: FileOperationType,
+    pattern: &VulnerablePattern,
+) -> String {
     let op_warning = match operation_type {
-        FileOperationType::Write | FileOperationType::Append => "WARNING: Write operation - attackers could overwrite critical files!",
-        FileOperationType::Delete => "CRITICAL: Delete operation - attackers could delete arbitrary files!",
-        FileOperationType::Read => "Attackers could read sensitive files like /etc/passwd or config files.",
-        FileOperationType::Copy | FileOperationType::Move => "Attackers could copy/move files to/from unintended locations.",
+        FileOperationType::Write | FileOperationType::Append => {
+            "WARNING: Write operation - attackers could overwrite critical files!"
+        }
+        FileOperationType::Delete => {
+            "CRITICAL: Delete operation - attackers could delete arbitrary files!"
+        }
+        FileOperationType::Read => {
+            "Attackers could read sensitive files like /etc/passwd or config files."
+        }
+        FileOperationType::Copy | FileOperationType::Move => {
+            "Attackers could copy/move files to/from unintended locations."
+        }
         _ => "Attackers could access files outside the intended directory.",
     };
 
@@ -2050,8 +2143,8 @@ def read_file(request):
         return f.read()
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_path_traversal(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_path_traversal(file.path(), Some("python")).expect("Scan should succeed");
 
         assert!(!findings.is_empty(), "Should detect open() with user input");
         let finding = &findings[0];
@@ -2071,8 +2164,8 @@ def download_file(user_filename):
         return f.read()
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_path_traversal(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_path_traversal(file.path(), Some("python")).expect("Scan should succeed");
 
         // Should flag os.path.join or the open()
         assert!(!findings.is_empty(), "Should detect path traversal risk");
@@ -2086,10 +2179,11 @@ def get_parent_config():
         return f.read()
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_path_traversal(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_path_traversal(file.path(), Some("python")).expect("Scan should succeed");
 
-        let traversal_finding = findings.iter()
+        let traversal_finding = findings
+            .iter()
             .find(|f| f.pattern == VulnerablePattern::HardcodedTraversal);
         assert!(traversal_finding.is_some(), "Should detect hardcoded '../'");
     }
@@ -2103,8 +2197,8 @@ def delete_user_folder(user_path):
     shutil.rmtree(user_path)  # Critical!
 "#;
         let file = create_temp_file(source, ".py");
-        let findings = scan_file_path_traversal(file.path(), Some("python"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_path_traversal(file.path(), Some("python")).expect("Scan should succeed");
 
         assert!(!findings.is_empty(), "Should detect shutil.rmtree");
         // Should be high/critical severity for delete operations
@@ -2127,10 +2221,13 @@ function readUserFile(req: Request) {
 }
 "#;
         let file = create_temp_file(source, ".ts");
-        let findings = scan_file_path_traversal(file.path(), Some("typescript"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_path_traversal(file.path(), Some("typescript")).expect("Scan should succeed");
 
-        assert!(!findings.is_empty(), "Should detect fs.readFileSync with user input");
+        assert!(
+            !findings.is_empty(),
+            "Should detect fs.readFileSync with user input"
+        );
     }
 
     #[test]
@@ -2145,10 +2242,13 @@ function getFile(userPath: string) {
 }
 "#;
         let file = create_temp_file(source, ".ts");
-        let findings = scan_file_path_traversal(file.path(), Some("typescript"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_path_traversal(file.path(), Some("typescript")).expect("Scan should succeed");
 
-        assert!(!findings.is_empty(), "Should detect path.join vulnerability");
+        assert!(
+            !findings.is_empty(),
+            "Should detect path.join vulnerability"
+        );
     }
 
     #[test]
@@ -2162,8 +2262,8 @@ function readConfig(userId: string) {
 }
 "#;
         let file = create_temp_file(source, ".ts");
-        let findings = scan_file_path_traversal(file.path(), Some("typescript"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_path_traversal(file.path(), Some("typescript")).expect("Scan should succeed");
 
         // May detect template literal interpolation
         if !findings.is_empty() {
@@ -2192,8 +2292,8 @@ func readFile(userPath string) ([]byte, error) {
 }
 "#;
         let file = create_temp_file(source, ".go");
-        let findings = scan_file_path_traversal(file.path(), Some("go"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_path_traversal(file.path(), Some("go")).expect("Scan should succeed");
 
         assert!(!findings.is_empty(), "Should detect os.Open with user path");
     }
@@ -2214,10 +2314,13 @@ func getFile(basePath, userInput string) ([]byte, error) {
 }
 "#;
         let file = create_temp_file(source, ".go");
-        let findings = scan_file_path_traversal(file.path(), Some("go"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_path_traversal(file.path(), Some("go")).expect("Scan should succeed");
 
-        assert!(!findings.is_empty(), "Should detect filepath.Join vulnerability");
+        assert!(
+            !findings.is_empty(),
+            "Should detect filepath.Join vulnerability"
+        );
     }
 
     // =========================================================================
@@ -2234,8 +2337,8 @@ fn read_user_file(user_path: &str) -> std::io::Result<String> {
 }
 "#;
         let file = create_temp_file(source, ".rs");
-        let findings = scan_file_path_traversal(file.path(), Some("rust"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_path_traversal(file.path(), Some("rust")).expect("Scan should succeed");
 
         // Note: Rust detection depends on tree-sitter-rust grammar
         // This test verifies the scan completes
@@ -2260,8 +2363,8 @@ void read_file(const char* user_path) {
 }
 "#;
         let file = create_temp_file(source, ".c");
-        let findings = scan_file_path_traversal(file.path(), Some("c"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_path_traversal(file.path(), Some("c")).expect("Scan should succeed");
 
         assert!(!findings.is_empty(), "Should detect fopen with user path");
         assert_eq!(findings[0].sink_function, "fopen");
@@ -2278,10 +2381,11 @@ void read_parent() {
 }
 "#;
         let file = create_temp_file(source, ".c");
-        let findings = scan_file_path_traversal(file.path(), Some("c"))
-            .expect("Scan should succeed");
+        let findings =
+            scan_file_path_traversal(file.path(), Some("c")).expect("Scan should succeed");
 
-        let traversal = findings.iter()
+        let traversal = findings
+            .iter()
             .find(|f| f.pattern == VulnerablePattern::HardcodedTraversal);
         assert!(traversal.is_some(), "Should detect hardcoded '../'");
     }
@@ -2313,21 +2417,38 @@ void read_parent() {
 
     #[test]
     fn test_vulnerable_pattern_display() {
-        assert_eq!(format!("{}", VulnerablePattern::UnsafePathJoin), "unsafe_path_join");
-        assert_eq!(format!("{}", VulnerablePattern::HardcodedTraversal), "hardcoded_traversal");
+        assert_eq!(
+            format!("{}", VulnerablePattern::UnsafePathJoin),
+            "unsafe_path_join"
+        );
+        assert_eq!(
+            format!("{}", VulnerablePattern::HardcodedTraversal),
+            "hardcoded_traversal"
+        );
     }
 
     #[test]
     fn test_looks_like_user_input() {
         assert!(looks_like_user_input("request.args.get('file')", &[]));
-        assert!(looks_like_user_input("user_filename", &["user_filename".to_string()]));
+        assert!(looks_like_user_input(
+            "user_filename",
+            &["user_filename".to_string()]
+        ));
         assert!(looks_like_user_input("filepath", &["filepath".to_string()]));
         assert!(!looks_like_user_input("\"static.txt\"", &[]));
     }
 
     #[test]
     fn test_get_file_sinks_coverage() {
-        let languages = ["python", "typescript", "javascript", "go", "rust", "c", "cpp"];
+        let languages = [
+            "python",
+            "typescript",
+            "javascript",
+            "go",
+            "rust",
+            "c",
+            "cpp",
+        ];
         for lang in languages {
             let sinks = get_file_sinks(lang);
             assert!(!sinks.is_empty(), "Should have sinks for {}", lang);

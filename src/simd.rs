@@ -154,11 +154,7 @@ pub fn sum_f32(data: &[f32]) -> f32 {
 /// ```
 #[inline]
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(
-        a.len(),
-        b.len(),
-        "dot_product requires equal-length slices"
-    );
+    debug_assert_eq!(a.len(), b.len(), "dot_product requires equal-length slices");
 
     let len = a.len().min(b.len());
     if len == 0 {

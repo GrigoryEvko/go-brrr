@@ -1041,19 +1041,17 @@ impl VectorIndex {
         let error_count = AtomicUsize::new(0);
         let first_error_key = AtomicUsize::new(0);
 
-        keys.par_iter()
-            .enumerate()
-            .for_each(|(i, key)| {
-                let start = i * dims;
-                let end = start + dims;
-                let vector = &vectors_flat[start..end];
+        keys.par_iter().enumerate().for_each(|(i, key)| {
+            let start = i * dims;
+            let end = start + dims;
+            let vector = &vectors_flat[start..end];
 
-                if let Err(_e) = self.inner.add(*key, vector) {
-                    if error_count.fetch_add(1, Ordering::Relaxed) == 0 {
-                        first_error_key.store(*key as usize, Ordering::Relaxed);
-                    }
+            if let Err(_e) = self.inner.add(*key, vector) {
+                if error_count.fetch_add(1, Ordering::Relaxed) == 0 {
+                    first_error_key.store(*key as usize, Ordering::Relaxed);
                 }
-            });
+            }
+        });
 
         let errors = error_count.load(Ordering::Relaxed);
         if errors > 0 {
@@ -1832,10 +1830,7 @@ impl VectorIndex {
     /// let results = view.search(&[0.1f32; 768], 10)?;
     /// # Ok::<(), anyhow::Error>(())
     /// ```
-    pub fn view_validated_safe(
-        path: impl AsRef<Path>,
-        config: IndexConfig,
-    ) -> Result<IndexView> {
+    pub fn view_validated_safe(path: impl AsRef<Path>, config: IndexConfig) -> Result<IndexView> {
         let view = Self::view_safe(&path)?;
 
         // Validate dimensions if config specifies them (0 means no validation)
@@ -3101,10 +3096,10 @@ mod tests {
         let distances = vec![0.0, 1.0, 4.0, 9.0];
         let scores = distances_to_scores_for_metric(&distances, Metric::L2Squared);
 
-        assert!((scores[0] - 1.0).abs() < 1e-6);       // 1 / (1 + 0) = 1.0
-        assert!((scores[1] - 0.5).abs() < 1e-6);       // 1 / (1 + 1) = 0.5
-        assert!((scores[2] - 0.2).abs() < 1e-6);       // 1 / (1 + 4) = 0.2
-        assert!((scores[3] - 0.1).abs() < 1e-6);       // 1 / (1 + 9) = 0.1
+        assert!((scores[0] - 1.0).abs() < 1e-6); // 1 / (1 + 0) = 1.0
+        assert!((scores[1] - 0.5).abs() < 1e-6); // 1 / (1 + 1) = 0.5
+        assert!((scores[2] - 0.2).abs() < 1e-6); // 1 / (1 + 4) = 0.2
+        assert!((scores[3] - 0.1).abs() < 1e-6); // 1 / (1 + 9) = 0.1
     }
 
     #[test]
@@ -3114,9 +3109,9 @@ mod tests {
         let scores = distances_to_scores_for_metric(&distances, Metric::L2Squared);
 
         // All should be small but positive
-        assert!(scores[0] > 0.0 && scores[0] < 0.02);  // 1/100 = 0.01
+        assert!(scores[0] > 0.0 && scores[0] < 0.02); // 1/100 = 0.01
         assert!(scores[1] > 0.0 && scores[1] < 0.002); // 1/1000 = 0.001
-        assert!(scores[2] > 0.0 && scores[2] < 0.0002);// 1/10000 = 0.0001
+        assert!(scores[2] > 0.0 && scores[2] < 0.0002); // 1/10000 = 0.0001
     }
 
     #[test]
@@ -4211,9 +4206,7 @@ mod tests {
         index.reserve(count).unwrap();
 
         let keys: Vec<u64> = (0..count as u64).collect();
-        let vectors: Vec<Vec<f32>> = (0..count)
-            .map(|_| vec![0.25, 0.25, 0.25, 0.25])
-            .collect();
+        let vectors: Vec<Vec<f32>> = (0..count).map(|_| vec![0.25, 0.25, 0.25, 0.25]).collect();
 
         index.add_batch(&keys, &vectors).unwrap();
         assert_eq!(index.len(), count);
@@ -4293,7 +4286,9 @@ mod tests {
     #[test]
     fn test_view_validated_safe_dimension_mismatch() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let path = temp_dir.path().join("test_view_validated_safe_mismatch.usearch");
+        let path = temp_dir
+            .path()
+            .join("test_view_validated_safe_mismatch.usearch");
 
         // Create and save an index with 4 dimensions
         let index = create_test_index();
@@ -4313,7 +4308,9 @@ mod tests {
     #[test]
     fn test_view_validated_safe_zero_dimension_skips_validation() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let path = temp_dir.path().join("test_view_validated_safe_zero.usearch");
+        let path = temp_dir
+            .path()
+            .join("test_view_validated_safe_zero.usearch");
 
         // Create and save an index with 4 dimensions
         let index = create_test_index();

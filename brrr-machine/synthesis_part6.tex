@@ -1,0 +1,1828 @@
+% Part VI: Effect Systems and Coeffects - Tracking Computational Behavior
+% This is a FRAGMENT - no \documentclass, \begin{document}, or \end{document}
+
+\part{Effect Systems and Coeffects---Tracking Computational Behavior}
+\label{part:effect-systems}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\chapter{Effects as First-Class Citizens}
+\label{ch:effects-first-class}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{pillarbox}[title={Foundational Papers}]
+\textbf{[Moggi91]} Notions of computation and monads.\\
+\textbf{[Plotkin03]} The semantics of algebraic effects.\\
+\textbf{[Plotkin09]} Handlers of algebraic effects.\\
+\textbf{[Leijen14]} Koka: programming with row polymorphic effect types.\\
+\textbf{[Leijen17]} Type directed compilation of row-typed algebraic effects.
+\end{pillarbox}
+
+Effects are central to the brrr-machine. An effect is anything a computation does besides returning a value. Types tell you what values exist; \textbf{effects tell you what happens}.
+
+%--------------------------------------------------
+\section{The Moggi Foundation}
+\label{sec:moggi-foundation}
+%--------------------------------------------------
+
+\begin{pillarbox}[title={Moggi's Key Insight (1991)}]
+Programs compute \textbf{computations}, not just \textbf{values}.
+
+A computation of type $T$ may:
+\begin{itemize}
+    \item Return a value of type $T$
+    \item Perform effects before returning
+    \item Never return (diverge)
+\end{itemize}
+\end{pillarbox}
+
+\begin{definition}[Monad]
+The \textbf{monad} captures this notion:
+\begin{align*}
+\mathsf{return} &: T \to M\,T && \text{(Pure value, no effect)} \\
+\mathsf{bind} &: M\,T \to (T \to M\,U) \to M\,U && \text{(Sequence computations)}
+\end{align*}
+subject to the monad laws:
+\begin{align*}
+\mathsf{return}\,a \bind f &= f\,a && \text{(Left identity)} \\
+m \bind \mathsf{return} &= m && \text{(Right identity)} \\
+(m \bind f) \bind g &= m \bind (\lambda x.\, f\,x \bind g) && \text{(Associativity)}
+\end{align*}
+\end{definition}
+
+\begin{definition}[Effects as Monads]
+Common effects have monadic interpretations:
+\begin{align*}
+\mathsf{State}\,S\,T &= S \to (T \times S) && \text{(Read/write state)} \\
+\mathsf{Error}\,E\,T &= T + E && \text{(May fail with error)} \\
+\mathsf{Writer}\,W\,T &= T \times W && \text{(Accumulate output)} \\
+\mathsf{Reader}\,R\,T &= R \to T && \text{(Read from environment)} \\
+\mathsf{IO}\,T &= \mathsf{World} \to (T \times \mathsf{World}) && \text{(External effects)} \\
+\mathsf{Cont}\,R\,T &= (T \to R) \to R && \text{(Continuations)}
+\end{align*}
+\end{definition}
+
+%--------------------------------------------------
+\section{Algebraic Effects}
+\label{sec:algebraic-effects}
+%--------------------------------------------------
+
+\begin{pillarbox}[title={Papers and Implementation}]
+\textbf{[Plotkin03]}, \textbf{[Plotkin09]} for theory.\\
+\textbf{[Sivaramakrishnan21]} for production implementation in Multicore OCaml.
+\end{pillarbox}
+
+\begin{pillarbox}[title={Plotkin's Contribution}]
+Monads are powerful but don't compose well.
+Algebraic effects separate \textbf{what} from \textbf{how}:
+\begin{itemize}
+    \item \textbf{Effect operations}: Abstract interface (what can happen)
+    \item \textbf{Effect handlers}: Concrete implementation (how it happens)
+\end{itemize}
+\end{pillarbox}
+
+\begin{pillarbox}[title={Production Implementation (Sivaramakrishnan et al.\ PLDI 2021)}]
+Multicore OCaml demonstrates that algebraic effects can be added to a production language with:
+\begin{itemize}
+    \item 1\% mean overhead for non-effect code (validated on 54 benchmarks)
+    \item Full DWARF debugging support (GDB, perf work correctly)
+    \item C FFI compatibility (with boundary limitations---see Section~\ref{sec:effect-handler-limitations})
+    \item Runtime-enforced continuation linearity (one-shot by default)
+\end{itemize}
+\end{pillarbox}
+
+\begin{definition}[Effect Signature]
+Effect signatures declare the operations an effect provides:
+\begin{align*}
+\mathbf{effect}\;\mathsf{State}(S) &\{\\
+    &\mathsf{get} : () \to S \\
+    &\mathsf{put} : S \to () \\
+\} \\[1ex]
+\mathbf{effect}\;\mathsf{Fail} &\{\\
+    &\mathsf{fail} : () \to \bot \\
+\} \\[1ex]
+\mathbf{effect}\;\mathsf{IO} &\{\\
+    &\mathsf{read} : () \to \mathsf{String} \\
+    &\mathsf{write} : \mathsf{String} \to () \\
+\}
+\end{align*}
+\end{definition}
+
+\begin{definition}[Effect Handler]
+Effect handlers give semantics to effect operations:
+\begin{align*}
+\mathbf{handler}\;\mathsf{state\_handler}(\mathit{init} : S) &\{ \\
+    &\mathsf{return}(x) \mapsto \lambda s.\,(x, s) \\
+    &\mathsf{get}((), k) \mapsto \lambda s.\,k(s)(s) && \text{($k$ is continuation)} \\
+    &\mathsf{put}(s', k) \mapsto \lambda s.\,k(())(s') \\
+\} \\[1ex]
+\mathbf{handler}\;\mathsf{maybe\_handler} &\{ \\
+    &\mathsf{return}(x) \mapsto \mathsf{Some}(x) \\
+    &\mathsf{fail}((), k) \mapsto \mathsf{None} && \text{(Don't invoke $k$)} \\
+\}
+\end{align*}
+\end{definition}
+
+\begin{pillarbox}[title={Why This Matters for Brrr-Machine}]
+\begin{enumerate}
+    \item \textbf{Every bug is an effect violation}:
+    \begin{itemize}
+        \item Use-after-free: $\ERead$ effect after $\mathsf{EFree}$ effect on same location
+        \item Race condition: Concurrent $\EWrite$ effects without synchronization
+        \item SQL injection: $\EIO$ effect (query) with tainted data
+    \end{itemize}
+    \item \textbf{Effect tracking enables}:
+    \begin{itemize}
+        \item Purity analysis (function has no effects)
+        \item Effect-based optimization (pure functions can be cached)
+        \item Cross-language boundary analysis (effect mismatch = risk)
+    \end{itemize}
+\end{enumerate}
+\end{pillarbox}
+
+%--------------------------------------------------
+\section{Row-Polymorphic Effects}
+\label{sec:row-polymorphic-effects}
+%--------------------------------------------------
+
+\begin{pillarbox}[title={Paper: \textbf{[Leijen14]}, \textbf{[Leijen17]}}]
+\end{pillarbox}
+
+\begin{pillarbox}[title={The Problem with Simple Effect Types}]
+Consider: $\mathsf{read\_file} : \mathsf{String} \to \EIO\,\mathsf{String}$
+
+This says ``$\mathsf{read\_file}$ has $\EIO$ effect'' but:
+\begin{itemize}
+    \item Can't compose with $\mathsf{State}$ functions
+    \item Can't be polymorphic over additional effects
+    \item Forces monomorphic effect typing
+\end{itemize}
+\end{pillarbox}
+
+\begin{definition}[Leijen's Solution: Row Polymorphism]
+Effect types are \textbf{rows}---unordered collections with a ``tail variable'':
+\[
+\mathsf{read\_file} : \mathsf{String} \to \langle \EIO \mid \varepsilon \rangle\,\mathsf{String}
+\]
+This says:
+\begin{itemize}
+    \item $\mathsf{read\_file}$ definitely has $\EIO$ effect
+    \item It may have other effects ($\varepsilon$ is the ``rest'')
+    \item Callers can instantiate $\varepsilon$ with their effects
+\end{itemize}
+\end{definition}
+
+\begin{definition}[Row Operations]
+\begin{align*}
+\text{Empty row:} \quad & \langle\rangle \\
+\text{Extend:} \quad & \rowext{E}{\rho} && \text{($E$ plus whatever is in $\rho$)} \\
+\text{Variable:} \quad & \varepsilon && \text{(Unknown effects)}
+\end{align*}
+\end{definition}
+
+\begin{definition}[Subtyping via Row Extension]
+If $f : T \to \rowext{E_1}{\varepsilon}\,U$ and we call $f$ in context with effects $\langle E_1, E_2 \rangle$, then $\varepsilon = \langle E_2 \rangle$ and the call has type $\langle E_1, E_2 \rangle$.
+\end{definition}
+
+\begin{definition}[Effect-Polymorphic Map]
+\[
+\mathsf{map} : \forall \alpha\,\beta\,\varepsilon.\; (\alpha \to \langle\varepsilon\rangle\,\beta) \to \mathsf{List}\,\alpha \to \langle\varepsilon\rangle\,\mathsf{List}\,\beta
+\]
+This map is effect-polymorphic:
+\begin{itemize}
+    \item $\mathsf{map}\;\mathsf{pure\_f}\;\mathit{xs}$ has no effects
+    \item $\mathsf{map}\;\mathsf{io\_f}\;\mathit{xs}$ has $\EIO$ effect
+    \item Effect inferred from the function argument
+\end{itemize}
+\end{definition}
+
+%--------------------------------------------------
+\section{F* Specification: Effect System}
+\label{sec:fstar-effect-system}
+%--------------------------------------------------
+
+The following F* specification formalizes the effect system described above. The key components are:
+\begin{enumerate}
+    \item \textbf{Effect kinds}: A comprehensive taxonomy of effects organized by category (memory, control, I/O, concurrency, channels, resources). Each constructor captures one primitive operation that has observable side effects.
+    \item \textbf{Effect rows}: Row-polymorphic effect types following Leijen's design, where effects are accumulated in extensible rows. The \texttt{RowVar} constructor enables effect polymorphism.
+    \item \textbf{Session types}: Following Honda 1998/2008, channel effects include session type operations (select, branch, delegate) for typed communication protocols.
+\end{enumerate}
+
+\begin{fstarcode}[title={Effect System for Brrr-Machine}]
+module BrrrMachine.Effects
+
+(* Effect kinds - The taxonomy of effects *)
+type effect_kind =
+  (* Memory effects *)
+  | ERead      : loc:abstract_loc -> effect_kind
+  | EWrite     : loc:abstract_loc -> effect_kind
+  | EAlloc     : effect_kind
+  | EFree      : loc:abstract_loc -> effect_kind
+  (* Control effects *)
+  | EDiverge   : effect_kind
+  | EThrow     : exn_type:string -> effect_kind
+  | ECatch     : exn_type:string -> effect_kind
+  (* I/O effects *)
+  | EInput     : source:io_source -> effect_kind
+  | EOutput    : sink:io_sink -> effect_kind
+  | EFileRead  : path:string -> effect_kind
+  | EFileWrite : path:string -> effect_kind
+  | ENetwork   : effect_kind
+  | ERandom    : effect_kind
+  | EClock     : effect_kind
+  (* Concurrency effects *)
+  | ESpawn     : effect_kind
+  | EJoin      : effect_kind
+  | ELock      : lock_id:nat -> effect_kind
+  | EUnlock    : lock_id:nat -> effect_kind
+  | ESend      : chan:nat -> payload_type:ir_type -> effect_kind
+  | ERecv      : chan:nat -> payload_type:ir_type -> effect_kind
+  | EAtomic    : effect_kind
+  (* Channel effects - Honda 1998/2008 session type operations *)
+  | EChanCreate : chan:nat -> elem_type:ir_type -> buffer_size:nat -> effect_kind
+  | EChanClose : chan:nat -> effect_kind
+  | ESelect    : chan:nat -> label:string -> effect_kind
+  | EBranch    : chan:nat -> labels:list string -> effect_kind
+  | EDelegate  : chan:nat -> delegated_chan:nat -> effect_kind
+  (* Resource effects *)
+  | EAcquire   : resource_type:string -> effect_kind
+  | ERelease   : resource_type:string -> effect_kind
+  | EUse       : resource_type:string -> effect_kind
+
+and io_source = Stdin | EnvVar of string | FileInput | NetworkInput | UserInput
+and io_sink = Stdout | Stderr | FileOutput | NetworkOutput | DatabaseOutput
+\end{fstarcode}
+
+\begin{fstarcode}[title={Effect Rows---Row-Polymorphic Effect Types (Leijen 2014, 2017)}]
+type effect_row =
+  | RowEmpty   : effect_row
+      (* <> - no effects *)
+  | RowExtend  : effect:effect_kind -> tail:effect_row -> effect_row
+      (* <E | rho> - effect E plus tail *)
+  | RowVar     : var:effect_var -> effect_row
+      (* epsilon - unknown effects *)
+
+and effect_var = nat  (* De Bruijn index or unique ID *)
+\end{fstarcode}
+
+\begin{pillarbox}[title={Critical: Effect Rows Allow Duplicate Labels (Leijen 2014)}]
+This is NOT a set! The following are DISTINCT:
+\begin{itemize}
+    \item $\langle \mathsf{exn} \mid \mu \rangle$ --- one exception effect
+    \item $\langle \mathsf{exn}, \mathsf{exn} \mid \mu \rangle$ --- TWO exception effects
+\end{itemize}
+
+Why this matters: Effect \textbf{handlers} consume labels one at a time. A single catch handler removes ONE $\mathsf{exn}$ from the row:
+\[
+\mathsf{catch} : \langle \mathsf{exn} \mid \varepsilon \rangle\,\tau \to (\mathsf{exn} \to \tau) \to \langle\varepsilon\rangle\,\tau
+\]
+
+If you have $\langle \mathsf{exn}, \mathsf{exn} \mid \mu \rangle$, after one catch you still have $\langle \mathsf{exn} \mid \mu \rangle$!
+\end{pillarbox}
+
+\begin{fstarcode}[title={Effect Elimination and Row Operations}]
+(* Effect elimination removes ONE instance *)
+val effect_handle : effect_kind -> effect_row -> option effect_row
+let rec effect_handle eff row =
+  match row with
+  | RowEmpty -> None  (* Effect not present *)
+  | RowExtend e tail ->
+      if e = eff then Some tail  (* Remove ONE instance *)
+      else
+        (match effect_handle eff tail with
+         | Some tail' -> Some (RowExtend e tail')
+         | None -> None)
+  | RowVar _ -> None  (* Can't remove from variable *)
+
+(* Effect row membership *)
+val row_contains : effect_row -> effect_kind -> bool
+let rec row_contains row eff =
+  match row with
+  | RowEmpty -> false
+  | RowExtend e tail -> e = eff || row_contains tail eff
+  | RowVar _ -> true  (* Conservative: assume present *)
+
+(* Effect row union *)
+val row_union : effect_row -> effect_row -> effect_row
+let rec row_union r1 r2 =
+  match r1 with
+  | RowEmpty -> r2
+  | RowExtend e tail -> RowExtend e (row_union tail r2)
+  | RowVar v -> RowVar v  (* Variable absorbs other row *)
+
+(* Effect row subsumption *)
+val row_subsumes : effect_row -> effect_row -> bool
+let rec row_subsumes larger smaller =
+  match smaller with
+  | RowEmpty -> true
+  | RowExtend e tail ->
+      row_contains larger e && row_subsumes larger tail
+  | RowVar _ -> true  (* Variable matches anything *)
+\end{fstarcode}
+
+The following F* code models session type semantics for channel effects. Key concepts:
+\begin{itemize}
+    \item \textbf{Channel linearity}: Each channel use consumes the current session type prefix
+    \item \textbf{Commutativity}: Operations on different channels commute (can be reordered)
+    \item \textbf{Delegation}: Transfers channel ownership to another endpoint (linear transfer)
+\end{itemize}
+\textit{Note}: \texttt{List.assoc\_opt} is a helper function (not standard F*) returning \texttt{Some v} if key found, \texttt{None} otherwise.
+
+\begin{fstarcode}[title={Channel Effect Composition Rules---Honda 1998/2008 Session Types}]
+(* Channel effects are LINEAR: each channel use must be accounted for exactly once.
+   This models session type linearity where each communication action consumes
+   the current type prefix and advances to the continuation. *)
+
+(* Channel effect commutativity:
+   ESend(k, T); ERecv(k', T') commutes if k <> k'
+   Operations on DIFFERENT channels are independent (parallel composition) *)
+val channel_effects_commute : effect_kind -> effect_kind -> bool
+let channel_effects_commute e1 e2 =
+  match e1, e2 with
+  | ESend k1 _, ESend k2 _ -> k1 <> k2
+  | ESend k1 _, ERecv k2 _ -> k1 <> k2
+  | ERecv k1 _, ESend k2 _ -> k1 <> k2
+  | ERecv k1 _, ERecv k2 _ -> k1 <> k2
+  | ESend k1 _, ESelect k2 _ -> k1 <> k2
+  | ESend k1 _, EBranch k2 _ -> k1 <> k2
+  | ERecv k1 _, ESelect k2 _ -> k1 <> k2
+  | ERecv k1 _, EBranch k2 _ -> k1 <> k2
+  | ESelect k1 _, ESelect k2 _ -> k1 <> k2
+  | ESelect k1 _, EBranch k2 _ -> k1 <> k2
+  | EBranch k1 _, EBranch k2 _ -> k1 <> k2
+  | EChanClose k1, EChanClose k2 -> k1 <> k2
+  | EChanClose k1, ESend k2 _ -> k1 <> k2
+  | EChanClose k1, ERecv k2 _ -> k1 <> k2
+  | _, _ -> true  (* Non-channel effects always commute with channel effects *)
+
+(* Channel linearity check:
+   A channel cannot be used after being closed.
+   Closing a channel CONSUMES it (linear resource). *)
+type channel_state =
+  | ChanOpen : elem_type:ir_type -> buffer_size:nat -> channel_state
+  | ChanClosed : channel_state
+
+type channel_context = list (nat * channel_state)
+
+val check_channel_linearity : channel_context -> effect_kind -> option channel_context
+let check_channel_linearity ctx eff =
+  match eff with
+  | EChanCreate k elem_ty buf_sz ->
+      if List.assoc_opt k ctx = None then
+        Some ((k, ChanOpen elem_ty buf_sz) :: ctx)
+      else None  (* Channel already exists *)
+  | ESend k _ | ERecv k _ | ESelect k _ | EBranch k _ ->
+      (match List.assoc_opt k ctx with
+       | Some (ChanOpen _ _) -> Some ctx  (* Channel is open, use allowed *)
+       | _ -> None)  (* Channel closed or doesn't exist *)
+  | EChanClose k ->
+      (match List.assoc_opt k ctx with
+       | Some (ChanOpen _ _) ->
+           Some (List.map (fun (k', s) ->
+             if k' = k then (k', ChanClosed) else (k', s)) ctx)
+       | _ -> None)  (* Already closed or doesn't exist *)
+  | EDelegate k delegated_k ->
+      (* Delegation transfers ownership: delegated channel must be open,
+         becomes unavailable in current context (transferred to receiver) *)
+      (match List.assoc_opt k ctx, List.assoc_opt delegated_k ctx with
+       | Some (ChanOpen _ _), Some (ChanOpen _ _) ->
+           Some (List.filter (fun (k', _) -> k' <> delegated_k) ctx)
+       | _, _ -> None)
+  | _ -> Some ctx  (* Non-channel effect doesn't affect channel context *)
+\end{fstarcode}
+
+\begin{definition}[Channel Effect Typing Rules (Row-Polymorphic Style)]
+\begin{gather*}
+\frac{}{\Gamma \vdash \mathsf{chan\_create}\langle T, n\rangle() : \mathsf{Chan}\langle T\rangle \;\&\; \langle \mathsf{EChanCreate}(k, T, n) \mid \varepsilon \rangle}
+\tag{Chan-Create} \\[2ex]
+\frac{\Gamma \vdash \mathit{ch} : \mathsf{Chan}\langle T\rangle \quad \Gamma \vdash v : T}{\Gamma \vdash \mathit{ch}.\mathsf{send}(v) : () \;\&\; \langle \mathsf{ESend}(k, T) \mid \varepsilon \rangle}
+\tag{Chan-Send} \\[2ex]
+\frac{\Gamma \vdash \mathit{ch} : \mathsf{Chan}\langle T\rangle}{\Gamma \vdash \mathit{ch}.\mathsf{recv}() : T \;\&\; \langle \mathsf{ERecv}(k, T) \mid \varepsilon \rangle}
+\tag{Chan-Recv} \\[2ex]
+\frac{\Gamma \vdash \mathit{ch} : \mathsf{Chan}\langle T\rangle}{\Gamma \vdash \mathit{ch}.\mathsf{close}() : () \;\&\; \langle \mathsf{EChanClose}(k) \mid \varepsilon \rangle}
+\tag{Chan-Close} \\[2ex]
+\frac{\Gamma \vdash \mathit{ch} : \mathsf{Chan}\langle T\rangle \quad l \in \{l_1, \ldots, l_n\}}{\Gamma \vdash \mathit{ch}.\mathsf{select}(l) : () \;\&\; \langle \mathsf{ESelect}(k, l) \mid \varepsilon \rangle}
+\tag{Chan-Select} \\[2ex]
+\frac{\Gamma \vdash \mathit{ch} : \mathsf{Chan}\langle T\rangle \quad \Gamma, x:l_i \vdash e_i : U \;\&\; \langle\varepsilon_i\rangle \;\text{for each}\; i}{\Gamma \vdash \mathit{ch}.\mathsf{branch}\{l_1 \Rightarrow e_1, \ldots, l_n \Rightarrow e_n\} : U \;\&\; \langle \mathsf{EBranch}(k, \{l_1,\ldots,l_n\}) \mid \varepsilon_1 \sqcup \cdots \sqcup \varepsilon_n \rangle}
+\tag{Chan-Branch} \\[2ex]
+\frac{\Gamma \vdash \mathit{ch} : \mathsf{Chan}\langle S\rangle \quad \Gamma \vdash \mathit{delegated\_ch} : \mathsf{Chan}\langle T\rangle}{\Gamma \vdash \mathit{ch}.\mathsf{delegate}(\mathit{delegated\_ch}) : () \;\&\; \langle \mathsf{EDelegate}(k, k') \mid \varepsilon \rangle}
+\tag{Delegate}
+\end{gather*}
+Note: In Delegate, $\mathit{delegated\_ch}$ is consumed---linear ownership transfer.
+\end{definition}
+
+\begin{fstarcode}[title={Effect Signatures---For Functions and Procedures}]
+type effect_signature = {
+  (* Effect row for this function *)
+  effects : effect_row;
+  (* Specific categories for quick checks *)
+  may_read : bool;
+  may_write : bool;
+  may_alloc : bool;
+  may_free : bool;
+  may_throw : bool;
+  may_diverge : bool;
+  may_io : bool;
+  may_spawn : bool;
+  (* Channel effects - Honda 1998/2008 session operations *)
+  may_send : bool;
+  may_recv : bool;
+  may_create_chan : bool;
+  may_close_chan : bool;
+  may_select : bool;
+  may_branch : bool;
+  may_delegate : bool;
+  (* Channel context: maps channel IDs to their current session types *)
+  channel_types : list (nat * local_session_type);
+  is_pure : bool;  (* No effects at all *)
+}
+
+let empty_effect_sig : effect_signature = {
+  effects = RowEmpty;
+  may_read = false; may_write = false;
+  may_alloc = false; may_free = false;
+  may_throw = false; may_diverge = false;
+  may_io = false; may_spawn = false;
+  may_send = false; may_recv = false;
+  may_create_chan = false; may_close_chan = false;
+  may_select = false; may_branch = false;
+  may_delegate = false;
+  channel_types = [];
+  is_pure = true;
+}
+\end{fstarcode}
+
+\begin{fstarcode}[title={Effect Trace---Runtime Effect Sequence}]
+type effect_event = {
+  kind : effect_kind;
+  location : node_id;
+  timestamp : nat;
+  thread : option nat;
+}
+
+type effect_trace = list effect_event
+\end{fstarcode}
+
+\begin{fstarcode}[title={Happens-Before Relation (Simplified for Effect Traces)}]
+(* Source: Lamport 1978 (basic), extended per Batty 2011 (C11 memory model)
+
+   This is a SIMPLIFIED version for effect_event analysis.
+   For the FULL C11 memory model with consume semantics, release sequences,
+   and coherence axioms, see Section 6.5.2 happens_before_c11. *)
+
+val happens_before : effect_event -> effect_event -> bool
+let happens_before e1 e2 =
+  (* Case 1: Sequenced-before (same thread program order) *)
+  (e1.thread = e2.thread && e1.timestamp < e2.timestamp) ||
+  (* Case 2: Synchronizes-with (cross-thread via release/acquire) *)
+  (is_release e1 && is_acquire e2 && synchronizes e1 e2) ||
+  (* Case 3: Dependency-ordered-before (consume semantics) *)
+  (is_release e1 && is_consume e2 && synchronizes e1 e2)
+
+(* Helper: Check if effect has release semantics *)
+val is_release : effect_event -> bool
+let is_release e =
+  match e.kind with
+  | EUnlock _ -> true       (* Mutex unlock has release semantics *)
+  | EAtomic -> true         (* Conservative: treat atomics as release *)
+  | ESend _ -> true         (* Channel send has release semantics *)
+  | _ -> false
+
+(* Helper: Check if effect has acquire semantics *)
+val is_acquire : effect_event -> bool
+let is_acquire e =
+  match e.kind with
+  | ELock _ -> true         (* Mutex lock has acquire semantics *)
+  | EAtomic -> true         (* Conservative: treat atomics as acquire *)
+  | ERecv _ -> true         (* Channel receive has acquire semantics *)
+  | _ -> false
+
+(* Helper: Check if two events synchronize *)
+val synchronizes : effect_event -> effect_event -> bool
+let synchronizes e1 e2 =
+  match e1.kind, e2.kind with
+  | EUnlock l1, ELock l2 -> l1 = l2       (* Unlock/Lock on same mutex *)
+  | ESend c1, ERecv c2 -> c1 = c2         (* Send/Recv on same channel *)
+  | _, EJoin -> true                      (* Thread join synchronizes *)
+  | EAtomic, EAtomic -> true              (* Atomic operations may synchronize *)
+  | _ -> false
+\end{fstarcode}
+
+\begin{fstarcode}[title={Effect-Based Bug Detection}]
+type effect_violation =
+  | UseAfterFree : loc:abstract_loc -> free_site:node_id -> use_site:node_id
+                   -> effect_violation
+  | DoubleFree : loc:abstract_loc -> first_free:node_id -> second_free:node_id
+                 -> effect_violation
+  | DataRace : loc:abstract_loc -> access1:effect_event -> access2:effect_event
+               -> effect_violation
+  | Deadlock : locks:list nat -> threads:list nat -> effect_violation
+  | ResourceLeak : resource:string -> acquire_site:node_id -> effect_violation
+  | UnhandledEffect : effect:effect_kind -> site:node_id -> effect_violation
+
+(* Detect violations in effect trace *)
+val detect_violations : effect_trace -> list effect_violation
+let detect_violations trace =
+  let violations = ref [] in
+  (* Track memory state *)
+  let freed : set abstract_loc ref = ref Set.empty in
+  List.iter (fun event ->
+    match event.kind with
+    | EFree loc ->
+        if Set.mem loc !freed then
+          violations := DoubleFree loc event.location event.location :: !violations;
+        freed := Set.add loc !freed
+    | ERead loc | EWrite loc ->
+        if Set.mem loc !freed then
+          violations := UseAfterFree loc 0 event.location :: !violations
+    | _ -> ()
+  ) trace;
+  (* Detect data races *)
+  let pairs = all_pairs trace in
+  List.iter (fun (e1, e2) ->
+    if same_location e1 e2 &&
+       (is_write e1 || is_write e2) &&
+       not (happens_before e1 e2) &&
+       not (happens_before e2 e1) then
+      violations := DataRace (get_loc e1) e1 e2 :: !violations
+  ) pairs;
+  !violations
+\end{fstarcode}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\chapter{Effect Handler Limitations}
+\label{ch:effect-handler-limitations}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{pillarbox}[title={Critical Limitations of Algebraic Effect Handlers (\textbf{[Plotkin09]}, \textbf{[Sivaramakrishnan21]})}]
+Plotkin--Pretnar 2009 proves that effect handlers are \textbf{homomorphisms} from free algebraic models. This has important consequences:
+
+\begin{enumerate}
+\item \textbf{Continuations are NOT algebraic}
+\[
+\mathsf{call/cc} : ((a \to b) \to a) \to a
+\]
+Problem: Captured continuation escapes the handler scope. The homomorphism property does NOT hold.
+
+\item \textbf{Parallel composition CANNOT be handled}
+\[
+\mathsf{parallel} : m\,a \to m\,b \to m\,(a \times b)
+\]
+Problem: Requires BINARY handler (handling two computations). Plotkin--Pretnar: ``it seems that parallel cannot be [implemented]''
+
+\item \textbf{C FFI boundaries BLOCK effect propagation} (Sivaramakrishnan 2021)
+
+Effects CANNOT propagate across C stack frames!
+\begin{center}
+OCaml (handler) $\to$ C function $\to$ OCaml (perform effect)
+\end{center}
+The C frames don't know about effect handlers. An effect performed in the inner OCaml code cannot be handled by the outer OCaml handler. This is a \textbf{fundamental limitation} of retrofitting effects onto existing languages with C FFI.
+\end{enumerate}
+
+\textbf{Consequence}: Use different mechanisms for these effects:
+\begin{itemize}
+    \item Continuations: Delimited control operators (shift/reset)
+    \item Parallelism: Concurrency model with explicit threads
+    \item Cross-FFI: Exception-style handling only (no continuation capture)
+\end{itemize}
+\end{pillarbox}
+
+\begin{fstarcode}[title={Effect Handler Correctness Criterion}]
+(* A handler is CORRECT iff it preserves the equations of the effect theory.
+   This is the key condition from Plotkin-Pretnar 2009. *)
+
+type effect_equation = {
+  lhs : effect_term;
+  rhs : effect_term;
+}
+
+type effect_theory = {
+  signature : effect_signature;
+  equations : list effect_equation;
+}
+
+val handler_correct : #e:effect_theory -> #m:Type -> handler e.signature m -> bool
+let handler_correct #e #m h =
+  (* Handler must preserve ALL equations *)
+  List.for_all (fun eq ->
+    interpret_with_handler h eq.lhs == interpret_with_handler h eq.rhs
+  ) e.equations
+\end{fstarcode}
+
+\begin{fstarcode}[title={Effects That Are NOT Algebraic---Do Not Model as Handlers}]
+(* WRONG: Trying to model call/cc as an effect
+   This DOES NOT WORK because the continuation (cont b) can escape
+   the handler scope, violating the homomorphism property. *)
+
+(* CORRECT: Model call/cc with delimited control *)
+type delimited_control =
+  | Shift : ((a -> answer) -> answer) -> delimited_control
+  | Reset : (() -> answer) -> answer -> delimited_control
+
+(* WRONG: Trying to handle parallel composition
+   Can't handle TWO computations at once! *)
+
+(* CORRECT: Model parallelism with explicit concurrency *)
+type concurrent_effect =
+  | Spawn : (() -> unit) -> thread_id -> concurrent_effect
+  | Join : thread_id -> unit -> concurrent_effect
+  | Yield : unit -> concurrent_effect
+\end{fstarcode}
+
+\begin{fstarcode}[title={What CAN Be Modeled as Algebraic Effects (Safe to Use Handlers)}]
+(* State: get/put - ALGEBRAIC *)
+type state_eff (s:Type) =
+  | Get : s
+  | Put : s -> unit
+
+(* Exceptions: raise - ALGEBRAIC (arity 0, no continuation) *)
+type exception_eff (e:Type) =
+  | Raise : e -> 'a
+
+(* Nondeterminism: fail/choose - ALGEBRAIC *)
+type nondet_eff =
+  | Fail : 'a
+  | Choose : unit -> bool
+
+(* Reader: ask - ALGEBRAIC *)
+type reader_eff (r:Type) =
+  | Ask : r
+
+(* Writer: tell - ALGEBRAIC *)
+type writer_eff (w:Type) =
+  | Tell : w -> unit
+
+(* SUMMARY: Effect handlers work for sequential, single-continuation effects.
+   For parallelism and first-class continuations, use other mechanisms. *)
+\end{fstarcode}
+
+%--------------------------------------------------
+\section{Production Effect Handler Implementation}
+\label{sec:production-effect-handlers}
+%--------------------------------------------------
+
+\begin{pillarbox}[title={Paper: Sivaramakrishnan, Dolan, White, Kelly, Jaffer, Madhavapeddy --- PLDI 2021}]
+\end{pillarbox}
+
+\begin{pillarbox}[title={Fiber-Based Effect Handler Implementation}]
+\textbf{Key Insight}: Separate OCaml frames into ``fibers''---heap-allocated stack segments that can be captured and resumed independently.
+
+\begin{center}
+\begin{tabular}{cc}
+\textbf{Traditional Stack} & \textbf{Multicore OCaml} \\
+\begin{tabular}[t]{|c|}
+\hline
+C frames \\
+\hline
+OCaml frames \\
+\hline
+C frames \\
+\hline
+OCaml frames \\
+\hline
+\end{tabular}
+&
+\begin{tabular}[t]{|c|}
+\hline
+Fiber Stack (one per handler) \\
+\quad OCaml frames \quad \\
+\hline
+C stack (unchanged) \\
+\hline
+\end{tabular}
+\end{tabular}
+\end{center}
+
+\textbf{Fiber Operations}:
+\begin{enumerate}
+    \item Handler installation = Allocate new fiber (8KB default)
+    \item Effect perform = Capture fiber state as continuation
+    \item Continue = Restore fiber and resume execution
+    \item Discontinue = Restore and raise exception in captured context
+\end{enumerate}
+
+\textbf{Stack Overflow Checking (Red Zone Technique)}:
+Every function checks: $\mathit{sp} < \mathit{fiber\_end} + \mathit{red\_zone\_size}$ (16 words).
+If true: grow fiber stack ($2\times$) or signal overflow.
+Trade-off: 19\% text section size increase for 1\% runtime overhead.
+
+\textbf{Continuation Linearity (Runtime Enforced)}:
+Continuations are ONE-SHOT by default. Resuming a captured continuation twice = runtime error.
+Trade-off: Runtime check vs compile-time linear types.
+
+\textbf{Performance Characteristics}:
+\begin{itemize}
+    \item Mean overhead (no effects): 1\%
+    \item Median overhead: $<$5\% for 32/54 benchmarks
+    \item Worst case overhead: $\sim$15\% (allocation-heavy code)
+    \item Text section size increase: 19\% (with 16-word red zone)
+    \item Exception handling: No measurable change
+    \item External C calls: No measurable change
+\end{itemize}
+\end{pillarbox}
+
+\begin{fstarcode}[title={Fiber-Based Effect Handler Model}]
+module BrrrMachine.Effects.FiberImplementation
+
+(* Fiber: heap-allocated stack segment for effect handlers *)
+type fiber_id = nat
+
+type fiber = {
+  id : fiber_id;
+  frames : list stack_frame;
+  stack_size : nat;
+  stack_capacity : nat;  (* Default 1024 words = 8KB *)
+  handler : option handler_closure;
+  parent : option fiber_id;
+}
+
+type handler_clause =
+  | ReturnClause : (value -> computation) -> handler_clause
+  | EffectClause : effect_label:string -> (value -> continuation -> computation)
+                   -> handler_clause
+  | ExceptionClause : exn_label:string -> (value -> computation) -> handler_clause
+
+type handler_closure = {
+  clauses : list handler_clause;
+}
+
+(* Continuation: captured fiber state (linear by default) *)
+type continuation_state = | Fresh | Resumed | Finalized
+
+type continuation = {
+  captured_fiber : fiber;
+  captured_handlers : list handler_closure;
+  state : ref continuation_state;  (* Runtime linearity tracking *)
+}
+
+(* CRITICAL: C FFI boundary detection *)
+type stack_segment =
+  | OCamlSegment : fiber_id -> stack_segment
+  | CSegment : list c_frame -> stack_segment
+
+type mixed_stack = list stack_segment
+
+(* Effects CANNOT cross C segments *)
+val effect_can_reach_handler : effect_label:string -> mixed_stack -> bool
+let rec effect_can_reach_handler label stack =
+  match stack with
+  | [] -> false
+  | OCamlSegment fid :: rest ->
+      if fiber_handles_effect fid label then true
+      else effect_can_reach_handler label rest
+  | CSegment _ :: _ ->
+      (* C frames BLOCK effect propagation! *)
+      false
+
+(* Continue with linearity check *)
+val continue_checked : continuation -> value -> result computation string
+let continue_checked k v =
+  match !(k.state) with
+  | Fresh ->
+      k.state := Resumed;
+      Ok (resume_fiber k.captured_fiber v)
+  | Resumed ->
+      Error "Continuation already resumed (linearity violation)"
+  | Finalized ->
+      Error "Continuation was finalized by GC"
+\end{fstarcode}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\chapter{C11/C++ Memory Model}
+\label{ch:c11-memory-model}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{pillarbox}[title={C11/C++ Memory Model Formalization}]
+\textbf{Primary Source}: \textbf{[Batty11]} --- ``Mathematizing C++ Concurrency''\\
+\textbf{Foundational}: \textbf{[Boehm08]} --- ``Foundations of the C++ Concurrency Memory Model''
+
+\textbf{Relationship}: Boehm 2008 defines the C++ memory model informally and proves the DRF-SC theorem. Batty 2011 provides the \textbf{rigorous mathematical formalization} we use here. Both papers are essential:
+\begin{itemize}
+    \item Boehm 2008: Conceptual foundation, race definitions, SC-DRF theorem
+    \item Batty 2011: Formal execution model, coherence axioms, proof framework
+\end{itemize}
+
+\textbf{Key Insight}: Concurrent program semantics require \textbf{execution-based} models, not just sequential effect traces. The C11 memory model defines:
+\begin{enumerate}
+    \item Memory orderings (relaxed to sequentially consistent)
+    \item Execution witnesses (reads-from, modification order)
+    \item Happens-before relation with release/acquire synchronization
+    \item Coherence axioms ensuring per-location consistency
+\end{enumerate}
+
+\textbf{Race Definitions} (Boehm 2008 terminology):
+\begin{itemize}
+    \item \textbf{Type 1 Race}: Conflicting actions adjacent in a total interleaving order (used in operational/interleaving semantics)
+    \item \textbf{Type 2 Race}: Conflicting data accesses unordered by happens-before (used in axiomatic/execution-based semantics)
+\end{itemize}
+\textbf{Theorem 8.1--8.2} (Boehm): Type 1 and Type 2 races are \textbf{equivalent} for programs without undefined behavior from other sources.
+
+\textbf{Integration with Effect System}:
+\begin{itemize}
+    \item $\EAtomic$ effect kind is REPLACED by memory-order-parameterized atomics
+    \item Effect traces are EXTENDED to execution witnesses
+    \item Happens-before is EXTENDED with consume/dependency
+\end{itemize}
+\end{pillarbox}
+
+\begin{pillarbox}[title={Critical Limitation: Thin-Air Problem in Relaxed Atomics}]
+The C11 axiomatic model (Batty 2011) permits ``out-of-thin-air'' values in programs using relaxed atomics. This is a \textbf{soundness bug} that violates:
+\begin{itemize}
+    \item Basic invariant reasoning (cannot prove $x=y=0$ is maintained)
+    \item DRF-SC guarantees (race-free programs may behave non-SC)
+    \item Type safety (Java-like languages cannot guarantee type-correct values)
+\end{itemize}
+
+\textbf{Litmus Test (LBd---Thin Air)}:
+\begin{center}
+Initial: $x = y = 0$ (relaxed atomics)\\
+Thread 1: $a := x;\; y := a;$\\
+Thread 2: $x := y;$\\[1ex]
+Outcome $a=1$: \textbf{IMPOSSIBLE} (no source) but \textbf{ALLOWED} by C11 axiomatic model!
+\end{center}
+
+\textbf{Safe Subset}: Use ONLY release/acquire synchronization (no relaxed atomics) to avoid thin-air issues.
+
+\textbf{Recommended}: For sound relaxed atomic reasoning, use Promising Semantics 2.0 (\textbf{[Lee20]}) formalized in Section~\ref{sec:promising-semantics}.
+
+\textbf{References}:
+\begin{itemize}
+    \item \textbf{[Kang17]}: ``A Promising Semantics for Relaxed-Memory Concurrency''
+    \item \textbf{[Lee20]}: ``Promising 2.0'' (enables global opts, fixes ARMv8)
+    \item \textbf{[Podkopaev19]}: IMM intermediate model
+    \item \textbf{[Vafeiadis15]}: ``Common Compiler Optimisations are Invalid in C11''
+    \item \textbf{[Batty11]}: ``Mathematizing C++ Concurrency''
+\end{itemize}
+\end{pillarbox}
+
+%--------------------------------------------------
+\section{Memory Orderings and Actions}
+\label{sec:memory-orderings}
+%--------------------------------------------------
+
+\begin{fstarcode}[title={C11 Memory Orderings (Batty et al.\ 2011, Section 2)}]
+module BrrrMachine.Effects.C11MemoryModel
+
+(* Memory order enumeration
+   Partial ordering: seq_cst > acq_rel > acquire/release > consume > relaxed *)
+type memory_order =
+  | MO_relaxed     (* No ordering constraints - only atomicity guaranteed *)
+  | MO_consume     (* Data dependency ordering - weaker than acquire *)
+  | MO_acquire     (* Acquire semantics - synchronizes with release *)
+  | MO_release     (* Release semantics - synchronizes with acquire *)
+  | MO_acq_rel     (* Both acquire and release - for read-modify-write *)
+  | MO_seq_cst     (* Sequentially consistent - total order of all SC ops *)
+
+(* Memory ordering strength comparison *)
+val mo_stronger : memory_order -> memory_order -> bool
+let mo_stronger mo1 mo2 =
+  match mo1, mo2 with
+  | MO_seq_cst, _ -> true
+  | _, MO_seq_cst -> false
+  | MO_acq_rel, (MO_acquire | MO_release | MO_consume | MO_relaxed) -> true
+  | (MO_acquire | MO_release | MO_consume | MO_relaxed), MO_acq_rel -> false
+  | MO_acquire, (MO_consume | MO_relaxed) -> true
+  | MO_release, (MO_consume | MO_relaxed) -> true
+  | (MO_consume | MO_relaxed), MO_acquire -> false
+  | (MO_consume | MO_relaxed), MO_release -> false
+  | MO_consume, MO_relaxed -> true
+  | MO_relaxed, MO_consume -> false
+  | MO_acquire, MO_release -> false  (* Incomparable *)
+  | MO_release, MO_acquire -> false  (* Incomparable *)
+  | mo1, mo2 -> mo1 = mo2
+
+(* Check if ordering provides acquire/release/consume semantics *)
+val is_acquire : memory_order -> bool
+let is_acquire mo = match mo with
+  | MO_acquire | MO_acq_rel | MO_seq_cst -> true | _ -> false
+
+val is_release : memory_order -> bool
+let is_release mo = match mo with
+  | MO_release | MO_acq_rel | MO_seq_cst -> true | _ -> false
+
+val is_consume : memory_order -> bool
+let is_consume mo = match mo with
+  | MO_consume | MO_acquire | MO_acq_rel | MO_seq_cst -> true | _ -> false
+\end{fstarcode}
+
+\begin{fstarcode}[title={Memory Action Types (Batty et al.\ 2011, Figure 1)}]
+type action_id = nat
+type thread_id = nat
+type location = abstract_loc
+type value = int
+type mutex_id = nat
+
+type memory_action =
+  (* Non-atomic memory operations - subject to data race UB *)
+  | Rna : loc:location -> val_read:value -> memory_action
+  | Wna : loc:location -> val_written:value -> memory_action
+
+  (* Atomic memory operations - race-free by construction *)
+  | R : loc:location -> mo:memory_order -> val_read:value -> memory_action
+  | W : loc:location -> mo:memory_order -> val_written:value -> memory_action
+  | RMW : loc:location -> mo:memory_order -> val_read:value -> val_written:value
+          -> memory_action
+
+  (* Fence operations *)
+  | Fence : mo:memory_order -> memory_action
+
+  (* Lock operations - implicit acquire/release semantics *)
+  | Lock : mutex:mutex_id -> memory_action
+  | Unlock : mutex:mutex_id -> memory_action
+
+(* Helper functions *)
+val action_location : memory_action -> option location
+val action_memory_order : memory_action -> option memory_order
+val is_write : memory_action -> bool
+val is_read : memory_action -> bool
+val is_atomic_action : memory_action -> bool
+val same_location : memory_action -> memory_action -> bool
+\end{fstarcode}
+
+%--------------------------------------------------
+\section{Execution Witnesses and Candidate Executions}
+\label{sec:execution-witnesses}
+%--------------------------------------------------
+
+\begin{fstarcode}[title={Execution Witness Structure (Batty et al.\ 2011, Section 3)}]
+type relation (a : Type) = a -> a -> bool
+
+(* The witness contains relations NOT determined by program text *)
+type execution_witness = {
+  (* Reads-from: maps each read action to the write it reads from *)
+  reads_from : map action_id action_id;
+
+  (* Modification order: per-location total order of all writes *)
+  modification_order : map location (list action_id);
+
+  (* SC order: total order of all sequentially consistent operations *)
+  sc_order : list action_id;
+}
+
+(* Candidate execution combines actions, relations, and witness *)
+type candidate_execution = {
+  actions : set memory_action;
+  action_ids : map memory_action action_id;
+  id_to_action : map action_id memory_action;
+  thread_of : map action_id thread_id;
+  sequenced_before : relation action_id;
+  additional_synchronized_with : relation action_id;
+  data_dependency : relation action_id;
+  witness : execution_witness;
+}
+\end{fstarcode}
+
+\begin{fstarcode}[title={Synchronizes-With Relation (Batty 2011 Section 3.2)}]
+val synchronizes_with : candidate_execution -> action_id -> action_id -> bool
+let synchronizes_with exec a b =
+  match get_action exec a, get_action exec b with
+  | Some act_a, Some act_b ->
+      (* Case 1: Release write synchronizes with acquire read via release sequence *)
+      (is_write act_a && is_release (Option.get (action_memory_order act_a)) &&
+       is_read act_b && is_acquire (Option.get (action_memory_order act_b)) &&
+       reads_from_release_sequence exec b a) ||
+
+      (* Case 2: Release fence synchronizes with acquire fence *)
+      (match act_a, act_b with
+       | Fence mo_a, Fence mo_b -> is_release mo_a && is_acquire mo_b &&
+           fence_synchronizes exec a b
+       | _, _ -> false) ||
+
+      (* Case 3: Unlock synchronizes with subsequent lock on same mutex *)
+      (match act_a, act_b with
+       | Unlock m1, Lock m2 -> m1 = m2 && unlock_before_lock exec a b
+       | _, _ -> false) ||
+
+      (* Case 4: Additional synchronization from thread operations *)
+      exec.additional_synchronized_with a b
+  | _, _ -> false
+\end{fstarcode}
+
+\begin{fstarcode}[title={Happens-Before Relation (Extended C11 Semantics)}]
+(* This EXTENDS the simple happens_before with full C11 semantics.
+   Happens-before is the transitive closure of:
+   1. Sequenced-before (program order within thread)
+   2. Synchronizes-with (cross-thread via release/acquire)
+   3. Dependency-ordered-before (consume semantics) *)
+
+val happens_before_c11 : candidate_execution -> action_id -> action_id -> bool
+let rec happens_before_c11 exec a b =
+  exec.sequenced_before a b ||
+  synchronizes_with exec a b ||
+  dependency_ordered_before exec a b ||
+  Set.exists (fun c ->
+    happens_before_c11 exec a c && happens_before_c11 exec c b
+  ) (all_action_ids exec)
+\end{fstarcode}
+
+%--------------------------------------------------
+\section{Release Sequences}
+\label{sec:release-sequences}
+%--------------------------------------------------
+
+\begin{definition}[Release Sequence (Batty 2011 Section 3.2)]
+A release sequence headed by a release write $A$ consists of:
+\begin{itemize}
+    \item $A$ itself
+    \item Subsequent writes to the same location by the same thread
+    \item RMW operations that read from the sequence
+\end{itemize}
+This enables lock-free algorithms to work correctly by allowing synchronization to ``chain'' through multiple atomic operations.
+\end{definition}
+
+\begin{fstarcode}[title={Release Sequence Membership}]
+val in_release_sequence_batty : candidate_execution -> action_id -> action_id -> bool
+let rec in_release_sequence_batty exec head action =
+  match get_action exec head with
+  | None -> false
+  | Some head_act ->
+      if not (is_release_write head_act) then false
+      else if not (same_location_id exec head action) then false
+      else
+        (* Case 1: action IS the head *)
+        action = head ||
+        (* Case 2: Same thread, sequenced after, and is a write *)
+        (same_thread exec head action &&
+         exec.sequenced_before head action &&
+         (match get_action exec action with
+          | Some act -> is_write act | None -> false)) ||
+        (* Case 3: RMW that reads from something in the sequence *)
+        (match get_action exec action with
+         | Some act when is_rmw act ->
+             (match Map.find action exec.witness.reads_from with
+              | Some prev_write -> in_release_sequence_batty exec head prev_write
+              | None -> false)
+         | _ -> false)
+\end{fstarcode}
+
+\begin{theorem}[Release Sequence RMW Extension]
+If $A$ is in the release sequence of $H$, and $B$ reads from $A$, and $B$ is an RMW, then $B$ is also in the release sequence of $H$.
+\end{theorem}
+
+%--------------------------------------------------
+\section{Coherence Axioms}
+\label{sec:coherence-axioms}
+%--------------------------------------------------
+
+\begin{pillarbox}[title={Coherence Axioms (Batty 2011 Section 4)}]
+These four axioms ensure per-location consistency between the happens-before relation and the modification order. They are the key soundness requirements for the C11 memory model.
+
+\textbf{Intuition}: Even though different threads may observe writes in different orders (relaxed atomics), the four coherence axioms guarantee that:
+\begin{itemize}
+    \item Causally related observations are consistent
+    \item No thread observes ``time travel'' (reading older values after newer)
+\end{itemize}
+\end{pillarbox}
+
+\begin{definition}[CoRR: Coherent Read-Read]
+If two reads are ordered by happens-before and both read from writes to the same location, the later read cannot see an earlier write (in modification order) than the earlier read saw.
+
+\textit{Intuition}: If I see value $V$, then anyone who observes my read (via happens-before) cannot see a value from before $V$.
+\end{definition}
+
+\begin{definition}[CoWR: Coherent Write-Read]
+A read cannot observe a write that happens-after the read.
+
+\textit{Intuition}: You cannot read from the future.
+\end{definition}
+
+\begin{definition}[CoWW: Coherent Write-Write]
+If two writes are ordered by happens-before, they must be in the same order in the modification order.
+
+\textit{Intuition}: Causality is respected in the write history.
+\end{definition}
+
+\begin{definition}[CoRW: Coherent Read-Write (Acyclicity)]
+The combined relation $(\mathit{hb} \cup \mathit{rf} \cup \mathit{mo} \cup \mathit{rb})$ must be acyclic, where $\mathit{rb}$ (reads-before) $= \mathit{mo} \mathbin{;} \mathit{rf}^{-1}$.
+
+This prevents causal cycles that would make the execution internally inconsistent.
+\end{definition}
+
+\begin{fstarcode}[title={Coherence Implementation}]
+val coherent_read_read_batty : candidate_execution -> bool
+val coherent_write_read_batty : candidate_execution -> bool
+val coherent_write_write_batty : candidate_execution -> bool
+val coherent_read_write_batty : candidate_execution -> bool
+
+val is_coherent_batty : candidate_execution -> bool
+let is_coherent_batty exec =
+  coherent_read_read_batty exec &&
+  coherent_write_read_batty exec &&
+  coherent_write_write_batty exec &&
+  coherent_read_write_batty exec
+\end{fstarcode}
+
+\begin{theorem}[Coherence Implies Per-Location SC]
+Under coherence, each individual location behaves as if accessed sequentially consistently, even if the overall execution is not SC.
+\end{theorem}
+
+%--------------------------------------------------
+\section{Data Race Detection}
+\label{sec:data-race-detection}
+%--------------------------------------------------
+
+\begin{definition}[Data Race (Batty 2011 Section 2.3)]
+A \textbf{data race} is the fundamental source of undefined behavior in C11. Two memory operations \textbf{race} if they:
+\begin{enumerate}
+    \item Access the same location
+    \item At least one is a write
+    \item At least one is non-atomic
+    \item They are not ordered by happens-before
+\end{enumerate}
+
+\textbf{Key Insight}: If a program has NO data races under SC semantics, then ALL its behaviors are sequentially consistent (DRF-SC guarantee).
+\end{definition}
+
+\begin{definition}[Conflict Relation]
+Two actions \textbf{conflict} if they access the same location and at least one is a write. This is a necessary but not sufficient condition for a data race.
+\end{definition}
+
+\begin{fstarcode}[title={Data Race Predicate}]
+val is_data_race_batty : candidate_execution -> action_id -> action_id -> bool
+let is_data_race_batty exec a b =
+  match get_action exec a, get_action exec b with
+  | Some act_a, Some act_b ->
+      conflicts act_a act_b &&
+      not (both_atomic act_a act_b) &&
+      not (happens_before_c11 exec a b) &&
+      not (happens_before_c11 exec b a)
+  | _, _ -> false
+
+val no_data_races_batty : candidate_execution -> bool
+let no_data_races_batty exec =
+  Set.for_all (fun a ->
+    Set.for_all (fun b ->
+      not (is_data_race_batty exec a b)
+    ) (all_action_ids exec)
+  ) (all_action_ids exec)
+\end{fstarcode}
+
+\begin{definition}[Unsequenced Race (C-specific)]
+In addition to data races, C has ``unsequenced races''---conflicting accesses within a \textbf{single expression} that are unsequenced. Example: \texttt{i = i++} has unsequenced race on \texttt{i}.
+\end{definition}
+
+\begin{definition}[Undefined Behavior Detection]
+A program has undefined behavior if ANY consistent execution has:
+\begin{itemize}
+    \item A data race, OR
+    \item An unsequenced race, OR
+    \item An indeterminate read
+\end{itemize}
+\end{definition}
+
+%--------------------------------------------------
+\section{Sequential Consistency and SC-DRF}
+\label{sec:sc-drf}
+%--------------------------------------------------
+
+\begin{pillarbox}[title={Sequential Consistency for Data-Race-Free Programs (Batty 2011 Section 5, Boehm--Adve 2008)}]
+The DRF-SC (Data Race Freedom implies Sequential Consistency) theorem is the \textbf{fundamental guarantee} of the C11 memory model.
+
+\textbf{Informal Statement}: If your program has no data races when run with SC semantics, then all its behaviors under C11 will also be SC.
+
+This allows programmers to reason about correctly synchronized code using the simple SC model, while the compiler/hardware can still optimize based on the relaxed C11 model.
+\end{pillarbox}
+
+\begin{definition}[Sequentially Consistent Execution]
+An execution is SC if there exists a total order of all memory accesses that:
+\begin{enumerate}
+    \item Respects program order (sequenced-before)
+    \item Each read sees the most recent write in the total order
+\end{enumerate}
+\end{definition}
+
+\begin{definition}[DRF Program]
+A program is DRF (Data Race Free) if, when executed under SC semantics, no execution has a data race.
+\end{definition}
+
+\begin{theorem}[DRF-SC Theorem (Main Result)]
+\textbf{The fundamental guarantee of the C11 memory model.}
+
+If a program has no data races under SC semantics, then:
+\begin{enumerate}
+    \item All its C11-consistent executions are also SC, OR
+    \item All its C11-consistent executions have the same observable behavior as some SC execution.
+\end{enumerate}
+\end{theorem}
+
+\begin{fstarcode}[title={DRF-SC Theorem Specification}]
+val drf_sc_theorem :
+  is_program_execution:(candidate_execution -> bool) ->
+  Lemma (requires is_drf_program is_program_execution)
+        (ensures forall exec.
+           is_program_execution exec && is_consistent exec ==>
+           exists sc_exec. is_sc_execution sc_exec &&
+                          same_observable_behavior exec sc_exec)
+\end{fstarcode}
+
+\begin{corollary}[Safe Concurrent Programming Model]
+For DRF programs, programmers can reason using simple SC semantics, even though the implementation uses relaxed memory.
+\end{corollary}
+
+%--------------------------------------------------
+\section{Promising Semantics 2.0 for Sound Relaxed Atomics}
+\label{sec:promising-semantics}
+%--------------------------------------------------
+
+\begin{pillarbox}[title={Promising Semantics 2.0 for Relaxed-Memory Concurrency}]
+\textbf{Sources}:
+\begin{itemize}
+    \item \textbf{[Kang17]}: ``A Promising Semantics for Relaxed-Memory Concurrency''
+    \item \textbf{[Lee20]}: ``Promising 2.0: Global Optimizations in Relaxed Memory''
+\end{itemize}
+Coq Development: \url{http://sf.snu.ac.kr/promise-concurrency} ($\sim$30K lines)
+
+\textbf{Why This Is Needed}: The C11 axiomatic model has a fundamental flaw: it permits ``out-of-thin-air'' values in programs using relaxed atomics. The Promising Semantics provides an \textbf{operational model} that:
+\begin{enumerate}
+    \item \textbf{Prevents} thin-air values via thread-local certification
+    \item \textbf{Validates} all standard compiler optimizations
+    \item \textbf{Proves} correct compilation to x86-TSO, ARMv8, and POWER
+    \item \textbf{Preserves} DRF-SC and other key theorems
+\end{enumerate}
+
+\textbf{PS 2.0 Improvements} (Lee et al.\ PLDI 2020):
+\begin{itemize}
+    \item Enables global value-range analysis soundness
+    \item Enables register promotion for single-threaded locations
+    \item Fixes ARMv8 compilation (no extra fence for relaxed RMWs)
+    \item Replaces universal quantification with \textbf{capped memory} construction
+\end{itemize}
+
+\textbf{Key Insight}: Use \textbf{operational semantics} (step-by-step execution) with a \textbf{promise mechanism}, rather than \textbf{axiomatic} (check complete graphs). Promises commit to future writes but must be \textbf{certified}---the thread must be able to fulfill the promise against \textbf{capped memory} (PS 2.0), not all futures.
+\end{pillarbox}
+
+\begin{fstarcode}[title={Timestamps, Views, and Messages}]
+module BrrrMachine.PromisingSemanticsTyped
+
+(* Timestamps for totally ordering writes per location *)
+type timestamp = nat
+
+(* Views track which messages a thread has observed *)
+type timemap = location -> timestamp
+type view = { v_pln : timemap; v_rlx : timemap; }
+
+(* Messages represent writes to memory with timestamp intervals *)
+type message = {
+  msg_loc  : location;
+  msg_val  : value;
+  msg_from : timestamp;  (* Exclusive lower bound *)
+  msg_to   : timestamp;  (* Inclusive upper bound = "real" timestamp *)
+  msg_view : view;       (* Release view attached to message *)
+}
+
+(* Memory is a set of pairwise disjoint messages *)
+type memory = set message
+\end{fstarcode}
+
+\begin{fstarcode}[title={Capped Memory Construction (PS 2.0---Lee et al.\ PLDI 2020)}]
+(* The key innovation of PS 2.0: replace universal quantification over ALL
+   future memories with quantification over CAPPED memories. Capped memory
+   represents realistic interference patterns without over-approximation.
+
+   Construction:
+   1. Add RESERVATIONS in gaps between consecutive messages (blocks promises)
+   2. Add CAP MESSAGES at end of each location's chain (unless promised)
+
+   This enables GLOBAL optimizations (value-range, register promotion) that
+   were unsound under original PS. *)
+
+val capped_memory : memory -> set message -> memory
+let capped_memory mem promises =
+  let promised_ends = Set.filter (fun m ->
+    match max_timestamp_message mem m.msg_loc with
+    | Some m_max -> m.msg_from = m_max.msg_to
+    | None -> false) promises in
+  let cap_locs = Set.diff (all_locations mem)
+                          (Set.map (fun m -> m.msg_loc) promised_ends) in
+  Set.union mem (Set.map (cap_message mem) cap_locs)
+\end{fstarcode}
+
+\begin{pillarbox}[title={Thread-Local Certification (PS 2.0)}]
+\textbf{The Key Innovation}: A promise is only allowed if thread-local certification succeeds against \textbf{capped memory} (not all futures).
+
+\textbf{Original PS} (Kang 2017): Certify against ALL future memories
+\begin{itemize}
+    \item Too conservative: blocks valid global optimizations
+    \item Problem: future could contain impossible values
+\end{itemize}
+
+\textbf{PS 2.0} (Lee 2020): Certify against CAPPED memory only
+\begin{itemize}
+    \item Capped memory bounds realistic interference
+    \item Enables value-range analysis and register promotion
+    \item Fixes ARMv8 compilation issue
+\end{itemize}
+
+\textbf{Definition}: Thread configuration is \textbf{consistent} iff thread can fulfill ALL its promises against capped memory.
+
+\textbf{Why Certification Prevents Thin-Air} (LBd Example):
+\begin{enumerate}
+    \item T1 attempts to promise $y := 1$
+    \item Certification: T1 must execute alone to fulfill promise
+    \item T1 reads $x$: only value available is 0 (initial)
+    \item T1 computes $y := a$ where $a = 0$
+    \item T1 would write $y := 0$, not $y := 1$
+    \item Certification \textbf{fails}---promise rejected
+    \item Result: $a = 1$ is \textbf{forbidden} (correct!)
+\end{enumerate}
+\end{pillarbox}
+
+\begin{theorem}[No Thin-Air Values]
+Under Promising Semantics, if value $v \neq 0$ is readable at location $\mathit{loc}$, then some thread wrote it with justified certification.
+\end{theorem}
+
+\begin{theorem}[DRF-SC for Promise-Free Machine]
+If all reachable states under promise-free execution are race-free, then full machine equals promise-free machine (behaviors identical).
+\end{theorem}
+
+\begin{theorem}[Release-Acquire Programs Are Safe]
+Programs using only release/acquire synchronization have no thin-air values.
+\end{theorem}
+
+\begin{theorem}[Well-Locked Programs Are SC]
+If a program is well-locked and SC-reachable states have no races on normal locations, then full machine equals SC machine.
+\end{theorem}
+
+\begin{theorem}[Compiler Optimizations Sound]
+All standard optimizations that preserve sequential traces are sound under Promising Semantics.
+\end{theorem}
+
+\begin{theorem}[Compilation Correctness]
+Promising behaviors are subset of hardware behaviors for x86-TSO, POWER, and ARMv8 (PS 2.0 fixes ARMv8---no extra fence for relaxed RMWs).
+\end{theorem}
+
+\begin{theorem}[Value-Range Analysis Soundness (PS 2.0)]
+Sound value-range analysis ensures all thread states and messages satisfy the analysis in reachable states.
+\end{theorem}
+
+\begin{theorem}[Register Promotion Soundness (PS 2.0)]
+For single-threaded locations, register promotion preserves Promising behaviors.
+\end{theorem}
+
+%--------------------------------------------------
+\section{Cross-Reference Summary for Memory Models}
+\label{sec:memory-model-xref}
+%--------------------------------------------------
+
+\begin{longtable}{|p{3.5cm}|p{10cm}|}
+\hline
+\textbf{Model/Section} & \textbf{Description} \\
+\hline
+\endhead
+Section 6.5.1--6.5.6 (C11 Axiomatic) & Memory orderings, execution witnesses, coherence axioms. \textbf{Limitation}: Allows thin-air values with relaxed atomics. \textbf{Safe for}: release/acquire only programs. \\
+\hline
+Section 6.5.7 (Promising 2.0) & Operational model with promise mechanism. Thread-local certification prevents thin-air. PS 2.0: Capped memory enables global optimizations. \textbf{Safe for}: all programs including relaxed atomics. \\
+\hline
+Section 12.26 (C11 Theorems) & DRF-SC theorem (valid), Release-acquire soundness (valid), Thin-air warning (critical). \\
+\hline
+\multicolumn{2}{|l|}{\textbf{When to Use Which Model (Updated for PS 2.0):}} \\
+\hline
+Release/acquire only & C11 axiomatic is sufficient \\
+Relaxed atomics present & Use PS 2.0 (not original PS) \\
+Global optimizations needed & MUST use PS 2.0 \\
+Register promotion analysis & MUST use PS 2.0 \\
+ARMv8 compilation verification & MUST use PS 2.0 \\
+\hline
+\end{longtable}
+
+%--------------------------------------------------
+\section{IMM: Intermediate Memory Model for Compilation Proofs}
+\label{sec:imm}
+%--------------------------------------------------
+
+\begin{pillarbox}[title={IMM---Intermediate Memory Model (\textbf{[Podkopaev19]})}]
+\textbf{Source}: Podkopaev, Lahav, Vafeiadis. POPL 2019. ``Bridging the Gap between Programming Languages and Hardware Weak Memory Models''
+
+Coq Development: \url{http://plv.mpi-sws.org/imm/} ($\sim$33K lines)
+
+\textbf{Purpose}: IMM serves as a \textbf{common target} for source language memory models and a \textbf{common source} for hardware models, reducing proof complexity:
+
+\begin{center}
+\begin{tikzpicture}[node distance=1.5cm, every node/.style={font=\small}]
+\node (src) [draw, rectangle, align=center] {Source Models\\(C11, PS 2.0)};
+\node (imm) [draw, rectangle, right=1.8cm of src] {IMM};
+\node (hw) [draw, rectangle, align=center, right=1.8cm of imm] {Hardware\\(x86, ARM, POWER)};
+\draw[->] (src) -- (imm);
+\draw[->] (imm) -- (hw);
+\end{tikzpicture}
+\end{center}
+
+Proof Burden WITHOUT IMM: $O(n \times m)$---each source to each hardware
+
+Proof Burden WITH IMM: $O(n + m)$---source$\to$IMM + IMM$\to$hardware
+
+\textbf{Key Result}: First \textbf{mechanized} compilation correctness proofs for models weaker than x86-TSO. Corrects error in Kang 2017 POWER proof.
+\end{pillarbox}
+
+\begin{fstarcode}[title={IMM Execution Graph and Consistency}]
+module BrrrMachine.IMM
+
+type event_label =
+  | LRead : loc:location -> val:value -> mode:read_mode -> event_label
+  | LWrite : loc:location -> val:value -> mode:write_mode -> event_label
+  | LFence : mode:fence_mode -> event_label
+  | LInit : loc:location -> event_label
+
+type execution_graph = {
+  events : set event_id;
+  lab : event_id -> event_label;
+  po : relation event_id;      (* Program order *)
+  rf : relation event_id;      (* Reads-from *)
+  mo : relation event_id;      (* Modification order *)
+  data : relation event_id;    (* Data dependency *)
+  addr : relation event_id;    (* Address dependency *)
+  ctrl : relation event_id;    (* Control dependency *)
+  rmw : relation event_id;     (* RMW pairing *)
+}
+
+(* The main acyclicity relation *)
+val ar : execution_graph -> relation event_id
+let ar g = union_all [rfe g; bob g; ppo g; detour g; fre g; coe g]
+
+val imm_consistent : execution_graph -> bool
+let imm_consistent g =
+  wf_execution g &&
+  complete_execution g &&
+  coherent g &&
+  atomic_rmw g &&
+  acyclic (ar g) &&
+  acyclic (union (ar g) g.rf)
+\end{fstarcode}
+
+\begin{pillarbox}[title={Critical Discovery: ARMv8/RISC-V Exclusive Ops}]
+ARMv8/RISC-V exclusive ops are \textbf{weaker} than POWER/ARMv7!
+
+Solution: IMM distinguishes ``strong'' and ``normal'' RMW compilation.
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Hardware} & \textbf{RMW Strength} & \textbf{Notes} \\
+\midrule
+x86-TSO & Strong & LOCK prefix is strong \\
+POWER & Strong & LWARX/STWCX is strong \\
+ARMv7 & Strong & LDREX/STREX is strong \\
+ARMv8 & \textbf{Normal} & LDXR/STXR is WEAKER---needs barrier! \\
+RISC-V & \textbf{Normal} & LR/SC is WEAKER---needs barrier! \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Warning}: Promising RMWs must compile to ``strong'' IMM RMWs with extra barrier on ARMv8/RISC-V.
+\end{pillarbox}
+
+{\small
+\begin{longtable}{|l|l|l|l|l|}
+\hline
+\textbf{Source} & \textbf{x86-TSO} & \textbf{ARMv8} & \textbf{POWER} & \textbf{RISC-V} \\
+\hline
+\endhead
+rlx read & MOV & LDR & LD & LW \\
+rlx write & MOV & STR & ST & SW \\
+acq read & MOV & LDAR & LD;CMPW;BC;ISYNC & LW;FENCE R,RW \\
+rel write & MOV & STLR & LWSYNC;ST & FENCE RW,W;SW \\
+sc read & MOV & LDAR;DMB ISH & SYNC;LD & ... \\
+RMW (strong) & LOCK CMPXCHG & LDXR;STXR;DMB & LWARX;STWCX & LR;SC;FENCE \\
+RMW (normal) & LOCK CMPXCHG & LDXR;STXR & LWARX;STWCX & LR;SC \\
+\hline
+\end{longtable}
+}
+
+\begin{theorem}[IMM Compilation Correctness]
+\begin{enumerate}
+    \item IMM $\to$ Hardware: For all hardware targets, IMM-consistent executions compile to hardware-consistent executions.
+    \item Promising $\to$ IMM: Promising behaviors have corresponding IMM-consistent graphs.
+    \item C11 $\to$ IMM: C11-consistent executions are IMM-consistent.
+    \item End-to-End: Promising $\to$ Hardware via IMM.
+\end{enumerate}
+\end{theorem}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\chapter{Coeffect Systems: Context Requirements}
+\label{ch:coeffects}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{pillarbox}[title={Paper: \textbf{[Petricek14]}---Petricek, Orchard, Mycroft, ICFP 2014}]
+\end{pillarbox}
+
+\begin{pillarbox}[title={Effect/Coeffect Duality---Two Sides of the Same Coin}]
+\begin{center}
+\begin{tabular}{ll}
+\textbf{Effects (Section 6.1)} & \textbf{Coeffects (This Section)} \\
+\hline
+What computation \textbf{produces} & What computation \textbf{requires} \\
+Monadic structure ($T^\varepsilon\,A$) & Comonadic structure ($D^r\,A$) \\
+Effect rows: $\langle E \mid \varepsilon \rangle$ & Coeffect annotations: $\Gamma @ r$ \\
+Examples: $\EWrite$, $\EThrow{}$, $\EIO$ & Examples: liveness, usage, capabilities \\
+$\mathsf{return} : A \to M^\varepsilon\,A$ & $\mathsf{extract} : D^r\,A \to A$ \\
+\end{tabular}
+\end{center}
+
+\textbf{Typing with Both}:
+\[
+\Gamma @ r \vdash e : \tau \;\&\; \varepsilon
+\]
+``Under context $\Gamma$ with requirements $r$, $e$ has type $\tau$ and effects $\varepsilon$''
+
+\textbf{Why This Matters for Brrr-Machine}:
+\begin{enumerate}
+    \item Effects tell us what code \textbf{does} (mutations, I/O, exceptions)
+    \item Coeffects tell us what code \textbf{needs} (liveness, resources, capabilities)
+    \item Complete analysis requires \textbf{both} for full specification
+\end{enumerate}
+\end{pillarbox}
+
+%--------------------------------------------------
+\section{Flat vs Structural Coeffects}
+\label{sec:flat-structural-coeffects}
+%--------------------------------------------------
+
+\begin{definition}[Flat Coeffects---Whole-Context Properties]
+\textbf{Shape}: Single coeffect value for entire context.
+
+\textbf{Example}: $\Gamma @ \{\mathsf{network}, \mathsf{gps}\} \vdash e : \tau$
+
+\textbf{Meaning}: Expression $e$ requires network AND GPS capabilities.
+
+\textbf{Use cases}:
+\begin{itemize}
+    \item Platform/capability requirements
+    \item Resource access requirements (files, database)
+    \item Runtime feature detection
+    \item Cross-platform compatibility checking
+\end{itemize}
+\end{definition}
+
+\begin{definition}[Structural Coeffects---Per-Variable Properties]
+\textbf{Shape}: Coeffect annotation per variable in context.
+
+\textbf{Example}: $(x:\mathsf{Int} @ 2, y:\mathsf{Bool} @ 1) \vdash e : \tau$
+
+\textbf{Meaning}: Expression $e$ uses $x$ twice and $y$ once (bounded linear logic).
+
+\textbf{Use cases}:
+\begin{itemize}
+    \item Liveness analysis (is variable accessed?)
+    \item Usage counting (how many times is variable used?)
+    \item Dataflow dependencies (which past values needed?)
+    \item Linear resource management
+\end{itemize}
+\end{definition}
+
+\begin{definition}[Coeffect Algebraic Structure]
+Both shapes use:
+\begin{align*}
++ \text{ (addition)} &: \text{Sequencing---using both contexts} \\
+\times \text{ (multiplication)} &: \text{Nesting---context for inner computation} \\
+\sqcap \text{ (meet)} &: \text{Branching---required by at least one branch} \\
+1 \text{ (unit)} &: \text{Empty requirement} \\
+0 \text{ (zero)} &: \text{Unused (for structural coeffects)}
+\end{align*}
+\end{definition}
+
+%--------------------------------------------------
+\section{Liveness as a Structural Coeffect}
+\label{sec:liveness-coeffect}
+%--------------------------------------------------
+
+\begin{pillarbox}[title={Liveness Analysis via Coeffects}]
+Liveness is naturally a \textbf{coeffect}: it describes which variables a computation \textbf{requires} from its context.
+\end{pillarbox}
+
+\begin{definition}[Liveness Coeffect Algebra (Semiring Structure)]
+$L = \{ \mathsf{LDead}, \mathsf{LLive} \}$
+
+\begin{align*}
+\mathsf{LDead} + \mathsf{LDead} &= \mathsf{LDead} && \text{(neither uses $\to$ not used)} \\
+\mathsf{LDead} + \mathsf{LLive} &= \mathsf{LLive} && \text{(one uses $\to$ used)} \\
+\mathsf{LLive} + \mathsf{LLive} &= \mathsf{LLive} && \text{(both use $\to$ used)} \\[1ex]
+\mathsf{LDead} \times \_ &= \mathsf{LDead} && \text{(not used in outer $\to$ dead)} \\
+\mathsf{LLive} \times l &= l && \text{(used in outer $\to$ propagate inner)} \\[1ex]
+\mathsf{LDead} \sqcap \mathsf{LDead} &= \mathsf{LDead} && \text{(dead in both branches $\to$ dead)} \\
+\_ \sqcap \_ &= \mathsf{LLive} && \text{(live in either branch $\to$ live)}
+\end{align*}
+\end{definition}
+
+\begin{pillarbox}[title={Connection to IFDS}]
+Liveness is a GEN/KILL problem, hence IFDS-applicable. Coeffect formulation provides:
+\begin{enumerate}
+    \item Compositionality via semiring structure
+    \item Typing guarantee: well-typed = correct liveness
+    \item Connection to linear logic via usage bounds
+\end{enumerate}
+\end{pillarbox}
+
+\begin{definition}[Liveness Inference Rules]
+\begin{align*}
+\text{VAR:} \quad & x \text{ is live at } (x:\tau @ \mathsf{LLive}) \\
+\text{APP:} \quad & f\,e \text{ has liveness } (\mathsf{liveness}(f) + \mathsf{liveness}(e)) \\
+\text{LAMBDA:} \quad & \lambda x.\,e \text{ has liveness } (\mathsf{liveness}(e) \setminus x) \\
+\text{IF:} \quad & \mathbf{if}\;c\;\mathbf{then}\;t\;\mathbf{else}\;e \text{ has liveness } (c + (t \sqcap e))
+\end{align*}
+\end{definition}
+
+%--------------------------------------------------
+\section{Usage Coeffects and Linear Types}
+\label{sec:usage-coeffects}
+%--------------------------------------------------
+
+\begin{definition}[Bounded Linear Types via Coeffects (Petricek 2014, Section 2.1)]
+Track how many times each variable is used:
+\begin{align*}
+\mathsf{UZero} &: \text{Never used} \\
+\mathsf{UOne} &: \text{Used exactly once} \\
+\mathsf{UBounded}\,n &: \text{Used at most } n \text{ times} \\
+\mathsf{UMany} &: \text{Used arbitrarily many times}
+\end{align*}
+\end{definition}
+
+\begin{definition}[Usage Coefficient Algebra]
+\begin{align*}
+\mathsf{UZero} + u &= u \\
+\mathsf{UOne} + \mathsf{UOne} &= \mathsf{UBounded}\,2 \\
+\mathsf{UBounded}\,n + \mathsf{UBounded}\,m &= \mathsf{UBounded}\,(n + m) \\
+\mathsf{UMany} + \_ &= \mathsf{UMany} \\[1ex]
+\mathsf{UZero} \times \_ &= \mathsf{UZero} \\
+\mathsf{UOne} \times u &= u \\
+\mathsf{UBounded}\,n \times \mathsf{UBounded}\,m &= \mathsf{UBounded}\,(n \times m)
+\end{align*}
+\end{definition}
+
+\begin{pillarbox}[title={Connection to Ownership}]
+Rust-style ownership maps to usage coeffects:
+\begin{center}
+\begin{tabular}{ll}
+Move semantics & usage $\leq 1$ (affine) \\
+Borrow semantics & usage $\geq 0$ (unrestricted reads) \\
+Mut borrow & usage $= 1$ (linear) \\
+\end{tabular}
+\end{center}
+
+The semiring structure gives composition:
+\begin{itemize}
+    \item $x$ moved $+ x$ moved $=$ error (usage $> 1$ violates affine)
+    \item $x$ borrowed $+ x$ borrowed $=$ ok (unrestricted composes)
+\end{itemize}
+\end{pillarbox}
+
+%--------------------------------------------------
+\section{Platform Capability Coeffects}
+\label{sec:capability-coeffects}
+%--------------------------------------------------
+
+\begin{definition}[Flat Coeffects for Cross-Platform Analysis]
+Track which platform capabilities code requires:
+\begin{align*}
+\mathsf{CapNetwork} &: \text{Requires network access} \\
+\mathsf{CapFileSystem} &: \text{Requires filesystem access} \\
+\mathsf{CapGPS} &: \text{Requires location services} \\
+\mathsf{CapDatabase} &: \text{Requires database connection} \\
+\mathsf{CapFFI}(\mathit{lang}) &: \text{Requires FFI to specific language}
+\end{align*}
+\end{definition}
+
+\begin{definition}[Capability Algebra]
+Capability algebra is simple set union:
+\begin{align*}
+c_{\mathsf{zero}} &= \{\} && \text{(no requirements)} \\
+c_{\mathsf{one}} &= \{\} && \text{(unit doesn't add requirements)} \\
+c_{\mathsf{plus}} &= \mathsf{Set.union} && \text{(sequence needs both)} \\
+c_{\mathsf{times}} &= \mathsf{Set.union} && \text{(nesting preserves requirements)} \\
+c_{\mathsf{meet}} &= \mathsf{Set.union} && \text{(either branch might run)}
+\end{align*}
+\end{definition}
+
+\begin{pillarbox}[title={Applications}]
+\begin{enumerate}
+    \item Cross-platform compatibility checking
+    \item Graceful degradation (fallback when capability missing)
+    \item Permission documentation generation
+    \item FFI boundary analysis (Section 6.4: C FFI limitations)
+\end{enumerate}
+\end{pillarbox}
+
+%--------------------------------------------------
+\section{F* Specification: Coeffect System}
+\label{sec:fstar-coeffects}
+%--------------------------------------------------
+
+The following F* specification formalizes the coeffect system. The key insight from Petricek et al. is that coeffects form an algebraic structure (a semiring) that enables compositional reasoning about context requirements. Each coeffect instance (liveness, usage, capabilities) instantiates this algebra with domain-specific operations:
+
+\begin{itemize}
+    \item \textbf{coeffect\_algebra}: The type class defining the semiring interface. The operations \texttt{c\_plus} (sequential composition), \texttt{c\_times} (nesting), and \texttt{c\_meet} (branching) correspond directly to the algebraic operations from Section~\ref{sec:flat-structural-coeffects}.
+    \item \textbf{Liveness instance}: A simple two-element semiring tracking whether variables are live or dead. This connects directly to IFDS-based liveness analysis (Part IV).
+    \item \textbf{Usage instance}: Tracks bounded usage counts, connecting to linear types and ownership (Part VII).
+    \item \textbf{Capability instance}: Flat coeffects using set union, for platform/resource tracking.
+\end{itemize}
+
+\begin{fstarcode}[title={Coeffect System Specification}]
+module BrrrMachine.Coeffects
+
+(* Coeffect algebra - Operations for composing coeffects *)
+class coeffect_algebra (c : Type) = {
+  c_zero : c;                      (* No requirement *)
+  c_one : c;                       (* Basic requirement *)
+  c_plus : c -> c -> c;            (* Sequential: both needed *)
+  c_times : c -> c -> c;           (* Nesting: inner within outer *)
+  c_meet : c -> c -> c;            (* Branching: at least one needs it *)
+
+  (* Semiring laws *)
+  plus_comm : forall a b. c_plus a b = c_plus b a;
+  plus_assoc : forall a b c. c_plus (c_plus a b) c = c_plus a (c_plus b c);
+  times_assoc : forall a b c. c_times (c_times a b) c = c_times a (c_times b c);
+  zero_plus : forall a. c_plus c_zero a = a;
+  one_times : forall a. c_times c_one a = a;
+}
+\end{fstarcode}
+
+\begin{fstarcode}[title={Liveness Coeffect Instance}]
+type liveness = | LDead | LLive
+
+instance liveness_algebra : coeffect_algebra liveness = {
+  c_zero = LDead;
+  c_one = LLive;
+  c_plus = fun l1 l2 -> if l1 = LDead && l2 = LDead then LDead else LLive;
+  c_times = fun l1 l2 -> if l1 = LDead then LDead else l2;
+  c_meet = fun l1 l2 -> if l1 = LDead && l2 = LDead then LDead else LLive;
+  ...
+}
+
+type liveness_coeffect = map var_id liveness
+\end{fstarcode}
+
+\begin{fstarcode}[title={Usage Coeffect Instance}]
+type usage_bound =
+  | UZero : usage_bound
+  | UOne : usage_bound
+  | UBounded : n:nat -> usage_bound
+  | UMany : usage_bound
+
+instance usage_algebra : coeffect_algebra usage_bound = {
+  c_zero = UZero;
+  c_one = UOne;
+  c_plus = fun u1 u2 -> match u1, u2 with
+    | UZero, u -> u
+    | u, UZero -> u
+    | UOne, UOne -> UBounded 2
+    | UOne, UBounded n -> UBounded (n + 1)
+    | UBounded n, UOne -> UBounded (n + 1)
+    | UBounded n, UBounded m -> UBounded (n + m)
+    | UMany, _ | _, UMany -> UMany;
+  c_times = fun u1 u2 -> match u1, u2 with
+    | UZero, _ | _, UZero -> UZero
+    | UOne, u -> u
+    | u, UOne -> u
+    | UBounded n, UBounded m -> UBounded (n * m)
+    | UMany, _ | _, UMany -> UMany;
+  c_meet = fun u1 u2 -> max_usage u1 u2;
+  ...
+}
+
+type usage_coeffect = map var_id usage_bound
+\end{fstarcode}
+
+\begin{fstarcode}[title={Capability Coeffect Instance}]
+type capability =
+  | CapNetwork | CapFileSystem | CapGPS | CapCamera
+  | CapDatabase : db_type:string -> capability
+  | CapFFI : language:string -> capability
+  | CapPlatform : platform:string -> min_version:nat -> capability
+
+type capability_set = set capability
+
+instance capability_algebra : coeffect_algebra capability_set = {
+  c_zero = Set.empty;
+  c_one = Set.empty;
+  c_plus = Set.union;
+  c_times = Set.union;
+  c_meet = Set.union;  (* Either branch might run, need both capabilities *)
+  ...
+}
+\end{fstarcode}
+
+\begin{fstarcode}[title={Combined Effect/Coeffect Typing}]
+type full_type_judgment = {
+  context : typing_context;
+  coeffects : coeffect_annotation;   (* What it requires *)
+  effects : effect_row;              (* What it produces - from Section 6.1 *)
+  result_type : ir_type;
+}
+
+(* Well-typed expression with both effects and coeffects *)
+val has_full_type :
+  typing_context ->
+  coeffect_annotation ->
+  ir_expr ->
+  ir_type ->
+  effect_row ->
+  bool
+
+(* Coeffect safety: no access beyond annotations *)
+val coeffect_safety :
+  gamma:typing_context ->
+  r:coeffect_annotation ->
+  e:ir_expr ->
+  tau:ir_type ->
+  eff:effect_row ->
+  has_full_type gamma r e tau eff ->
+  Lemma (accessed_variables e `subset` live_in_coeffect r)
+\end{fstarcode}

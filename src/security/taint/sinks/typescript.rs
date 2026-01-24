@@ -52,7 +52,10 @@ fn add_sql_sinks(registry: &mut SinkRegistry) {
 
     // mysql2
     registry.add(Sink::sql("connection.query", "mysql2 connection.query()"));
-    registry.add(Sink::sql("connection.execute", "mysql2 connection.execute()"));
+    registry.add(Sink::sql(
+        "connection.execute",
+        "mysql2 connection.execute()",
+    ));
 
     // sqlite3
     registry.add(Sink::sql("db.run", "sqlite3 db.run()"));
@@ -64,7 +67,10 @@ fn add_sql_sinks(registry: &mut SinkRegistry) {
 
     // better-sqlite3
     registry.add(Sink::sql("database.exec", "better-sqlite3 database.exec()"));
-    registry.add(Sink::sql("database.prepare", "better-sqlite3 database.prepare()"));
+    registry.add(Sink::sql(
+        "database.prepare",
+        "better-sqlite3 database.prepare()",
+    ));
 
     // Knex
     registry.add(Sink::sql(".raw(", "Knex raw() query").with_severity(9));
@@ -76,28 +82,39 @@ fn add_sql_sinks(registry: &mut SinkRegistry) {
     // Prisma
     registry.add(Sink::sql("$queryRaw", "Prisma $queryRaw()").with_severity(9));
     registry.add(Sink::sql("$executeRaw", "Prisma $executeRaw()").with_severity(9));
-    registry.add(
-        Sink::sql("$queryRawUnsafe", "Prisma $queryRawUnsafe()").with_severity(10),
-    );
-    registry.add(
-        Sink::sql("$executeRawUnsafe", "Prisma $executeRawUnsafe()").with_severity(10),
-    );
+    registry.add(Sink::sql("$queryRawUnsafe", "Prisma $queryRawUnsafe()").with_severity(10));
+    registry.add(Sink::sql("$executeRawUnsafe", "Prisma $executeRawUnsafe()").with_severity(10));
 
     // TypeORM
     registry.add(Sink::sql("manager.query", "TypeORM manager.query()"));
     registry.add(Sink::sql("repository.query", "TypeORM repository.query()"));
-    registry.add(Sink::sql("entityManager.query", "TypeORM entityManager.query()"));
-    registry.add(Sink::sql("createQueryRunner", "TypeORM createQueryRunner()"));
-    registry.add(Sink::sql("queryRunner.query", "TypeORM queryRunner.query()"));
+    registry.add(Sink::sql(
+        "entityManager.query",
+        "TypeORM entityManager.query()",
+    ));
+    registry.add(Sink::sql(
+        "createQueryRunner",
+        "TypeORM createQueryRunner()",
+    ));
+    registry.add(Sink::sql(
+        "queryRunner.query",
+        "TypeORM queryRunner.query()",
+    ));
 
     // Sequelize
     registry.add(Sink::sql("sequelize.query", "Sequelize sequelize.query()"));
     registry.add(Sink::sql("Sequelize.query", "Sequelize Sequelize.query()"));
-    registry.add(Sink::sql("sequelize.literal", "Sequelize sequelize.literal()"));
+    registry.add(Sink::sql(
+        "sequelize.literal",
+        "Sequelize sequelize.literal()",
+    ));
 
     // MikroORM
     registry.add(Sink::sql("em.execute", "MikroORM em.execute()"));
-    registry.add(Sink::sql("entityManager.execute", "MikroORM entityManager.execute()"));
+    registry.add(Sink::sql(
+        "entityManager.execute",
+        "MikroORM entityManager.execute()",
+    ));
 
     // Drizzle ORM
     registry.add(Sink::sql("sql.raw", "Drizzle sql.raw()"));
@@ -107,7 +124,10 @@ fn add_sql_sinks(registry: &mut SinkRegistry) {
     registry.add(Sink::sql("request.batch", "mssql request.batch()"));
 
     // oracledb
-    registry.add(Sink::sql("connection.execute", "oracledb connection.execute()"));
+    registry.add(Sink::sql(
+        "connection.execute",
+        "oracledb connection.execute()",
+    ));
 }
 
 // =============================================================================
@@ -117,16 +137,27 @@ fn add_sql_sinks(registry: &mut SinkRegistry) {
 fn add_command_sinks(registry: &mut SinkRegistry) {
     // child_process module
     registry.add(
-        Sink::command("child_process.exec", "child_process.exec() shell command")
-            .with_severity(10),
+        Sink::command("child_process.exec", "child_process.exec() shell command").with_severity(10),
     );
     registry.add(
-        Sink::command("child_process.execSync", "child_process.execSync() sync shell command")
-            .with_severity(10),
+        Sink::command(
+            "child_process.execSync",
+            "child_process.execSync() sync shell command",
+        )
+        .with_severity(10),
     );
-    registry.add(Sink::command("child_process.spawn", "child_process.spawn()"));
-    registry.add(Sink::command("child_process.spawnSync", "child_process.spawnSync()"));
-    registry.add(Sink::command("child_process.execFile", "child_process.execFile()"));
+    registry.add(Sink::command(
+        "child_process.spawn",
+        "child_process.spawn()",
+    ));
+    registry.add(Sink::command(
+        "child_process.spawnSync",
+        "child_process.spawnSync()",
+    ));
+    registry.add(Sink::command(
+        "child_process.execFile",
+        "child_process.execFile()",
+    ));
     registry.add(Sink::command(
         "child_process.execFileSync",
         "child_process.execFileSync()",
@@ -150,16 +181,17 @@ fn add_command_sinks(registry: &mut SinkRegistry) {
     // execa
     registry.add(Sink::command("execa(", "execa() command execution"));
     registry.add(Sink::command("execaSync(", "execaSync() command execution"));
-    registry.add(
-        Sink::command("execaCommand(", "execaCommand() shell command").with_severity(10),
-    );
+    registry.add(Sink::command("execaCommand(", "execaCommand() shell command").with_severity(10));
     registry.add(
         Sink::command("execaCommandSync(", "execaCommandSync() shell command").with_severity(10),
     );
 
     // cross-spawn
     registry.add(Sink::command("crossSpawn(", "cross-spawn execution"));
-    registry.add(Sink::command("crossSpawn.sync(", "cross-spawn sync execution"));
+    registry.add(Sink::command(
+        "crossSpawn.sync(",
+        "cross-spawn sync execution",
+    ));
 }
 
 // =============================================================================
@@ -170,8 +202,7 @@ fn add_code_execution_sinks(registry: &mut SinkRegistry) {
     // eval and Function
     registry.add(Sink::code_exec("eval(", "eval() code execution").with_severity(10));
     registry.add(Sink::code_exec("Function(", "Function() constructor").with_severity(10));
-    registry
-        .add(Sink::code_exec("new Function(", "new Function() constructor").with_severity(10));
+    registry.add(Sink::code_exec("new Function(", "new Function() constructor").with_severity(10));
 
     // setTimeout/setInterval with strings
     registry.add(
@@ -187,11 +218,12 @@ fn add_code_execution_sinks(registry: &mut SinkRegistry) {
 
     // vm module (Node.js)
     registry.add(Sink::code_exec("vm.runInContext", "vm.runInContext()").with_severity(9));
-    registry
-        .add(Sink::code_exec("vm.runInNewContext", "vm.runInNewContext()").with_severity(9));
-    registry
-        .add(Sink::code_exec("vm.runInThisContext", "vm.runInThisContext()").with_severity(9));
-    registry.add(Sink::code_exec("vm.compileFunction", "vm.compileFunction()"));
+    registry.add(Sink::code_exec("vm.runInNewContext", "vm.runInNewContext()").with_severity(9));
+    registry.add(Sink::code_exec("vm.runInThisContext", "vm.runInThisContext()").with_severity(9));
+    registry.add(Sink::code_exec(
+        "vm.compileFunction",
+        "vm.compileFunction()",
+    ));
     registry.add(Sink::code_exec("vm.Script", "new vm.Script()"));
     registry.add(Sink::code_exec(
         "script.runInContext",
@@ -204,11 +236,9 @@ fn add_code_execution_sinks(registry: &mut SinkRegistry) {
 
     // WebAssembly instantiation (lower risk)
     registry.add(
-        Sink::code_exec("WebAssembly.instantiate", "WebAssembly.instantiate()")
-            .with_severity(6),
+        Sink::code_exec("WebAssembly.instantiate", "WebAssembly.instantiate()").with_severity(6),
     );
-    registry
-        .add(Sink::code_exec("WebAssembly.compile", "WebAssembly.compile()").with_severity(6));
+    registry.add(Sink::code_exec("WebAssembly.compile", "WebAssembly.compile()").with_severity(6));
 }
 
 // =============================================================================
@@ -226,7 +256,10 @@ fn add_path_sinks(registry: &mut SinkRegistry) {
     registry.add(Sink::path("fs.unlink", "fs.unlink() file deletion"));
     registry.add(Sink::path("fs.unlinkSync", "fs.unlinkSync() file deletion"));
     registry.add(Sink::path("fs.rmdir", "fs.rmdir() directory removal"));
-    registry.add(Sink::path("fs.rmdirSync", "fs.rmdirSync() directory removal"));
+    registry.add(Sink::path(
+        "fs.rmdirSync",
+        "fs.rmdirSync() directory removal",
+    ));
     registry.add(Sink::path("fs.rm", "fs.rm() removal").with_severity(9));
     registry.add(Sink::path("fs.rmSync", "fs.rmSync() removal").with_severity(9));
     registry.add(Sink::path("fs.rename", "fs.rename()"));
@@ -264,16 +297,13 @@ fn add_path_sinks(registry: &mut SinkRegistry) {
     registry.add(Sink::path("fsPromises.rmdir", "fsPromises.rmdir()"));
 
     // path module (lower severity - path construction)
-    registry
-        .add(Sink::path("path.join", "path.join() path construction").with_severity(5));
-    registry
-        .add(Sink::path("path.resolve", "path.resolve() path construction").with_severity(5));
+    registry.add(Sink::path("path.join", "path.join() path construction").with_severity(5));
+    registry.add(Sink::path("path.resolve", "path.resolve() path construction").with_severity(5));
     registry.add(Sink::path("path.normalize", "path.normalize()").with_severity(4));
 
     // Express static file serving
-    registry.add(
-        Sink::path("express.static", "express.static() directory serving").with_severity(7),
-    );
+    registry
+        .add(Sink::path("express.static", "express.static() directory serving").with_severity(7));
     registry.add(Sink::path("res.sendFile", "res.sendFile()"));
     registry.add(Sink::path("res.download", "res.download()"));
 
@@ -326,8 +356,11 @@ fn add_xss_dom_sinks(registry: &mut SinkRegistry) {
 
     // Angular
     registry.add(
-        Sink::xss("bypassSecurityTrustHtml", "Angular bypassSecurityTrustHtml()")
-            .with_severity(9),
+        Sink::xss(
+            "bypassSecurityTrustHtml",
+            "Angular bypassSecurityTrustHtml()",
+        )
+        .with_severity(9),
     );
     registry.add(
         Sink::xss(
@@ -344,8 +377,7 @@ fn add_xss_dom_sinks(registry: &mut SinkRegistry) {
         .with_severity(6),
     );
     registry.add(
-        Sink::xss("bypassSecurityTrustUrl", "Angular bypassSecurityTrustUrl()")
-            .with_severity(7),
+        Sink::xss("bypassSecurityTrustUrl", "Angular bypassSecurityTrustUrl()").with_severity(7),
     );
     registry.add(
         Sink::xss(
@@ -471,43 +503,28 @@ fn add_ssrf_sinks(registry: &mut SinkRegistry) {
 
 fn add_deserialization_sinks(registry: &mut SinkRegistry) {
     // JSON.parse (generally safe but can be exploited in some contexts)
-    registry.add(
-        Sink::new("JSON.parse", SinkCategory::Deserialization).with_severity(4),
-    );
+    registry.add(Sink::new("JSON.parse", SinkCategory::Deserialization).with_severity(4));
 
     // node-serialize (RCE vulnerability)
-    registry.add(
-        Sink::new("serialize.unserialize", SinkCategory::Deserialization).with_severity(10),
-    );
-    registry.add(
-        Sink::new("node-serialize", SinkCategory::Deserialization).with_severity(10),
-    );
+    registry
+        .add(Sink::new("serialize.unserialize", SinkCategory::Deserialization).with_severity(10));
+    registry.add(Sink::new("node-serialize", SinkCategory::Deserialization).with_severity(10));
 
     // js-yaml
     registry.add(Sink::new("yaml.load", SinkCategory::Deserialization).with_severity(7));
-    registry.add(
-        Sink::new("yaml.loadAll", SinkCategory::Deserialization).with_severity(7),
-    );
+    registry.add(Sink::new("yaml.loadAll", SinkCategory::Deserialization).with_severity(7));
 
     // xml2js (XXE possible)
-    registry.add(
-        Sink::new("xml2js.parseString", SinkCategory::Deserialization).with_severity(6),
-    );
+    registry.add(Sink::new("xml2js.parseString", SinkCategory::Deserialization).with_severity(6));
 
     // fast-xml-parser
-    registry.add(
-        Sink::new("XMLParser.parse", SinkCategory::Deserialization).with_severity(5),
-    );
+    registry.add(Sink::new("XMLParser.parse", SinkCategory::Deserialization).with_severity(5));
 
     // msgpack
-    registry.add(
-        Sink::new("msgpack.decode", SinkCategory::Deserialization).with_severity(5),
-    );
+    registry.add(Sink::new("msgpack.decode", SinkCategory::Deserialization).with_severity(5));
 
     // flatbuffers/protobuf (generally safe)
-    registry.add(
-        Sink::new("protobuf.decode", SinkCategory::Deserialization).with_severity(3),
-    );
+    registry.add(Sink::new("protobuf.decode", SinkCategory::Deserialization).with_severity(3));
 }
 
 // =============================================================================
@@ -516,9 +533,8 @@ fn add_deserialization_sinks(registry: &mut SinkRegistry) {
 
 fn add_redirect_sinks(registry: &mut SinkRegistry) {
     // Express
-    registry.add(
-        Sink::new("res.redirect", SinkCategory::OpenRedirect).with_dangerous_params(vec![0]),
-    );
+    registry
+        .add(Sink::new("res.redirect", SinkCategory::OpenRedirect).with_dangerous_params(vec![0]));
 
     // Fastify
     registry.add(
@@ -526,24 +542,19 @@ fn add_redirect_sinks(registry: &mut SinkRegistry) {
     );
 
     // Koa
-    registry.add(
-        Sink::new("ctx.redirect", SinkCategory::OpenRedirect).with_dangerous_params(vec![0]),
-    );
+    registry
+        .add(Sink::new("ctx.redirect", SinkCategory::OpenRedirect).with_dangerous_params(vec![0]));
 
     // Browser APIs
-    registry
-        .add(Sink::new("location.href", SinkCategory::OpenRedirect).as_property());
+    registry.add(Sink::new("location.href", SinkCategory::OpenRedirect).as_property());
     registry.add(
-        Sink::new("location.replace", SinkCategory::OpenRedirect)
-            .with_dangerous_params(vec![0]),
+        Sink::new("location.replace", SinkCategory::OpenRedirect).with_dangerous_params(vec![0]),
     );
     registry.add(
         Sink::new("location.assign", SinkCategory::OpenRedirect).with_dangerous_params(vec![0]),
     );
-    registry
-        .add(Sink::new("window.location", SinkCategory::OpenRedirect).as_property());
-    registry
-        .add(Sink::new("document.location", SinkCategory::OpenRedirect).as_property());
+    registry.add(Sink::new("window.location", SinkCategory::OpenRedirect).as_property());
+    registry.add(Sink::new("document.location", SinkCategory::OpenRedirect).as_property());
 }
 
 // =============================================================================
@@ -552,62 +563,35 @@ fn add_redirect_sinks(registry: &mut SinkRegistry) {
 
 fn add_template_sinks(registry: &mut SinkRegistry) {
     // EJS
-    registry.add(
-        Sink::new("ejs.render", SinkCategory::TemplateInjection).with_severity(8),
-    );
-    registry.add(
-        Sink::new("ejs.compile", SinkCategory::TemplateInjection).with_severity(8),
-    );
-    registry.add(
-        Sink::new("ejs.renderFile", SinkCategory::TemplateInjection).with_severity(7),
-    );
+    registry.add(Sink::new("ejs.render", SinkCategory::TemplateInjection).with_severity(8));
+    registry.add(Sink::new("ejs.compile", SinkCategory::TemplateInjection).with_severity(8));
+    registry.add(Sink::new("ejs.renderFile", SinkCategory::TemplateInjection).with_severity(7));
 
     // Pug (Jade)
-    registry.add(
-        Sink::new("pug.render", SinkCategory::TemplateInjection).with_severity(8),
-    );
-    registry.add(
-        Sink::new("pug.compile", SinkCategory::TemplateInjection).with_severity(8),
-    );
+    registry.add(Sink::new("pug.render", SinkCategory::TemplateInjection).with_severity(8));
+    registry.add(Sink::new("pug.compile", SinkCategory::TemplateInjection).with_severity(8));
 
     // Handlebars
-    registry.add(
-        Sink::new("Handlebars.compile", SinkCategory::TemplateInjection).with_severity(7),
-    );
-    registry.add(
-        Sink::new("handlebars.compile", SinkCategory::TemplateInjection).with_severity(7),
-    );
+    registry.add(Sink::new("Handlebars.compile", SinkCategory::TemplateInjection).with_severity(7));
+    registry.add(Sink::new("handlebars.compile", SinkCategory::TemplateInjection).with_severity(7));
 
     // Mustache
-    registry.add(
-        Sink::new("Mustache.render", SinkCategory::TemplateInjection).with_severity(6),
-    );
+    registry.add(Sink::new("Mustache.render", SinkCategory::TemplateInjection).with_severity(6));
 
     // Lodash template
-    registry.add(
-        Sink::new("_.template", SinkCategory::TemplateInjection).with_severity(9),
-    );
-    registry.add(
-        Sink::new("lodash.template", SinkCategory::TemplateInjection).with_severity(9),
-    );
+    registry.add(Sink::new("_.template", SinkCategory::TemplateInjection).with_severity(9));
+    registry.add(Sink::new("lodash.template", SinkCategory::TemplateInjection).with_severity(9));
 
     // Nunjucks
-    registry.add(
-        Sink::new("nunjucks.renderString", SinkCategory::TemplateInjection).with_severity(8),
-    );
-    registry.add(
-        Sink::new("nunjucks.compile", SinkCategory::TemplateInjection).with_severity(8),
-    );
+    registry
+        .add(Sink::new("nunjucks.renderString", SinkCategory::TemplateInjection).with_severity(8));
+    registry.add(Sink::new("nunjucks.compile", SinkCategory::TemplateInjection).with_severity(8));
 
     // doT.js
-    registry.add(
-        Sink::new("doT.template", SinkCategory::TemplateInjection).with_severity(9),
-    );
+    registry.add(Sink::new("doT.template", SinkCategory::TemplateInjection).with_severity(9));
 
     // Marko
-    registry.add(
-        Sink::new("marko.load", SinkCategory::TemplateInjection).with_severity(7),
-    );
+    registry.add(Sink::new("marko.load", SinkCategory::TemplateInjection).with_severity(7));
 }
 
 // =============================================================================
@@ -635,8 +619,7 @@ fn add_header_sinks(registry: &mut SinkRegistry) {
 fn add_nosql_sinks(registry: &mut SinkRegistry) {
     // MongoDB native driver
     registry.add(
-        Sink::new("collection.find", SinkCategory::NoSqlInjection)
-            .with_dangerous_params(vec![0]),
+        Sink::new("collection.find", SinkCategory::NoSqlInjection).with_dangerous_params(vec![0]),
     );
     registry.add(
         Sink::new("collection.findOne", SinkCategory::NoSqlInjection)
@@ -680,9 +663,8 @@ fn add_nosql_sinks(registry: &mut SinkRegistry) {
     );
 
     // Mongoose
-    registry.add(
-        Sink::new("Model.find", SinkCategory::NoSqlInjection).with_dangerous_params(vec![0]),
-    );
+    registry
+        .add(Sink::new("Model.find", SinkCategory::NoSqlInjection).with_dangerous_params(vec![0]));
     registry.add(
         Sink::new("Model.findOne", SinkCategory::NoSqlInjection).with_dangerous_params(vec![0]),
     );
@@ -690,9 +672,7 @@ fn add_nosql_sinks(registry: &mut SinkRegistry) {
         Sink::new("Model.findById", SinkCategory::NoSqlInjection).with_dangerous_params(vec![0]),
     );
     registry.add(Sink::new("Model.where", SinkCategory::NoSqlInjection));
-    registry.add(
-        Sink::new("Model.$where", SinkCategory::NoSqlInjection).with_severity(10),
-    );
+    registry.add(Sink::new("Model.$where", SinkCategory::NoSqlInjection).with_severity(10));
 
     // Redis
     registry.add(Sink::new("redis.eval", SinkCategory::NoSqlInjection).with_severity(9));

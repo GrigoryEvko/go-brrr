@@ -62,7 +62,8 @@
 //!
 //! # Token Counting
 //!
-//! Uses tiktoken (cl100k_base) for accurate token counting:
+//! Uses the native Qwen3-Embedding-0.6B tokenizer for accurate token counting,
+//! providing exact parity with Python's implementation:
 //!
 //! ```
 //! use go_brrr::semantic::{count_tokens, truncate_to_tokens};
@@ -126,8 +127,8 @@ pub use chunker::{chunk_code, chunk_code_default, chunk_code_with_overlap, needs
 // Tokenizer configuration and TEI-based token counting (BUG-02 fix)
 pub use chunker::{
     compare_tokenizer_counts, count_tokens_batch_tei, count_tokens_tei,
-    estimate_tokens_unicode_aware, get_tokenizer_type, set_tokenizer_type,
-    ChunkConfig, TokenizerType,
+    estimate_tokens_unicode_aware, get_tokenizer_type, set_tokenizer_type, ChunkConfig,
+    TokenizerType,
 };
 
 // =============================================================================

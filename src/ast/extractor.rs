@@ -19,17 +19,19 @@
 //! operations.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::ops::Bound;
 use std::path::Path;
 use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
 
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use tree_sitter::{Language as TSLanguage, Node, Parser, Query, QueryCursor, QueryMatch, Tree};
 
 use crate::ast::types::{ClassInfo, FunctionInfo, ImportInfo, ModuleInfo};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::{Language, LanguageRegistry};
 use crate::util::format_query_error;
 
@@ -41,8 +43,8 @@ type QueryCacheKey = (&'static str, &'static str);
 ///
 /// Stores `Arc<Query>` to allow shared access without cloning the Query itself.
 /// Uses `parking_lot::RwLock` for better performance than `std::sync::RwLock`.
-static QUERY_CACHE: Lazy<RwLock<HashMap<QueryCacheKey, Arc<Query>>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
+static QUERY_CACHE: Lazy<RwLock<FxHashMap<QueryCacheKey, Arc<Query>>>> =
+    Lazy::new(|| RwLock::new(FxHashMap::default()));
 
 /// Get or compile a tree-sitter query, using cache for repeated lookups.
 ///
@@ -133,7 +135,7 @@ thread_local! {
     /// Stores one parser per language name. When a parser is needed, it's removed
     /// from the cache (if present), reset, and wrapped in CachedParser. On drop,
     /// the parser is returned to the cache for reuse.
-    static PARSER_CACHE: RefCell<HashMap<&'static str, Parser>> = RefCell::new(HashMap::new());
+    static PARSER_CACHE: RefCell<FxHashMap<&'static str, Parser>> = RefCell::new(FxHashMap::default());
 }
 
 /// Maximum number of parsers to cache per thread.
@@ -504,8 +506,7 @@ impl AstExtractor {
             )
         })?;
 
-        let source = std::fs::read(path)
-            .map_err(|e| BrrrError::io_with_path(e, path))?;
+        let source = std::fs::read(path).map_err(|e| BrrrError::io_with_path(e, path))?;
 
         // Check if the language handler wants to skip this file based on content.
         // This is used by the C handler to skip `.h` files that contain C++ code,
@@ -819,8 +820,7 @@ pub fn extract_imports(path: &Path) -> Result<Vec<ImportInfo>> {
         )
     })?;
 
-    let source = std::fs::read(path)
-        .map_err(|e| BrrrError::io_with_path(e, path))?;
+    let source = std::fs::read(path).map_err(|e| BrrrError::io_with_path(e, path))?;
 
     // Use cached parser for performance - avoids recreating parser for each file.
     let mut cached_parser = CachedParser::take(lang)?;
@@ -1198,31 +1198,52 @@ class PlainClass:
         }
 
         // Partial overlap: (10, 20) and (15, 25)
-        assert!(overlaps(10, 20, 15, 25), "Partial overlap should be detected");
+        assert!(
+            overlaps(10, 20, 15, 25),
+            "Partial overlap should be detected"
+        );
 
         // Partial overlap reversed: (15, 25) and (10, 20)
-        assert!(overlaps(15, 25, 10, 20), "Partial overlap should be detected (reversed)");
+        assert!(
+            overlaps(15, 25, 10, 20),
+            "Partial overlap should be detected (reversed)"
+        );
 
         // Complete containment: outer contains inner
         assert!(overlaps(10, 30, 15, 20), "Containment should be detected");
 
         // Complete containment: inner inside outer
-        assert!(overlaps(15, 20, 10, 30), "Containment should be detected (reversed)");
+        assert!(
+            overlaps(15, 20, 10, 30),
+            "Containment should be detected (reversed)"
+        );
 
         // Adjacent but not overlapping: (10, 20) and (20, 30)
-        assert!(!overlaps(10, 20, 20, 30), "Adjacent intervals should not overlap");
+        assert!(
+            !overlaps(10, 20, 20, 30),
+            "Adjacent intervals should not overlap"
+        );
 
         // No overlap: (10, 20) and (25, 30)
-        assert!(!overlaps(10, 20, 25, 30), "Disjoint intervals should not overlap");
+        assert!(
+            !overlaps(10, 20, 25, 30),
+            "Disjoint intervals should not overlap"
+        );
 
         // No overlap reversed: (25, 30) and (10, 20)
-        assert!(!overlaps(25, 30, 10, 20), "Disjoint intervals should not overlap (reversed)");
+        assert!(
+            !overlaps(25, 30, 10, 20),
+            "Disjoint intervals should not overlap (reversed)"
+        );
 
         // Same interval
         assert!(overlaps(10, 20, 10, 20), "Same interval should overlap");
 
         // Edge case: one point overlap at start
-        assert!(overlaps(10, 20, 19, 25), "Should overlap when ranges share interior point");
+        assert!(
+            overlaps(10, 20, 19, 25),
+            "Should overlap when ranges share interior point"
+        );
     }
 
     #[test]
@@ -1233,7 +1254,10 @@ class PlainClass:
         let mut set = PositionSet::with_tolerance(2);
 
         // Empty set should report no duplicates
-        assert!(!set.is_duplicate(100), "Empty set should have no duplicates");
+        assert!(
+            !set.is_duplicate(100),
+            "Empty set should have no duplicates"
+        );
 
         // Insert first position
         set.insert(100);
@@ -1242,39 +1266,81 @@ class PlainClass:
         assert!(set.is_duplicate(100), "Exact position should be duplicate");
 
         // Positions within tolerance should be duplicates
-        assert!(set.is_duplicate(99), "Position 99 should be duplicate (within tolerance of 100)");
-        assert!(set.is_duplicate(101), "Position 101 should be duplicate (within tolerance of 100)");
-        assert!(set.is_duplicate(98), "Position 98 should be duplicate (within tolerance of 100)");
-        assert!(set.is_duplicate(102), "Position 102 should be duplicate (within tolerance of 100)");
+        assert!(
+            set.is_duplicate(99),
+            "Position 99 should be duplicate (within tolerance of 100)"
+        );
+        assert!(
+            set.is_duplicate(101),
+            "Position 101 should be duplicate (within tolerance of 100)"
+        );
+        assert!(
+            set.is_duplicate(98),
+            "Position 98 should be duplicate (within tolerance of 100)"
+        );
+        assert!(
+            set.is_duplicate(102),
+            "Position 102 should be duplicate (within tolerance of 100)"
+        );
 
         // Positions outside tolerance should NOT be duplicates
-        assert!(!set.is_duplicate(97), "Position 97 should NOT be duplicate (outside tolerance)");
-        assert!(!set.is_duplicate(103), "Position 103 should NOT be duplicate (outside tolerance)");
+        assert!(
+            !set.is_duplicate(97),
+            "Position 97 should NOT be duplicate (outside tolerance)"
+        );
+        assert!(
+            !set.is_duplicate(103),
+            "Position 103 should NOT be duplicate (outside tolerance)"
+        );
         assert!(!set.is_duplicate(50), "Position 50 should NOT be duplicate");
-        assert!(!set.is_duplicate(200), "Position 200 should NOT be duplicate");
+        assert!(
+            !set.is_duplicate(200),
+            "Position 200 should NOT be duplicate"
+        );
 
         // Insert another position far away
         set.insert(500);
-        assert!(set.is_duplicate(500), "Position 500 should now be duplicate");
-        assert!(set.is_duplicate(498), "Position 498 should be duplicate (within tolerance of 500)");
-        assert!(!set.is_duplicate(495), "Position 495 should NOT be duplicate");
+        assert!(
+            set.is_duplicate(500),
+            "Position 500 should now be duplicate"
+        );
+        assert!(
+            set.is_duplicate(498),
+            "Position 498 should be duplicate (within tolerance of 500)"
+        );
+        assert!(
+            !set.is_duplicate(495),
+            "Position 495 should NOT be duplicate"
+        );
 
         // Original positions should still work
-        assert!(set.is_duplicate(100), "Position 100 should still be duplicate");
+        assert!(
+            set.is_duplicate(100),
+            "Position 100 should still be duplicate"
+        );
 
         // Test edge case: position 0
         let mut set2 = PositionSet::with_tolerance(2);
         set2.insert(0);
         assert!(set2.is_duplicate(0), "Position 0 should be duplicate");
-        assert!(set2.is_duplicate(1), "Position 1 should be duplicate (within tolerance of 0)");
-        assert!(set2.is_duplicate(2), "Position 2 should be duplicate (within tolerance of 0)");
+        assert!(
+            set2.is_duplicate(1),
+            "Position 1 should be duplicate (within tolerance of 0)"
+        );
+        assert!(
+            set2.is_duplicate(2),
+            "Position 2 should be duplicate (within tolerance of 0)"
+        );
         assert!(!set2.is_duplicate(3), "Position 3 should NOT be duplicate");
 
         // Test edge case: position 1
         set2.insert(1);
         // Both 0 and 1 are in the set, so positions 0-3 should all be duplicates
         assert!(set2.is_duplicate(0), "Position 0 should be duplicate");
-        assert!(set2.is_duplicate(3), "Position 3 should be duplicate (within tolerance of 1)");
+        assert!(
+            set2.is_duplicate(3),
+            "Position 3 should be duplicate (within tolerance of 1)"
+        );
     }
 
     #[test]
@@ -1287,19 +1353,39 @@ class PlainClass:
         // Each position is 100 bytes apart (typical function spacing)
         for i in 0..1000 {
             let pos = i * 100;
-            assert!(!set.is_duplicate(pos), "Position {} should not be duplicate before insert", pos);
+            assert!(
+                !set.is_duplicate(pos),
+                "Position {} should not be duplicate before insert",
+                pos
+            );
             set.insert(pos);
-            assert!(set.is_duplicate(pos), "Position {} should be duplicate after insert", pos);
+            assert!(
+                set.is_duplicate(pos),
+                "Position {} should be duplicate after insert",
+                pos
+            );
         }
 
         // Verify all positions are still correctly identified
         for i in 0..1000 {
             let pos = i * 100;
-            assert!(set.is_duplicate(pos), "Position {} should be duplicate", pos);
-            assert!(set.is_duplicate(pos + 1), "Position {} should be duplicate (tolerance)", pos + 1);
+            assert!(
+                set.is_duplicate(pos),
+                "Position {} should be duplicate",
+                pos
+            );
+            assert!(
+                set.is_duplicate(pos + 1),
+                "Position {} should be duplicate (tolerance)",
+                pos + 1
+            );
             // Position between functions should not be duplicate
             if i < 999 {
-                assert!(!set.is_duplicate(pos + 50), "Position {} should NOT be duplicate (between functions)", pos + 50);
+                assert!(
+                    !set.is_duplicate(pos + 50),
+                    "Position {} should NOT be duplicate (between functions)",
+                    pos + 50
+                );
             }
         }
     }
@@ -1451,8 +1537,14 @@ class World:
         let result = AstExtractor::extract_file(file.path()).unwrap();
 
         // Verify extraction worked
-        assert!(!result.functions.is_empty(), "Should extract at least one function");
-        assert!(!result.classes.is_empty(), "Should extract at least one class");
+        assert!(
+            !result.functions.is_empty(),
+            "Should extract at least one function"
+        );
+        assert!(
+            !result.classes.is_empty(),
+            "Should extract at least one class"
+        );
 
         // Cache should have at least 2 entries total (function + class queries for at least one language)
         let cache_size_after_python = query_cache_stats();
@@ -1495,7 +1587,10 @@ def another():
         let ts_source2 = "const add = (a: number, b: number) => a + b;";
         let ts_file2 = create_temp_file(ts_source2, ".ts");
         let ts_result = AstExtractor::extract_file(ts_file2.path()).unwrap();
-        assert!(!ts_result.functions.is_empty(), "Should extract TypeScript function");
+        assert!(
+            !ts_result.functions.is_empty(),
+            "Should extract TypeScript function"
+        );
 
         let size_after_second = query_cache_stats();
 
@@ -1568,7 +1663,10 @@ def world():
         assert!(result1.is_ok(), "First extraction should succeed");
 
         let result2 = AstExtractor::extract_file(file2.path());
-        assert!(result2.is_ok(), "Second extraction should succeed (using cached parser)");
+        assert!(
+            result2.is_ok(),
+            "Second extraction should succeed (using cached parser)"
+        );
 
         // Verify parsing was correct
         assert!(!result1.unwrap().functions.is_empty());
@@ -1622,7 +1720,10 @@ def world():
         let result2 = AstExtractor::extract_from_source(source2, "python");
 
         assert!(result1.is_ok(), "First extract_from_source should succeed");
-        assert!(result2.is_ok(), "Second extract_from_source should succeed (cached)");
+        assert!(
+            result2.is_ok(),
+            "Second extract_from_source should succeed (cached)"
+        );
 
         assert_eq!(result1.unwrap().functions[0].name, "foo");
         assert_eq!(result2.unwrap().functions[0].name, "bar");
@@ -1639,7 +1740,10 @@ def world():
 
         // Cache should have at least one parser
         let before_clear = parser_cache_stats();
-        assert!(before_clear >= 1, "Cache should have at least 1 parser before clear");
+        assert!(
+            before_clear >= 1,
+            "Cache should have at least 1 parser before clear"
+        );
 
         // Clear the cache
         clear_parser_cache();
@@ -1656,7 +1760,10 @@ def world():
 
         // Cache should have one parser again
         let after_extraction = parser_cache_stats();
-        assert_eq!(after_extraction, 1, "Cache should have 1 parser after extraction");
+        assert_eq!(
+            after_extraction, 1,
+            "Cache should have 1 parser after extraction"
+        );
     }
 
     #[test]
@@ -1673,7 +1780,10 @@ def world():
         let _ = AstExtractor::extract_file(file.path()).unwrap();
 
         let main_thread_cache = parser_cache_stats();
-        assert!(main_thread_cache >= 1, "Main thread cache should have parser");
+        assert!(
+            main_thread_cache >= 1,
+            "Main thread cache should have parser"
+        );
 
         // Spawn a new thread and check its cache
         let handle = thread::spawn(|| {

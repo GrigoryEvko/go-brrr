@@ -48,7 +48,7 @@ use tree_sitter::{Node, Parser, Tree};
 use super::{
     DetectedSource, HandlerInfo, SourceKind, SourcePattern, SourceScanResult, TaintedParameter,
 };
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::security::taint::types::Location;
 
 // =============================================================================
@@ -269,27 +269,9 @@ const DJANGO_SOURCES: &[SourcePattern] = &[
 /// Standard library taint sources.
 const STDLIB_SOURCES: &[SourcePattern] = &[
     SourcePattern::function_call("builtin_input", SourceKind::Stdin, "input", 1.0),
-    SourcePattern::property_access(
-        "sys_argv",
-        SourceKind::ProcessArgs,
-        "sys",
-        "argv",
-        None,
-    ),
-    SourcePattern::property_access(
-        "os_environ",
-        SourceKind::Environment,
-        "os",
-        "environ",
-        None,
-    ),
-    SourcePattern::method_call(
-        "os_getenv",
-        SourceKind::Environment,
-        "os",
-        "getenv",
-        None,
-    ),
+    SourcePattern::property_access("sys_argv", SourceKind::ProcessArgs, "sys", "argv", None),
+    SourcePattern::property_access("os_environ", SourceKind::Environment, "os", "environ", None),
+    SourcePattern::method_call("os_getenv", SourceKind::Environment, "os", "getenv", None),
     SourcePattern::function_call("raw_input", SourceKind::Stdin, "raw_input", 1.0),
 ];
 
@@ -332,13 +314,7 @@ const NETWORK_SOURCES: &[SourcePattern] = &[
         None,
     ),
     // httpx library
-    SourcePattern::method_call(
-        "httpx_get",
-        SourceKind::HttpResponse,
-        "httpx",
-        "get",
-        None,
-    ),
+    SourcePattern::method_call("httpx_get", SourceKind::HttpResponse, "httpx", "get", None),
     SourcePattern::method_call(
         "httpx_post",
         SourceKind::HttpResponse,
@@ -425,13 +401,7 @@ const DATABASE_SOURCES: &[SourcePattern] = &[
 /// Deserialization taint sources.
 const DESERIALIZATION_SOURCES: &[SourcePattern] = &[
     // JSON
-    SourcePattern::method_call(
-        "json_load",
-        SourceKind::Deserialized,
-        "json",
-        "load",
-        None,
-    ),
+    SourcePattern::method_call("json_load", SourceKind::Deserialized, "json", "load", None),
     SourcePattern::method_call(
         "json_loads",
         SourceKind::Deserialized,
@@ -440,13 +410,7 @@ const DESERIALIZATION_SOURCES: &[SourcePattern] = &[
         None,
     ),
     // YAML
-    SourcePattern::method_call(
-        "yaml_load",
-        SourceKind::Deserialized,
-        "yaml",
-        "load",
-        None,
-    ),
+    SourcePattern::method_call("yaml_load", SourceKind::Deserialized, "yaml", "load", None),
     SourcePattern::method_call(
         "yaml_safe_load",
         SourceKind::Deserialized,
@@ -477,13 +441,7 @@ const DESERIALIZATION_SOURCES: &[SourcePattern] = &[
         None,
     ),
     // TOML
-    SourcePattern::method_call(
-        "toml_load",
-        SourceKind::Deserialized,
-        "toml",
-        "load",
-        None,
-    ),
+    SourcePattern::method_call("toml_load", SourceKind::Deserialized, "toml", "load", None),
     SourcePattern::method_call(
         "toml_loads",
         SourceKind::Deserialized,
@@ -557,14 +515,7 @@ const WEBSOCKET_SOURCES: &[SourcePattern] = &[
 // =============================================================================
 
 /// Patterns for Flask-style route decorators.
-const FLASK_ROUTE_PATTERNS: &[&str] = &[
-    "route",
-    "get",
-    "post",
-    "put",
-    "delete",
-    "patch",
-];
+const FLASK_ROUTE_PATTERNS: &[&str] = &["route", "get", "post", "put", "delete", "patch"];
 
 /// Patterns for FastAPI route decorators.
 const FASTAPI_ROUTE_PATTERNS: &[&str] = &[
@@ -647,11 +598,10 @@ impl PythonSourceDetector {
     /// Scan a source file for taint sources.
     pub fn scan_file(&self, path: impl AsRef<Path>) -> Result<SourceScanResult> {
         let path = path.as_ref();
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| BrrrError::IoWithPath {
-                error: e,
-                path: path.to_path_buf(),
-            })?;
+        let source = std::fs::read_to_string(path).map_err(|e| BrrrError::IoWithPath {
+            error: e,
+            path: path.to_path_buf(),
+        })?;
         self.scan_source(&source, path.to_string_lossy().as_ref())
     }
 
@@ -665,12 +615,10 @@ impl PythonSourceDetector {
                 message: format!("Failed to set Python language: {}", e),
             })?;
 
-        let tree = parser
-            .parse(source, None)
-            .ok_or_else(|| BrrrError::Parse {
-                file: file_name.to_string(),
-                message: "Failed to parse Python source".to_string(),
-            })?;
+        let tree = parser.parse(source, None).ok_or_else(|| BrrrError::Parse {
+            file: file_name.to_string(),
+            message: "Failed to parse Python source".to_string(),
+        })?;
 
         self.scan_tree(&tree, source, file_name)
     }
@@ -702,12 +650,7 @@ impl PythonSourceDetector {
     }
 
     /// Collect import aliases from the module.
-    fn collect_imports(
-        &self,
-        root: Node,
-        source: &[u8],
-        aliases: &mut HashMap<String, String>,
-    ) {
+    fn collect_imports(&self, root: Node, source: &[u8], aliases: &mut HashMap<String, String>) {
         let mut cursor = root.walk();
         for child in root.children(&mut cursor) {
             match child.kind() {
@@ -723,9 +666,15 @@ impl PythonSourceDetector {
     }
 
     /// Process `from X import Y as Z` statements.
-    fn process_import_from(&self, node: Node, source: &[u8], aliases: &mut HashMap<String, String>) {
+    fn process_import_from(
+        &self,
+        node: Node,
+        source: &[u8],
+        aliases: &mut HashMap<String, String>,
+    ) {
         // Extract module name
-        let module = self.child_by_field(node, "module_name")
+        let module = self
+            .child_by_field(node, "module_name")
             .map(|n| self.node_text(n, source))
             .unwrap_or("");
 
@@ -767,12 +716,7 @@ impl PythonSourceDetector {
     }
 
     /// Recursively scan AST nodes for sources.
-    fn scan_node(
-        &self,
-        node: Node,
-        ctx: &mut ScanContext,
-        result: &mut SourceScanResult,
-    ) {
+    fn scan_node(&self, node: Node, ctx: &mut ScanContext, result: &mut SourceScanResult) {
         match node.kind() {
             "decorated_definition" => {
                 self.scan_decorated_definition(node, ctx, result);
@@ -816,12 +760,7 @@ impl PythonSourceDetector {
     }
 
     /// Scan children of a node.
-    fn scan_children(
-        &self,
-        node: Node,
-        ctx: &mut ScanContext,
-        result: &mut SourceScanResult,
-    ) {
+    fn scan_children(&self, node: Node, ctx: &mut ScanContext, result: &mut SourceScanResult) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             self.scan_node(child, ctx, result);
@@ -845,10 +784,11 @@ impl PythonSourceDetector {
             // Add tainted parameters as sources
             for param in &handler.tainted_params {
                 let loc = Location::new(ctx.file_name, handler.start_line, 0);
-                let source = DetectedSource::new(param.kind, loc, format!("parameter:{}", param.name))
-                    .with_assignment(&param.name)
-                    .with_framework(&handler.framework)
-                    .in_handler_function(&handler.name);
+                let source =
+                    DetectedSource::new(param.kind, loc, format!("parameter:{}", param.name))
+                        .with_assignment(&param.name)
+                        .with_framework(&handler.framework)
+                        .in_handler_function(&handler.name);
                 result.add_source(source);
             }
             result.add_handler(handler.clone());
@@ -932,9 +872,11 @@ impl PythonSourceDetector {
             }
             "attribute" => {
                 // @app.route(...), @router.get(...)
-                let object = self.child_by_field(func, "object")
+                let object = self
+                    .child_by_field(func, "object")
                     .map(|n| self.node_text(n, source).to_string());
-                let attr = self.child_by_field(func, "attribute")
+                let attr = self
+                    .child_by_field(func, "attribute")
                     .map(|n| self.node_text(n, source).to_string())?;
                 let args = self.extract_call_arguments(node, source);
 
@@ -951,9 +893,11 @@ impl PythonSourceDetector {
 
     /// Parse a decorator that is an attribute access: @app.route (without call)
     fn parse_decorator_attribute(&self, node: Node, source: &[u8]) -> Option<DecoratorInfo> {
-        let object = self.child_by_field(node, "object")
+        let object = self
+            .child_by_field(node, "object")
             .map(|n| self.node_text(n, source).to_string());
-        let attr = self.child_by_field(node, "attribute")
+        let attr = self
+            .child_by_field(node, "attribute")
             .map(|n| self.node_text(n, source).to_string())?;
 
         Some(DecoratorInfo {
@@ -1054,14 +998,17 @@ impl PythonSourceDetector {
         // Find the actual function_definition child
         let func_node = self.find_function_in_decorated(def_node)?;
 
-        let name = self.child_by_field(func_node, "name")
+        let name = self
+            .child_by_field(func_node, "name")
             .map(|n| self.node_text(n, ctx.source).to_string())?;
 
         let start_line = func_node.start_position().row + 1;
         let end_line = func_node.end_position().row + 1;
 
         // Extract route path from decorator arguments
-        let route = decorator.arguments.first()
+        let route = decorator
+            .arguments
+            .first()
             .map(|s| s.trim_matches(|c| c == '"' || c == '\'').to_string());
 
         // Extract HTTP methods from decorator arguments
@@ -1225,7 +1172,8 @@ impl PythonSourceDetector {
                     param_index += 1;
                 }
                 "default_parameter" => {
-                    let name = self.child_by_kind(child, "identifier")
+                    let name = self
+                        .child_by_kind(child, "identifier")
                         .map(|n| self.node_text(n, ctx.source).to_string())
                         .unwrap_or_default();
 
@@ -1260,12 +1208,14 @@ impl PythonSourceDetector {
 
     /// Parse a typed parameter node.
     fn parse_typed_param(&self, node: Node, source: &[u8]) -> (String, String) {
-        let name = self.child_by_field(node, "name")
+        let name = self
+            .child_by_field(node, "name")
             .or_else(|| self.child_by_kind(node, "identifier"))
             .map(|n| self.node_text(n, source).to_string())
             .unwrap_or_default();
 
-        let annotation = self.child_by_field(node, "type")
+        let annotation = self
+            .child_by_field(node, "type")
             .map(|n| self.node_text(n, source).to_string())
             .unwrap_or_default();
 
@@ -1304,12 +1254,7 @@ impl PythonSourceDetector {
     }
 
     /// Scan a call expression for taint sources.
-    fn scan_call(
-        &self,
-        node: Node,
-        ctx: &ScanContext,
-        result: &mut SourceScanResult,
-    ) {
+    fn scan_call(&self, node: Node, ctx: &ScanContext, result: &mut SourceScanResult) {
         let func_node = match self.child_by_field(node, "function") {
             Some(n) => n,
             None => return,
@@ -1425,7 +1370,14 @@ impl PythonSourceDetector {
     /// Check if this is a response method that returns data.
     fn is_response_method(&self, object_name: &str, method: &str) -> bool {
         let response_objects = ["response", "resp", "r", "result"];
-        let response_methods = ["text", "json", "content", "read", "iter_content", "iter_lines"];
+        let response_methods = [
+            "text",
+            "json",
+            "content",
+            "read",
+            "iter_content",
+            "iter_lines",
+        ];
 
         response_objects.contains(&object_name) && response_methods.contains(&method)
     }
@@ -1436,7 +1388,10 @@ impl PythonSourceDetector {
             "identifier" => {
                 let name = self.node_text(node, ctx.source);
                 // Check for import aliases
-                ctx.import_aliases.get(name).cloned().unwrap_or_else(|| name.to_string())
+                ctx.import_aliases
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| name.to_string())
             }
             "attribute" => {
                 // For chained attributes like urllib.request
@@ -1474,16 +1429,15 @@ impl PythonSourceDetector {
     }
 
     /// Scan an attribute access for taint sources.
-    fn scan_attribute(
-        &self,
-        node: Node,
-        ctx: &ScanContext,
-        result: &mut SourceScanResult,
-    ) {
+    fn scan_attribute(&self, node: Node, ctx: &ScanContext, result: &mut SourceScanResult) {
         // Only check if this is not the function part of a call
         // (those are handled by scan_call)
         if node.parent().map(|p| p.kind()) == Some("call") {
-            if node.parent().and_then(|p| self.child_by_field(p, "function")) == Some(node) {
+            if node
+                .parent()
+                .and_then(|p| self.child_by_field(p, "function"))
+                == Some(node)
+            {
                 return;
             }
         }
@@ -1529,12 +1483,7 @@ impl PythonSourceDetector {
     }
 
     /// Scan subscript access for taint sources.
-    fn scan_subscript(
-        &self,
-        node: Node,
-        ctx: &ScanContext,
-        result: &mut SourceScanResult,
-    ) {
+    fn scan_subscript(&self, node: Node, ctx: &ScanContext, result: &mut SourceScanResult) {
         let value = match self.child_by_field(node, "value") {
             Some(n) => n,
             None => return,
@@ -1595,12 +1544,7 @@ impl PythonSourceDetector {
     }
 
     /// Scan an assignment to track taint flow.
-    fn scan_assignment(
-        &self,
-        node: Node,
-        ctx: &mut ScanContext,
-        result: &mut SourceScanResult,
-    ) {
+    fn scan_assignment(&self, node: Node, ctx: &mut ScanContext, result: &mut SourceScanResult) {
         let left = self.child_by_field(node, "left");
         let right = self.child_by_field(node, "right");
 
@@ -1722,7 +1666,10 @@ def handler():
 "#;
         let result = scan(source);
         assert!(!result.sources.is_empty());
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestParam));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestParam));
     }
 
     #[test]
@@ -1734,7 +1681,10 @@ def handler():
     data = request.form['username']
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestBody));
     }
 
     #[test]
@@ -1748,7 +1698,10 @@ def api_handler():
     return {"received": payload}
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestBody));
     }
 
     #[test]
@@ -1773,7 +1726,10 @@ def upload():
     file = request.files['document']
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::FileUpload));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::FileUpload));
     }
 
     #[test]
@@ -1785,7 +1741,10 @@ def handler():
     auth = request.headers.get('Authorization')
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::HttpHeader));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::HttpHeader));
     }
 
     #[test]
@@ -1806,9 +1765,10 @@ def get_user(user_id):
         assert!(result.handlers[0].route.as_ref().unwrap().contains("users"));
 
         // URL path parameter should be tainted
-        assert!(result.sources.iter().any(|s| {
-            s.kind == SourceKind::UrlPath && s.expression.contains("user_id")
-        }));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| { s.kind == SourceKind::UrlPath && s.expression.contains("user_id") }));
     }
 
     #[test]
@@ -1838,7 +1798,10 @@ def view(request):
     return HttpResponse(user_id)
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestParam));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestParam));
     }
 
     #[test]
@@ -1849,11 +1812,17 @@ def view(request):
     password = request.POST['password']
 "#;
         let result = scan(source);
-        let post_sources: Vec<_> = result.sources.iter()
+        let post_sources: Vec<_> = result
+            .sources
+            .iter()
             .filter(|s| s.kind == SourceKind::RequestBody)
             .collect();
         // At least 2 sources (may detect more from subscript + attribute)
-        assert!(post_sources.len() >= 2, "Expected at least 2 POST sources, got {}", post_sources.len());
+        assert!(
+            post_sources.len() >= 2,
+            "Expected at least 2 POST sources, got {}",
+            post_sources.len()
+        );
     }
 
     #[test]
@@ -1865,7 +1834,10 @@ def api_view(request):
     data = json.loads(request.body)
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestBody));
     }
 
     #[test]
@@ -1876,7 +1848,9 @@ def view(request):
     ua = request.META.get('HTTP_USER_AGENT')
 "#;
         let result = scan(source);
-        let meta_sources: Vec<_> = result.sources.iter()
+        let meta_sources: Vec<_> = result
+            .sources
+            .iter()
             .filter(|s| s.kind == SourceKind::HttpHeader)
             .collect();
         assert_eq!(meta_sources.len(), 2);
@@ -1902,7 +1876,9 @@ def read_items(q: str = Query(None)):
         assert_eq!(result.handlers[0].framework, "fastapi");
 
         // Query parameter should be tainted
-        assert!(result.handlers[0].tainted_params.iter()
+        assert!(result.handlers[0]
+            .tainted_params
+            .iter()
             .any(|p| p.name == "q" && p.kind == SourceKind::RequestParam));
     }
 
@@ -1918,7 +1894,9 @@ def read_item(item_id: int = Path(...)):
     return {"item_id": item_id}
 "#;
         let result = scan(source);
-        assert!(result.handlers[0].tainted_params.iter()
+        assert!(result.handlers[0]
+            .tainted_params
+            .iter()
             .any(|p| p.name == "item_id" && p.kind == SourceKind::UrlPath));
     }
 
@@ -1936,7 +1914,9 @@ def create_item(item: Item = Body(...)):
     return item
 "#;
         let result = scan(source);
-        assert!(result.handlers[0].tainted_params.iter()
+        assert!(result.handlers[0]
+            .tainted_params
+            .iter()
             .any(|p| p.name == "item" && p.kind == SourceKind::RequestBody));
     }
 
@@ -1950,7 +1930,9 @@ def read_items(x_token: str = Header(None)):
     return {"X-Token": x_token}
 "#;
         let result = scan(source);
-        assert!(result.handlers[0].tainted_params.iter()
+        assert!(result.handlers[0]
+            .tainted_params
+            .iter()
             .any(|p| p.name == "x_token" && p.kind == SourceKind::HttpHeader));
     }
 
@@ -1964,7 +1946,9 @@ def read_items(ads_id: str = Cookie(None)):
     return {"ads_id": ads_id}
 "#;
         let result = scan(source);
-        assert!(result.handlers[0].tainted_params.iter()
+        assert!(result.handlers[0]
+            .tainted_params
+            .iter()
             .any(|p| p.name == "ads_id" && p.kind == SourceKind::Cookie));
     }
 
@@ -1996,7 +1980,10 @@ print(f"Hello, {name}")
 "#;
         let result = scan(source);
         assert!(result.sources.iter().any(|s| s.kind == SourceKind::Stdin));
-        assert!(result.sources.iter().any(|s| s.assigned_to == Some("name".to_string())));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.assigned_to == Some("name".to_string())));
     }
 
     #[test]
@@ -2008,11 +1995,17 @@ filename = sys.argv[1]
 mode = sys.argv[2]
 "#;
         let result = scan(source);
-        let argv_sources: Vec<_> = result.sources.iter()
+        let argv_sources: Vec<_> = result
+            .sources
+            .iter()
             .filter(|s| s.kind == SourceKind::ProcessArgs)
             .collect();
         // At least 2 sources (may detect more from subscript + attribute patterns)
-        assert!(argv_sources.len() >= 2, "Expected at least 2 argv sources, got {}", argv_sources.len());
+        assert!(
+            argv_sources.len() >= 2,
+            "Expected at least 2 argv sources, got {}",
+            argv_sources.len()
+        );
     }
 
     #[test]
@@ -2024,11 +2017,17 @@ db_url = os.environ['DATABASE_URL']
 secret = os.environ.get('SECRET_KEY')
 "#;
         let result = scan(source);
-        let env_sources: Vec<_> = result.sources.iter()
+        let env_sources: Vec<_> = result
+            .sources
+            .iter()
             .filter(|s| s.kind == SourceKind::Environment)
             .collect();
         // At least 2 sources (may detect more from subscript + attribute patterns)
-        assert!(env_sources.len() >= 2, "Expected at least 2 environ sources, got {}", env_sources.len());
+        assert!(
+            env_sources.len() >= 2,
+            "Expected at least 2 environ sources, got {}",
+            env_sources.len()
+        );
     }
 
     #[test]
@@ -2040,7 +2039,9 @@ home = os.getenv('HOME')
 path = os.getenv('PATH', '/usr/bin')
 "#;
         let result = scan(source);
-        let env_sources: Vec<_> = result.sources.iter()
+        let env_sources: Vec<_> = result
+            .sources
+            .iter()
             .filter(|s| s.kind == SourceKind::Environment)
             .collect();
         assert_eq!(env_sources.len(), 2);
@@ -2059,7 +2060,10 @@ response = requests.get('http://api.example.com/data')
 data = response.json()
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::HttpResponse));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::HttpResponse));
     }
 
     #[test]
@@ -2071,7 +2075,10 @@ resp = requests.post('http://api.example.com/submit', json={"key": "value"})
 result = resp.text
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::HttpResponse));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::HttpResponse));
     }
 
     #[test]
@@ -2086,7 +2093,10 @@ data = socket.recv(1024)
         let result = scan(source);
         // Note: The source uses "socket" object for recv() call since
         // variable aliasing detection would require dataflow analysis
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::SocketRecv));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::SocketRecv));
     }
 
     // =========================================================================
@@ -2104,7 +2114,10 @@ cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
 row = cursor.fetchone()
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::DatabaseResult));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::DatabaseResult));
     }
 
     #[test]
@@ -2114,7 +2127,10 @@ cursor.execute("SELECT * FROM users")
 rows = cursor.fetchall()
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::DatabaseResult));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::DatabaseResult));
     }
 
     #[test]
@@ -2124,7 +2140,10 @@ cursor.execute("SELECT * FROM logs")
 batch = cursor.fetchmany(100)
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::DatabaseResult));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::DatabaseResult));
     }
 
     // =========================================================================
@@ -2139,7 +2158,10 @@ import json
 data = json.loads(user_input)
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::Deserialized));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::Deserialized));
     }
 
     #[test]
@@ -2151,7 +2173,10 @@ with open('config.yaml') as f:
     config = yaml.load(f, Loader=yaml.SafeLoader)
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::Deserialized));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::Deserialized));
     }
 
     #[test]
@@ -2162,7 +2187,10 @@ import pickle
 obj = pickle.loads(data)
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::Deserialized));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::Deserialized));
     }
 
     // =========================================================================
@@ -2177,12 +2205,16 @@ env_var = os.getenv('CONFIG')
 "#;
         let result = scan(source);
 
-        let input_source = result.sources.iter()
+        let input_source = result
+            .sources
+            .iter()
             .find(|s| s.kind == SourceKind::Stdin)
             .unwrap();
         assert_eq!(input_source.assigned_to, Some("user_input".to_string()));
 
-        let env_source = result.sources.iter()
+        let env_source = result
+            .sources
+            .iter()
             .find(|s| s.kind == SourceKind::Environment)
             .unwrap();
         assert_eq!(env_source.assigned_to, Some("env_var".to_string()));
@@ -2202,7 +2234,9 @@ def search():
 "#;
         let result = scan(source);
 
-        let source = result.sources.iter()
+        let source = result
+            .sources
+            .iter()
             .find(|s| s.kind == SourceKind::RequestParam)
             .unwrap();
 
@@ -2227,9 +2261,18 @@ def process():
 "#;
         let result = scan(source);
 
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestParam));
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestBody));
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::HttpHeader));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestParam));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::HttpHeader));
         assert!(result.sources.iter().any(|s| s.kind == SourceKind::Cookie));
     }
 
@@ -2239,7 +2282,10 @@ def process():
 data = request.json['users'][0]['name']
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestBody));
     }
 
     #[test]
@@ -2248,7 +2294,10 @@ data = request.json['users'][0]['name']
 text = requests.get(url).text
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::HttpResponse));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::HttpResponse));
     }
 
     // =========================================================================
@@ -2263,7 +2312,9 @@ async def websocket_handler(websocket):
     text = await websocket.receive_text()
 "#;
         let result = scan(source);
-        let ws_sources: Vec<_> = result.sources.iter()
+        let ws_sources: Vec<_> = result
+            .sources
+            .iter()
             .filter(|s| s.kind == SourceKind::WebSocketMessage)
             .collect();
         assert_eq!(ws_sources.len(), 2);
@@ -2317,12 +2368,16 @@ row = obj.fetchone()
 "#;
         let result = scan(source);
 
-        let input_source = result.sources.iter()
+        let input_source = result
+            .sources
+            .iter()
             .find(|s| s.kind == SourceKind::Stdin)
             .unwrap();
         assert!((input_source.confidence - 1.0).abs() < f64::EPSILON);
 
-        let fetch_source = result.sources.iter()
+        let fetch_source = result
+            .sources
+            .iter()
             .find(|s| s.kind == SourceKind::DatabaseResult)
             .unwrap();
         assert!(fetch_source.confidence < 1.0);

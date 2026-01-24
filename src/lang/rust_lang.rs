@@ -19,16 +19,16 @@
 //! - Extern blocks (extern "C" { fn foo(); }) with ABI tracking
 //! - Extern crate declarations (extern crate foo; and extern crate foo as bar;)
 
-use std::collections::HashMap;
 use tree_sitter::{Node, Parser, Tree};
 
 use aho_corasick::AhoCorasick;
+use rustc_hash::FxHashMap;
 use once_cell::sync::Lazy;
 
 use crate::ast::types::{ClassInfo, FunctionInfo, ImportInfo};
 use crate::cfg::types::{BlockId, BlockType, CFGBlock, CFGEdge, CFGInfo, EdgeType};
 use crate::dfg::types::{DFGInfo, DataflowEdge, DataflowKind};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::traits::Language;
 
 // =============================================================================
@@ -201,7 +201,7 @@ struct LoopContext {
     /// Stack of unlabeled loop contexts: (header_block, exit_block)
     unlabeled_stack: Vec<(BlockId, BlockId)>,
     /// Map of labeled loops: label -> (header_block, exit_block)
-    labeled_loops: HashMap<String, (BlockId, BlockId)>,
+    labeled_loops: FxHashMap<String, (BlockId, BlockId)>,
 }
 
 /// Context for tracking async/await patterns during CFG construction.
@@ -236,7 +236,8 @@ impl AsyncCfgContext {
 
     /// Record a lock acquisition
     fn acquire_lock(&mut self, var_name: &str, lock_type: &str, line: usize) {
-        self.held_locks.push((var_name.to_string(), lock_type.to_string(), line));
+        self.held_locks
+            .push((var_name.to_string(), lock_type.to_string(), line));
     }
 
     /// Release a lock (variable goes out of scope or explicit drop)
@@ -375,10 +376,7 @@ impl Rust {
     /// Removes common leading asterisks from continuation lines.
     fn extract_block_doc_content(&self, text: &str) -> String {
         // Remove /** prefix and */ suffix
-        let content = text
-            .trim_start_matches("/**")
-            .trim_end_matches("*/")
-            .trim();
+        let content = text.trim_start_matches("/**").trim_end_matches("*/").trim();
 
         // Handle multi-line block comments: remove leading * from each line
         let lines: Vec<&str> = content
@@ -638,7 +636,11 @@ impl Rust {
             return (true, Some("select!"));
         }
         if text.starts_with("futures::join!") || text.starts_with("futures::select!") {
-            let macro_name = if text.contains("join!") { "join!" } else { "select!" };
+            let macro_name = if text.contains("join!") {
+                "join!"
+            } else {
+                "select!"
+            };
             return (true, Some(macro_name));
         }
         (false, None)
@@ -656,7 +658,10 @@ impl Rust {
 
         // Single-pass multi-pattern match for known blocking operations
         if let Some(mat) = BLOCKING_PATTERNS.find(text.as_bytes()) {
-            return (true, Some(BLOCKING_PATTERN_NAMES[mat.pattern().as_usize()].to_string()));
+            return (
+                true,
+                Some(BLOCKING_PATTERN_NAMES[mat.pattern().as_usize()].to_string()),
+            );
         }
 
         // Special case: Mutex::lock (sync version) requires negative matching
@@ -986,7 +991,8 @@ impl Rust {
                 }
                 // FEATURE: Associated type declarations in traits (type Item;)
                 "associated_type" => {
-                    if let Some(assoc_type) = self.extract_associated_type_declaration(child, source)
+                    if let Some(assoc_type) =
+                        self.extract_associated_type_declaration(child, source)
                     {
                         methods.push(assoc_type);
                     }
@@ -1433,10 +1439,10 @@ impl Rust {
         &self,
         node: Node,
         source: &[u8],
-    ) -> (String, Vec<String>, HashMap<String, String>, bool) {
+    ) -> (String, Vec<String>, FxHashMap<String, String>, bool) {
         let mut module_parts = Vec::new();
         let mut names = Vec::new();
-        let mut aliases = HashMap::new();
+        let mut aliases = FxHashMap::default();
         let mut is_glob = false;
 
         self.traverse_use_tree(
@@ -1459,7 +1465,7 @@ impl Rust {
         source: &[u8],
         module_parts: &mut Vec<String>,
         names: &mut Vec<String>,
-        aliases: &mut HashMap<String, String>,
+        aliases: &mut FxHashMap<String, String>,
         is_glob: &mut bool,
     ) {
         match node.kind() {
@@ -1599,7 +1605,7 @@ impl Rust {
         Some(ImportInfo {
             module,
             names,
-            aliases,
+            aliases: aliases.into_iter().collect(),
             is_from,
             level,
             line_number: node.start_position().row + 1,
@@ -1641,7 +1647,7 @@ impl Rust {
     /// - Lock-across-await detection
     /// - Blocking call detection in async context
     fn build_rust_cfg(&self, node: Node, source: &[u8], function_name: &str) -> CFGInfo {
-        let mut blocks = HashMap::new();
+        let mut blocks = FxHashMap::default();
         let mut edges = Vec::new();
         let mut block_counter = 0;
         let mut decision_points = 0;
@@ -1732,13 +1738,13 @@ impl Rust {
 
         CFGInfo {
             function_name: function_name.to_string(),
-            blocks,
+            blocks: blocks.into_iter().collect(),
             edges,
             entry: entry_id,
             exits: vec![exit_id],
             decision_points,
             comprehension_decision_points: 0, // Rust doesn't have Python-style comprehensions
-            nested_cfgs: HashMap::new(),
+            nested_cfgs: FxHashMap::default(),
             is_async: is_async_fn,
             await_points: async_ctx.await_points,
             blocking_calls: async_ctx.blocking_calls,
@@ -1751,7 +1757,7 @@ impl Rust {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         counter: &mut usize,
         entry: BlockId,
@@ -1760,8 +1766,15 @@ impl Rust {
         let mut async_ctx = AsyncCfgContext::default();
         let mut decision_points = 0;
         self.process_cfg_block_with_async_ctx(
-            node, source, blocks, edges, counter, entry, &mut loop_ctx,
-            &mut async_ctx, &mut decision_points,
+            node,
+            source,
+            blocks,
+            edges,
+            counter,
+            entry,
+            &mut loop_ctx,
+            &mut async_ctx,
+            &mut decision_points,
         )
     }
 
@@ -1774,7 +1787,7 @@ impl Rust {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         counter: &mut usize,
         entry: BlockId,
@@ -1783,8 +1796,15 @@ impl Rust {
         let mut async_ctx = AsyncCfgContext::default();
         let mut decision_points = 0;
         self.process_cfg_block_with_async_ctx(
-            node, source, blocks, edges, counter, entry, loop_ctx,
-            &mut async_ctx, &mut decision_points,
+            node,
+            source,
+            blocks,
+            edges,
+            counter,
+            entry,
+            loop_ctx,
+            &mut async_ctx,
+            &mut decision_points,
         )
     }
 
@@ -1799,7 +1819,7 @@ impl Rust {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         counter: &mut usize,
         entry: BlockId,
@@ -1900,8 +1920,15 @@ impl Rust {
                         edges.push(edge);
                         *decision_points += 1; // if condition is a decision point
                         self.process_cfg_block_with_async_ctx(
-                            then_body, source, blocks, edges, counter, then_entry,
-                            loop_ctx, async_ctx, decision_points,
+                            then_body,
+                            source,
+                            blocks,
+                            edges,
+                            counter,
+                            then_entry,
+                            loop_ctx,
+                            async_ctx,
+                            decision_points,
                         )
                     } else {
                         (if_block, Vec::new())
@@ -1981,14 +2008,14 @@ impl Rust {
                     blocks.insert(
                         merge_block,
                         CFGBlock {
-                id: merge_block,
-                label: "merge".to_string(),
-                block_type: BlockType::Body,
-                statements: Vec::new(),
-                func_calls: Vec::new(),
-                start_line: child.end_position().row + 1,
-                end_line: child.end_position().row + 1,
-            },
+                            id: merge_block,
+                            label: "merge".to_string(),
+                            block_type: BlockType::Body,
+                            statements: Vec::new(),
+                            func_calls: Vec::new(),
+                            start_line: child.end_position().row + 1,
+                            end_line: child.end_position().row + 1,
+                        },
                     );
 
                     // Connect branches to merge
@@ -2034,7 +2061,9 @@ impl Rust {
                             // The label text includes the lifetime syntax ('label:)
                             let text = self.node_text(label_node, source);
                             // Strip the colon suffix and leading quote
-                            text.trim_end_matches(':').trim_start_matches('\'').to_string()
+                            text.trim_end_matches(':')
+                                .trim_start_matches('\'')
+                                .to_string()
                         });
 
                     // Check if this is a while-let pattern (condition is let_condition)
@@ -2149,17 +2178,32 @@ impl Rust {
                         // Use _with_async_ctx to propagate loop and async context
                         *decision_points += 1; // loop is a decision point
                         let (body_exit, body_exits) = self.process_cfg_block_with_async_ctx(
-                            loop_body, source, blocks, edges, counter, body_entry, loop_ctx,
-                            async_ctx, decision_points,
+                            loop_body,
+                            source,
+                            blocks,
+                            edges,
+                            counter,
+                            body_entry,
+                            loop_ctx,
+                            async_ctx,
+                            decision_points,
                         );
 
                         // Back edge to loop header (for normal loop continuation)
                         // Only add if there's no explicit break/continue that already terminated
                         if body_exits.is_empty() {
                             let back_edge = if is_while_let {
-                                CFGEdge::from_label(body_exit, loop_header, Some("next".to_string()))
+                                CFGEdge::from_label(
+                                    body_exit,
+                                    loop_header,
+                                    Some("next".to_string()),
+                                )
                             } else {
-                                CFGEdge::from_label(body_exit, loop_header, Some("loop".to_string()))
+                                CFGEdge::from_label(
+                                    body_exit,
+                                    loop_header,
+                                    Some("loop".to_string()),
+                                )
                             };
                             edges.push(back_edge);
                         }
@@ -2218,7 +2262,11 @@ impl Rust {
 
                     // Resolve break target using loop context
                     if let Some(target) = loop_ctx.resolve_break(break_label.as_deref()) {
-                        edges.push(CFGEdge::from_label(break_block, target, Some("break".to_string())));
+                        edges.push(CFGEdge::from_label(
+                            break_block,
+                            target,
+                            Some("break".to_string()),
+                        ));
                     }
 
                     // Mark as exit (control flow leaves normal path)
@@ -2230,14 +2278,14 @@ impl Rust {
                     blocks.insert(
                         current_block,
                         CFGBlock {
-                id: current_block,
-                label: "unreachable".to_string(),
-                block_type: BlockType::Body,
-                statements: Vec::new(),
-                func_calls: Vec::new(),
-                start_line: child.end_position().row + 1,
-                end_line: child.end_position().row + 1,
-            },
+                            id: current_block,
+                            label: "unreachable".to_string(),
+                            block_type: BlockType::Body,
+                            statements: Vec::new(),
+                            func_calls: Vec::new(),
+                            start_line: child.end_position().row + 1,
+                            end_line: child.end_position().row + 1,
+                        },
                     );
                 }
                 "continue_expression" => {
@@ -2280,7 +2328,11 @@ impl Rust {
 
                     // Resolve continue target using loop context (jumps to header)
                     if let Some(target) = loop_ctx.resolve_continue(continue_label.as_deref()) {
-                        edges.push(CFGEdge::from_label(continue_block, target, Some("continue".to_string())));
+                        edges.push(CFGEdge::from_label(
+                            continue_block,
+                            target,
+                            Some("continue".to_string()),
+                        ));
                     }
 
                     // Mark as exit (control flow leaves normal path)
@@ -2292,14 +2344,14 @@ impl Rust {
                     blocks.insert(
                         current_block,
                         CFGBlock {
-                id: current_block,
-                label: "unreachable".to_string(),
-                block_type: BlockType::Body,
-                statements: Vec::new(),
-                func_calls: Vec::new(),
-                start_line: child.end_position().row + 1,
-                end_line: child.end_position().row + 1,
-            },
+                            id: current_block,
+                            label: "unreachable".to_string(),
+                            block_type: BlockType::Body,
+                            statements: Vec::new(),
+                            func_calls: Vec::new(),
+                            start_line: child.end_position().row + 1,
+                            end_line: child.end_position().row + 1,
+                        },
                     );
                 }
                 "match_expression" => {
@@ -2310,14 +2362,14 @@ impl Rust {
                     blocks.insert(
                         match_block,
                         CFGBlock {
-                id: match_block,
-                label: "match".to_string(),
-                block_type: BlockType::Body,
-                statements: statements.drain(..).collect(),
-                func_calls: Vec::new(),
-                start_line: child.start_position().row + 1,
-                end_line: child.start_position().row + 1,
-            },
+                            id: match_block,
+                            label: "match".to_string(),
+                            block_type: BlockType::Body,
+                            statements: statements.drain(..).collect(),
+                            func_calls: Vec::new(),
+                            start_line: child.start_position().row + 1,
+                            end_line: child.start_position().row + 1,
+                        },
                     );
 
                     edges.push(CFGEdge::from_label(current_block, match_block, None));
@@ -2344,14 +2396,14 @@ impl Rust {
                                 blocks.insert(
                                     arm_block,
                                     CFGBlock {
-                id: arm_block,
-                label: pattern.chars().take(30).collect(),
-                block_type: BlockType::Body,
-                statements: Vec::new(),
-                func_calls: Vec::new(),
-                start_line: arm.start_position().row + 1,
-                end_line: arm.end_position().row + 1,
-            },
+                                        id: arm_block,
+                                        label: pattern.chars().take(30).collect(),
+                                        block_type: BlockType::Body,
+                                        statements: Vec::new(),
+                                        func_calls: Vec::new(),
+                                        start_line: arm.start_position().row + 1,
+                                        end_line: arm.end_position().row + 1,
+                                    },
                                 );
 
                                 edges.push(CFGEdge::from_label(match_block, arm_block, None));
@@ -2367,14 +2419,14 @@ impl Rust {
                     blocks.insert(
                         merge_block,
                         CFGBlock {
-                id: merge_block,
-                label: "match merge".to_string(),
-                block_type: BlockType::Body,
-                statements: Vec::new(),
-                func_calls: Vec::new(),
-                start_line: child.end_position().row + 1,
-                end_line: child.end_position().row + 1,
-            },
+                            id: merge_block,
+                            label: "match merge".to_string(),
+                            block_type: BlockType::Body,
+                            statements: Vec::new(),
+                            func_calls: Vec::new(),
+                            start_line: child.end_position().row + 1,
+                            end_line: child.end_position().row + 1,
+                        },
                     );
 
                     for arm_exit in arm_exits {
@@ -2394,14 +2446,14 @@ impl Rust {
                     blocks.insert(
                         return_block,
                         CFGBlock {
-                id: return_block,
-                label: "return".to_string(),
-                block_type: BlockType::Body,
-                statements: statements.drain(..).collect(),
-                func_calls: Vec::new(),
-                start_line: child.start_position().row + 1,
-                end_line: child.end_position().row + 1,
-            },
+                            id: return_block,
+                            label: "return".to_string(),
+                            block_type: BlockType::Body,
+                            statements: statements.drain(..).collect(),
+                            func_calls: Vec::new(),
+                            start_line: child.start_position().row + 1,
+                            end_line: child.end_position().row + 1,
+                        },
                     );
 
                     edges.push(CFGEdge::from_label(current_block, return_block, None));
@@ -2414,14 +2466,14 @@ impl Rust {
                     blocks.insert(
                         current_block,
                         CFGBlock {
-                id: current_block,
-                label: "unreachable".to_string(),
-                block_type: BlockType::Body,
-                statements: Vec::new(),
-                func_calls: Vec::new(),
-                start_line: child.end_position().row + 1,
-                end_line: child.end_position().row + 1,
-            },
+                            id: current_block,
+                            label: "unreachable".to_string(),
+                            block_type: BlockType::Body,
+                            statements: Vec::new(),
+                            func_calls: Vec::new(),
+                            start_line: child.end_position().row + 1,
+                            end_line: child.end_position().row + 1,
+                        },
                     );
                 }
                 "let_declaration" => {
@@ -2445,7 +2497,10 @@ impl Rust {
                             let_else_block,
                             CFGBlock {
                                 id: let_else_block,
-                                label: format!("let-else {}", pattern.chars().take(15).collect::<String>()),
+                                label: format!(
+                                    "let-else {}",
+                                    pattern.chars().take(15).collect::<String>()
+                                ),
                                 block_type: BlockType::PatternMatch,
                                 statements: statements.drain(..).collect(),
                                 func_calls: Vec::new(),
@@ -2477,8 +2532,15 @@ impl Rust {
                             *decision_points += 1; // let-else is a decision point
 
                             let (_, else_exits) = self.process_cfg_block_with_async_ctx(
-                                else_body, source, blocks, edges, counter, else_entry,
-                                loop_ctx, async_ctx, decision_points,
+                                else_body,
+                                source,
+                                blocks,
+                                edges,
+                                counter,
+                                else_entry,
+                                loop_ctx,
+                                async_ctx,
+                                decision_points,
                             );
 
                             // The else block must diverge, so add its exits to function exits
@@ -2504,7 +2566,11 @@ impl Rust {
                             },
                         );
 
-                        edges.push(CFGEdge::new(let_else_block, continue_block, EdgeType::OkSome));
+                        edges.push(CFGEdge::new(
+                            let_else_block,
+                            continue_block,
+                            EdgeType::OkSome,
+                        ));
 
                         current_block = continue_block;
                     }
@@ -2531,16 +2597,25 @@ impl Rust {
                                     spawn_block,
                                     CFGBlock {
                                         id: spawn_block,
-                                        label: format!("{}::spawn: {}..", spawn_type.unwrap_or("spawn"), text.chars().take(35).collect::<String>()),
+                                        label: format!(
+                                            "{}::spawn: {}..",
+                                            spawn_type.unwrap_or("spawn"),
+                                            text.chars().take(35).collect::<String>()
+                                        ),
                                         block_type: BlockType::RustTaskSpawn,
                                         statements: vec![text.to_string()],
-                                        func_calls: self.extract_func_calls_from_node(child, source),
+                                        func_calls: self
+                                            .extract_func_calls_from_node(child, source),
                                         start_line: child.start_position().row + 1,
                                         end_line: child.end_position().row + 1,
                                     },
                                 );
 
-                                edges.push(CFGEdge::new(current_block, spawn_block, EdgeType::RustSpawn));
+                                edges.push(CFGEdge::new(
+                                    current_block,
+                                    spawn_block,
+                                    EdgeType::RustSpawn,
+                                ));
                                 current_block = spawn_block;
                                 continue; // Skip remaining checks
                             }
@@ -2567,16 +2642,25 @@ impl Rust {
                                             join_block,
                                             CFGBlock {
                                                 id: join_block,
-                                                label: format!("{}: {}..", macro_type.unwrap_or("join!"), text.chars().take(35).collect::<String>()),
+                                                label: format!(
+                                                    "{}: {}..",
+                                                    macro_type.unwrap_or("join!"),
+                                                    text.chars().take(35).collect::<String>()
+                                                ),
                                                 block_type: BlockType::RustJoin,
                                                 statements: vec![text.to_string()],
-                                                func_calls: self.extract_func_calls_from_node(child, source),
+                                                func_calls: self
+                                                    .extract_func_calls_from_node(child, source),
                                                 start_line: line,
                                                 end_line: child.end_position().row + 1,
                                             },
                                         );
 
-                                        edges.push(CFGEdge::new(current_block, join_block, EdgeType::RustAwait));
+                                        edges.push(CFGEdge::new(
+                                            current_block,
+                                            join_block,
+                                            EdgeType::RustAwait,
+                                        ));
                                         async_ctx.record_await(line);
 
                                         if is_try {
@@ -2594,7 +2678,11 @@ impl Rust {
                                                     end_line: line,
                                                 },
                                             );
-                                            edges.push(CFGEdge::new(join_block, error_block, EdgeType::ErrNone));
+                                            edges.push(CFGEdge::new(
+                                                join_block,
+                                                error_block,
+                                                EdgeType::ErrNone,
+                                            ));
                                             exits.push(error_block);
                                             *decision_points += 1;
                                         }
@@ -2613,7 +2701,11 @@ impl Rust {
                                                 end_line: child.end_position().row + 1,
                                             },
                                         );
-                                        edges.push(CFGEdge::new(join_block, continue_block, EdgeType::RustJoinComplete));
+                                        edges.push(CFGEdge::new(
+                                            join_block,
+                                            continue_block,
+                                            EdgeType::RustJoinComplete,
+                                        ));
                                         current_block = continue_block;
                                         continue;
                                     }
@@ -2625,16 +2717,24 @@ impl Rust {
                                             select_block,
                                             CFGBlock {
                                                 id: select_block,
-                                                label: format!("select!: {}..", text.chars().take(35).collect::<String>()),
+                                                label: format!(
+                                                    "select!: {}..",
+                                                    text.chars().take(35).collect::<String>()
+                                                ),
                                                 block_type: BlockType::RustSelect,
                                                 statements: vec![text.to_string()],
-                                                func_calls: self.extract_func_calls_from_node(child, source),
+                                                func_calls: self
+                                                    .extract_func_calls_from_node(child, source),
                                                 start_line: line,
                                                 end_line: child.end_position().row + 1,
                                             },
                                         );
 
-                                        edges.push(CFGEdge::new(current_block, select_block, EdgeType::RustAwait));
+                                        edges.push(CFGEdge::new(
+                                            current_block,
+                                            select_block,
+                                            EdgeType::RustAwait,
+                                        ));
                                         async_ctx.record_await(line);
                                         *decision_points += 1;
 
@@ -2652,7 +2752,11 @@ impl Rust {
                                                 end_line: child.end_position().row + 1,
                                             },
                                         );
-                                        edges.push(CFGEdge::new(select_block, continue_block, EdgeType::RustSelectWinner));
+                                        edges.push(CFGEdge::new(
+                                            select_block,
+                                            continue_block,
+                                            EdgeType::RustSelectWinner,
+                                        ));
                                         current_block = continue_block;
                                         continue;
                                     }
@@ -2690,14 +2794,28 @@ impl Rust {
                             *counter += 1;
 
                             let label = if has_held_locks {
-                                let locks: Vec<_> = async_ctx.held_locks.iter()
+                                let locks: Vec<_> = async_ctx
+                                    .held_locks
+                                    .iter()
                                     .map(|(name, lock_type, _)| format!("{}:{}", name, lock_type))
                                     .collect();
-                                format!(".await ({}x) [WARN: holds {}]", await_count, locks.join(", "))
+                                format!(
+                                    ".await ({}x) [WARN: holds {}]",
+                                    await_count,
+                                    locks.join(", ")
+                                )
                             } else if has_try {
-                                format!(".await? ({}x): {}..", await_count, stmt.chars().take(25).collect::<String>())
+                                format!(
+                                    ".await? ({}x): {}..",
+                                    await_count,
+                                    stmt.chars().take(25).collect::<String>()
+                                )
                             } else {
-                                format!(".await ({}x): {}..", await_count, stmt.chars().take(25).collect::<String>())
+                                format!(
+                                    ".await ({}x): {}..",
+                                    await_count,
+                                    stmt.chars().take(25).collect::<String>()
+                                )
                             };
 
                             blocks.insert(
@@ -2713,7 +2831,11 @@ impl Rust {
                                 },
                             );
 
-                            edges.push(CFGEdge::new(current_block, await_block, EdgeType::RustAwait));
+                            edges.push(CFGEdge::new(
+                                current_block,
+                                await_block,
+                                EdgeType::RustAwait,
+                            ));
 
                             if has_try {
                                 // Handle await? pattern
@@ -2732,7 +2854,11 @@ impl Rust {
                                         end_line: line,
                                     },
                                 );
-                                edges.push(CFGEdge::new(await_block, error_return, EdgeType::ErrNone));
+                                edges.push(CFGEdge::new(
+                                    await_block,
+                                    error_return,
+                                    EdgeType::ErrNone,
+                                ));
                                 exits.push(error_return);
                                 *decision_points += try_count;
 
@@ -2750,7 +2876,11 @@ impl Rust {
                                         end_line: child.end_position().row + 1,
                                     },
                                 );
-                                edges.push(CFGEdge::new(await_block, success_block, EdgeType::OkSome));
+                                edges.push(CFGEdge::new(
+                                    await_block,
+                                    success_block,
+                                    EdgeType::OkSome,
+                                ));
                                 current_block = success_block;
                             } else {
                                 let resume_block = BlockId(*counter);
@@ -2767,7 +2897,11 @@ impl Rust {
                                         end_line: child.end_position().row + 1,
                                     },
                                 );
-                                edges.push(CFGEdge::new(await_block, resume_block, EdgeType::RustResume));
+                                edges.push(CFGEdge::new(
+                                    await_block,
+                                    resume_block,
+                                    EdgeType::RustResume,
+                                ));
                                 current_block = resume_block;
                             }
                         }
@@ -2914,24 +3048,35 @@ impl Rust {
                         blocks.insert(
                             else_entry,
                             CFGBlock {
-                id: else_entry,
-                label: "let-else diverge".to_string(),
-                block_type: BlockType::Body,
-                statements: Vec::new(),
-                func_calls: Vec::new(),
-                start_line: else_body.start_position().row + 1,
-                end_line: else_body.end_position().row + 1,
-            },
+                                id: else_entry,
+                                label: "let-else diverge".to_string(),
+                                block_type: BlockType::Body,
+                                statements: Vec::new(),
+                                func_calls: Vec::new(),
+                                start_line: else_body.start_position().row + 1,
+                                end_line: else_body.end_position().row + 1,
+                            },
                         );
 
                         // Edge from let-else check to divergent block (pattern doesn't match)
-                        edges.push(CFGEdge::from_label(let_else_block, else_entry, Some("else".to_string())));
+                        edges.push(CFGEdge::from_label(
+                            let_else_block,
+                            else_entry,
+                            Some("else".to_string()),
+                        ));
                         *decision_points += 1; // let-else is a decision point
 
                         // Process the else block to find divergent exits
                         let (_, else_exits) = self.process_cfg_block_with_async_ctx(
-                            else_body, source, blocks, edges, counter, else_entry,
-                            loop_ctx, async_ctx, decision_points,
+                            else_body,
+                            source,
+                            blocks,
+                            edges,
+                            counter,
+                            else_entry,
+                            loop_ctx,
+                            async_ctx,
+                            decision_points,
                         );
 
                         // The else block must diverge, so its exits go to function exit
@@ -2948,18 +3093,22 @@ impl Rust {
                     blocks.insert(
                         continue_block,
                         CFGBlock {
-                id: continue_block,
-                label: "let-else match".to_string(),
-                block_type: BlockType::Body,
-                statements: Vec::new(),
-                func_calls: Vec::new(),
-                start_line: child.end_position().row + 1,
-                end_line: child.end_position().row + 1,
-            },
+                            id: continue_block,
+                            label: "let-else match".to_string(),
+                            block_type: BlockType::Body,
+                            statements: Vec::new(),
+                            func_calls: Vec::new(),
+                            start_line: child.end_position().row + 1,
+                            end_line: child.end_position().row + 1,
+                        },
                     );
 
                     // Edge from let-else check to continue (pattern matches)
-                    edges.push(CFGEdge::from_label(let_else_block, continue_block, Some("match".to_string())));
+                    edges.push(CFGEdge::from_label(
+                        let_else_block,
+                        continue_block,
+                        Some("match".to_string()),
+                    ));
 
                     current_block = continue_block;
                 }
@@ -2985,7 +3134,10 @@ impl Rust {
                         if_let_block,
                         CFGBlock {
                             id: if_let_block,
-                            label: format!("if let {}", pattern_text.chars().take(20).collect::<String>()),
+                            label: format!(
+                                "if let {}",
+                                pattern_text.chars().take(20).collect::<String>()
+                            ),
                             block_type: BlockType::PatternMatch,
                             statements: statements.drain(..).collect(),
                             func_calls: Vec::new(),
@@ -3019,8 +3171,15 @@ impl Rust {
                         edges.push(CFGEdge::new(if_let_block, then_entry, EdgeType::OkSome));
                         *decision_points += 1; // if-let is a decision point
                         self.process_cfg_block_with_async_ctx(
-                            then_body, source, blocks, edges, counter, then_entry,
-                            loop_ctx, async_ctx, decision_points,
+                            then_body,
+                            source,
+                            blocks,
+                            edges,
+                            counter,
+                            then_entry,
+                            loop_ctx,
+                            async_ctx,
+                            decision_points,
                         )
                     } else {
                         (if_let_block, Vec::new())
@@ -3032,9 +3191,11 @@ impl Rust {
                         .find(|c| c.kind() == "else_clause");
 
                     let else_exits = if let Some(else_node) = else_clause {
-                        let else_body = else_node
-                            .children(&mut else_node.walk())
-                            .find(|c| c.kind() == "block" || c.kind() == "if_expression" || c.kind() == "if_let_expression");
+                        let else_body = else_node.children(&mut else_node.walk()).find(|c| {
+                            c.kind() == "block"
+                                || c.kind() == "if_expression"
+                                || c.kind() == "if_let_expression"
+                        });
 
                         if let Some(else_content) = else_body {
                             let else_entry = BlockId(*counter);
@@ -3054,8 +3215,15 @@ impl Rust {
                             edges.push(CFGEdge::new(if_let_block, else_entry, EdgeType::ErrNone));
 
                             let (_, exits) = self.process_cfg_block_with_async_ctx(
-                                else_content, source, blocks, edges, counter, else_entry,
-                                loop_ctx, async_ctx, decision_points,
+                                else_content,
+                                source,
+                                blocks,
+                                edges,
+                                counter,
+                                else_entry,
+                                loop_ctx,
+                                async_ctx,
+                                decision_points,
                             );
                             if exits.is_empty() {
                                 vec![else_entry]
@@ -3152,7 +3320,10 @@ impl Rust {
                         while_let_header,
                         CFGBlock {
                             id: while_let_header,
-                            label: format!("while let {}", pattern_text.chars().take(15).collect::<String>()),
+                            label: format!(
+                                "while let {}",
+                                pattern_text.chars().take(15).collect::<String>()
+                            ),
                             block_type: BlockType::PatternMatch,
                             statements: statements.drain(..).collect(),
                             func_calls: Vec::new(),
@@ -3191,13 +3362,24 @@ impl Rust {
                         *decision_points += 1; // while-let is a decision point
 
                         let (body_exit, body_exits) = self.process_cfg_block_with_async_ctx(
-                            loop_body, source, blocks, edges, counter, body_entry, loop_ctx,
-                            async_ctx, decision_points,
+                            loop_body,
+                            source,
+                            blocks,
+                            edges,
+                            counter,
+                            body_entry,
+                            loop_ctx,
+                            async_ctx,
+                            decision_points,
                         );
 
                         // Back edge to header for next iteration
                         if body_exits.is_empty() {
-                            edges.push(CFGEdge::from_label(body_exit, while_let_header, Some("next".to_string())));
+                            edges.push(CFGEdge::from_label(
+                                body_exit,
+                                while_let_header,
+                                Some("next".to_string()),
+                            ));
                         }
                     }
 
@@ -3205,7 +3387,11 @@ impl Rust {
                     loop_ctx.pop_loop(None);
 
                     // None/Err exits the loop
-                    edges.push(CFGEdge::new(while_let_header, while_let_exit, EdgeType::ErrNone));
+                    edges.push(CFGEdge::new(
+                        while_let_header,
+                        while_let_exit,
+                        EdgeType::ErrNone,
+                    ));
 
                     current_block = while_let_exit;
                 }
@@ -3236,7 +3422,9 @@ impl Rust {
 
                     // Build label with held lock info if any
                     let label = if has_held_locks {
-                        let locks: Vec<_> = async_ctx.held_locks.iter()
+                        let locks: Vec<_> = async_ctx
+                            .held_locks
+                            .iter()
                             .map(|(name, lock_type, _)| format!("{}:{}", name, lock_type))
                             .collect();
                         format!(".await {} [WARN: holds {}]", await_info, locks.join(", "))
@@ -3268,7 +3456,11 @@ impl Rust {
                     );
 
                     // Edge to await point
-                    edges.push(CFGEdge::new(current_block, await_block, EdgeType::RustAwait));
+                    edges.push(CFGEdge::new(
+                        current_block,
+                        await_block,
+                        EdgeType::RustAwait,
+                    ));
 
                     if has_try {
                         // Handle .await? pattern - both suspension and error propagation
@@ -3330,7 +3522,11 @@ impl Rust {
                         CFGBlock {
                             id: async_block_id,
                             label: if has_await {
-                                format!("async block ({}x await): {}..", self.count_await_expressions(child), truncated)
+                                format!(
+                                    "async block ({}x await): {}..",
+                                    self.count_await_expressions(child),
+                                    truncated
+                                )
                             } else {
                                 format!("async block: {}..", truncated)
                             },
@@ -3375,16 +3571,25 @@ impl Rust {
                                     join_block,
                                     CFGBlock {
                                         id: join_block,
-                                        label: format!("{}: {}..", macro_type.unwrap_or("join!"), text.chars().take(35).collect::<String>()),
+                                        label: format!(
+                                            "{}: {}..",
+                                            macro_type.unwrap_or("join!"),
+                                            text.chars().take(35).collect::<String>()
+                                        ),
                                         block_type: BlockType::RustJoin,
                                         statements: vec![text.to_string()],
-                                        func_calls: self.extract_func_calls_from_node(child, source),
+                                        func_calls: self
+                                            .extract_func_calls_from_node(child, source),
                                         start_line: line,
                                         end_line: child.end_position().row + 1,
                                     },
                                 );
 
-                                edges.push(CFGEdge::new(current_block, join_block, EdgeType::RustAwait));
+                                edges.push(CFGEdge::new(
+                                    current_block,
+                                    join_block,
+                                    EdgeType::RustAwait,
+                                ));
                                 async_ctx.record_await(line);
 
                                 if is_try {
@@ -3403,7 +3608,11 @@ impl Rust {
                                             end_line: line,
                                         },
                                     );
-                                    edges.push(CFGEdge::new(join_block, error_block, EdgeType::ErrNone));
+                                    edges.push(CFGEdge::new(
+                                        join_block,
+                                        error_block,
+                                        EdgeType::ErrNone,
+                                    ));
                                     exits.push(error_block);
                                     *decision_points += 1;
                                 }
@@ -3423,7 +3632,11 @@ impl Rust {
                                         end_line: child.end_position().row + 1,
                                     },
                                 );
-                                edges.push(CFGEdge::new(join_block, continue_block, EdgeType::RustJoinComplete));
+                                edges.push(CFGEdge::new(
+                                    join_block,
+                                    continue_block,
+                                    EdgeType::RustJoinComplete,
+                                ));
                                 current_block = continue_block;
                             }
                             Some("select!") => {
@@ -3435,16 +3648,24 @@ impl Rust {
                                     select_block,
                                     CFGBlock {
                                         id: select_block,
-                                        label: format!("select!: {}..", text.chars().take(35).collect::<String>()),
+                                        label: format!(
+                                            "select!: {}..",
+                                            text.chars().take(35).collect::<String>()
+                                        ),
                                         block_type: BlockType::RustSelect,
                                         statements: vec![text.to_string()],
-                                        func_calls: self.extract_func_calls_from_node(child, source),
+                                        func_calls: self
+                                            .extract_func_calls_from_node(child, source),
                                         start_line: line,
                                         end_line: child.end_position().row + 1,
                                     },
                                 );
 
-                                edges.push(CFGEdge::new(current_block, select_block, EdgeType::RustAwait));
+                                edges.push(CFGEdge::new(
+                                    current_block,
+                                    select_block,
+                                    EdgeType::RustAwait,
+                                ));
                                 async_ctx.record_await(line);
                                 *decision_points += 1; // select! is a decision point
 
@@ -3463,7 +3684,11 @@ impl Rust {
                                         end_line: child.end_position().row + 1,
                                     },
                                 );
-                                edges.push(CFGEdge::new(select_block, continue_block, EdgeType::RustSelectWinner));
+                                edges.push(CFGEdge::new(
+                                    select_block,
+                                    continue_block,
+                                    EdgeType::RustSelectWinner,
+                                ));
                                 current_block = continue_block;
                             }
                             _ => {
@@ -3535,7 +3760,11 @@ impl Rust {
                             spawn_block,
                             CFGBlock {
                                 id: spawn_block,
-                                label: format!("{}::spawn: {}..", spawn_type.unwrap_or("spawn"), text.chars().take(35).collect::<String>()),
+                                label: format!(
+                                    "{}::spawn: {}..",
+                                    spawn_type.unwrap_or("spawn"),
+                                    text.chars().take(35).collect::<String>()
+                                ),
                                 block_type: BlockType::RustTaskSpawn,
                                 statements: vec![text.to_string()],
                                 func_calls: self.extract_func_calls_from_node(child, source),
@@ -3544,7 +3773,11 @@ impl Rust {
                             },
                         );
 
-                        edges.push(CFGEdge::new(current_block, spawn_block, EdgeType::RustSpawn));
+                        edges.push(CFGEdge::new(
+                            current_block,
+                            spawn_block,
+                            EdgeType::RustSpawn,
+                        ));
                         current_block = spawn_block;
                     }
                     // Check for blocking calls in async context
@@ -3570,7 +3803,10 @@ impl Rust {
                                 blocking_block,
                                 CFGBlock {
                                     id: blocking_block,
-                                    label: format!("BLOCKING: {}", blocking_type.as_deref().unwrap_or("blocking call")),
+                                    label: format!(
+                                        "BLOCKING: {}",
+                                        blocking_type.as_deref().unwrap_or("blocking call")
+                                    ),
                                     block_type: BlockType::RustBlockingCall,
                                     statements: vec![text.to_string()],
                                     func_calls: self.extract_func_calls_from_node(child, source),
@@ -3579,7 +3815,11 @@ impl Rust {
                                 },
                             );
 
-                            edges.push(CFGEdge::new(current_block, blocking_block, EdgeType::RustBlocking));
+                            edges.push(CFGEdge::new(
+                                current_block,
+                                blocking_block,
+                                EdgeType::RustBlocking,
+                            ));
                             current_block = blocking_block;
                         } else if self.contains_try_expression(child) {
                             // Handle call with ? operator
@@ -3591,41 +3831,53 @@ impl Rust {
                                 }
                             }
                             let try_count = self.count_try_expressions(child);
-                            blocks.insert(try_block, CFGBlock {
-                                id: try_block,
-                                label: format!("try?: {}", text.chars().take(25).collect::<String>()),
-                                block_type: BlockType::TryOperator,
-                                statements: vec![text.to_string()],
-                                func_calls: self.extract_func_calls_from_node(child, source),
-                                start_line: line,
-                                end_line: child.end_position().row + 1,
-                            });
+                            blocks.insert(
+                                try_block,
+                                CFGBlock {
+                                    id: try_block,
+                                    label: format!(
+                                        "try?: {}",
+                                        text.chars().take(25).collect::<String>()
+                                    ),
+                                    block_type: BlockType::TryOperator,
+                                    statements: vec![text.to_string()],
+                                    func_calls: self.extract_func_calls_from_node(child, source),
+                                    start_line: line,
+                                    end_line: child.end_position().row + 1,
+                                },
+                            );
                             edges.push(CFGEdge::from_label(current_block, try_block, None));
                             let error_return = BlockId(*counter);
                             *counter += 1;
-                            blocks.insert(error_return, CFGBlock {
-                                id: error_return,
-                                label: format!("Err/None propagate ({}x ?)", try_count),
-                                block_type: BlockType::ErrorReturn,
-                                statements: Vec::new(),
-                                func_calls: Vec::new(),
-                                start_line: line,
-                                end_line: line,
-                            });
+                            blocks.insert(
+                                error_return,
+                                CFGBlock {
+                                    id: error_return,
+                                    label: format!("Err/None propagate ({}x ?)", try_count),
+                                    block_type: BlockType::ErrorReturn,
+                                    statements: Vec::new(),
+                                    func_calls: Vec::new(),
+                                    start_line: line,
+                                    end_line: line,
+                                },
+                            );
                             edges.push(CFGEdge::new(try_block, error_return, EdgeType::ErrNone));
                             exits.push(error_return);
                             *decision_points += 1;
                             let success_block = BlockId(*counter);
                             *counter += 1;
-                            blocks.insert(success_block, CFGBlock {
-                                id: success_block,
-                                label: "Ok/Some continue".to_string(),
-                                block_type: BlockType::Body,
-                                statements: Vec::new(),
-                                func_calls: Vec::new(),
-                                start_line: child.end_position().row + 1,
-                                end_line: child.end_position().row + 1,
-                            });
+                            blocks.insert(
+                                success_block,
+                                CFGBlock {
+                                    id: success_block,
+                                    label: "Ok/Some continue".to_string(),
+                                    block_type: BlockType::Body,
+                                    statements: Vec::new(),
+                                    func_calls: Vec::new(),
+                                    start_line: child.end_position().row + 1,
+                                    end_line: child.end_position().row + 1,
+                                },
+                            );
                             edges.push(CFGEdge::new(try_block, success_block, EdgeType::OkSome));
                             current_block = success_block;
                         } else {
@@ -3642,41 +3894,53 @@ impl Rust {
                                 }
                             }
                             let try_count = self.count_try_expressions(child);
-                            blocks.insert(try_block, CFGBlock {
-                                id: try_block,
-                                label: format!("try?: {}", text.chars().take(25).collect::<String>()),
-                                block_type: BlockType::TryOperator,
-                                statements: vec![text.to_string()],
-                                func_calls: self.extract_func_calls_from_node(child, source),
-                                start_line: line,
-                                end_line: child.end_position().row + 1,
-                            });
+                            blocks.insert(
+                                try_block,
+                                CFGBlock {
+                                    id: try_block,
+                                    label: format!(
+                                        "try?: {}",
+                                        text.chars().take(25).collect::<String>()
+                                    ),
+                                    block_type: BlockType::TryOperator,
+                                    statements: vec![text.to_string()],
+                                    func_calls: self.extract_func_calls_from_node(child, source),
+                                    start_line: line,
+                                    end_line: child.end_position().row + 1,
+                                },
+                            );
                             edges.push(CFGEdge::from_label(current_block, try_block, None));
                             let error_return = BlockId(*counter);
                             *counter += 1;
-                            blocks.insert(error_return, CFGBlock {
-                                id: error_return,
-                                label: format!("Err/None propagate ({}x ?)", try_count),
-                                block_type: BlockType::ErrorReturn,
-                                statements: Vec::new(),
-                                func_calls: Vec::new(),
-                                start_line: line,
-                                end_line: line,
-                            });
+                            blocks.insert(
+                                error_return,
+                                CFGBlock {
+                                    id: error_return,
+                                    label: format!("Err/None propagate ({}x ?)", try_count),
+                                    block_type: BlockType::ErrorReturn,
+                                    statements: Vec::new(),
+                                    func_calls: Vec::new(),
+                                    start_line: line,
+                                    end_line: line,
+                                },
+                            );
                             edges.push(CFGEdge::new(try_block, error_return, EdgeType::ErrNone));
                             exits.push(error_return);
                             *decision_points += 1;
                             let success_block = BlockId(*counter);
                             *counter += 1;
-                            blocks.insert(success_block, CFGBlock {
-                                id: success_block,
-                                label: "Ok/Some continue".to_string(),
-                                block_type: BlockType::Body,
-                                statements: Vec::new(),
-                                func_calls: Vec::new(),
-                                start_line: child.end_position().row + 1,
-                                end_line: child.end_position().row + 1,
-                            });
+                            blocks.insert(
+                                success_block,
+                                CFGBlock {
+                                    id: success_block,
+                                    label: "Ok/Some continue".to_string(),
+                                    block_type: BlockType::Body,
+                                    statements: Vec::new(),
+                                    func_calls: Vec::new(),
+                                    start_line: child.end_position().row + 1,
+                                    end_line: child.end_position().row + 1,
+                                },
+                            );
                             edges.push(CFGEdge::new(try_block, success_block, EdgeType::OkSome));
                             current_block = success_block;
                         } else {
@@ -3691,8 +3955,14 @@ impl Rust {
                     if !text.is_empty() && text != ";" {
                         // Check for lock acquisition in let declarations
                         if child.kind() == "let_declaration" {
-                            if let Some((var_name, lock_type)) = self.is_lock_acquisition(child, source) {
-                                async_ctx.acquire_lock(&var_name, &lock_type, child.start_position().row + 1);
+                            if let Some((var_name, lock_type)) =
+                                self.is_lock_acquisition(child, source)
+                            {
+                                async_ctx.acquire_lock(
+                                    &var_name,
+                                    &lock_type,
+                                    child.start_position().row + 1,
+                                );
                             }
                         }
                         // Check for explicit lock release via drop()
@@ -3731,14 +4001,28 @@ impl Rust {
                             let has_try = self.contains_try_expression(child);
 
                             let label = if has_held_locks {
-                                let locks: Vec<_> = async_ctx.held_locks.iter()
+                                let locks: Vec<_> = async_ctx
+                                    .held_locks
+                                    .iter()
                                     .map(|(name, lock_type, _)| format!("{}:{}", name, lock_type))
                                     .collect();
-                                format!(".await ({}x) [WARN: holds {}]", await_count, locks.join(", "))
+                                format!(
+                                    ".await ({}x) [WARN: holds {}]",
+                                    await_count,
+                                    locks.join(", ")
+                                )
                             } else if has_try {
-                                format!(".await? ({}x): {}..", await_count, text.chars().take(25).collect::<String>())
+                                format!(
+                                    ".await? ({}x): {}..",
+                                    await_count,
+                                    text.chars().take(25).collect::<String>()
+                                )
                             } else {
-                                format!(".await ({}x): {}..", await_count, text.chars().take(25).collect::<String>())
+                                format!(
+                                    ".await ({}x): {}..",
+                                    await_count,
+                                    text.chars().take(25).collect::<String>()
+                                )
                             };
 
                             blocks.insert(
@@ -3754,7 +4038,11 @@ impl Rust {
                                 },
                             );
 
-                            edges.push(CFGEdge::new(current_block, await_block, EdgeType::RustAwait));
+                            edges.push(CFGEdge::new(
+                                current_block,
+                                await_block,
+                                EdgeType::RustAwait,
+                            ));
 
                             if has_try {
                                 // Handle await? pattern - error propagation
@@ -3773,7 +4061,11 @@ impl Rust {
                                         end_line: line,
                                     },
                                 );
-                                edges.push(CFGEdge::new(await_block, error_return, EdgeType::ErrNone));
+                                edges.push(CFGEdge::new(
+                                    await_block,
+                                    error_return,
+                                    EdgeType::ErrNone,
+                                ));
                                 exits.push(error_return);
                                 *decision_points += try_count;
 
@@ -3791,7 +4083,11 @@ impl Rust {
                                         end_line: child.end_position().row + 1,
                                     },
                                 );
-                                edges.push(CFGEdge::new(await_block, success_block, EdgeType::OkSome));
+                                edges.push(CFGEdge::new(
+                                    await_block,
+                                    success_block,
+                                    EdgeType::OkSome,
+                                ));
                                 current_block = success_block;
                             } else {
                                 // Just await, no error handling needed
@@ -3809,7 +4105,11 @@ impl Rust {
                                         end_line: child.end_position().row + 1,
                                     },
                                 );
-                                edges.push(CFGEdge::new(await_block, resume_block, EdgeType::RustResume));
+                                edges.push(CFGEdge::new(
+                                    await_block,
+                                    resume_block,
+                                    EdgeType::RustResume,
+                                ));
                                 current_block = resume_block;
                             }
                         }
@@ -3823,40 +4123,52 @@ impl Rust {
                                 }
                             }
                             let try_count = self.count_try_expressions(child);
-                            blocks.insert(try_block, CFGBlock {
-                                id: try_block,
-                                label: format!("try?: {}", text.chars().take(25).collect::<String>()),
-                                block_type: BlockType::TryOperator,
-                                statements: vec![text.to_string()],
-                                func_calls: self.extract_func_calls_from_node(child, source),
-                                start_line: child.start_position().row + 1,
-                                end_line: child.end_position().row + 1,
-                            });
+                            blocks.insert(
+                                try_block,
+                                CFGBlock {
+                                    id: try_block,
+                                    label: format!(
+                                        "try?: {}",
+                                        text.chars().take(25).collect::<String>()
+                                    ),
+                                    block_type: BlockType::TryOperator,
+                                    statements: vec![text.to_string()],
+                                    func_calls: self.extract_func_calls_from_node(child, source),
+                                    start_line: child.start_position().row + 1,
+                                    end_line: child.end_position().row + 1,
+                                },
+                            );
                             edges.push(CFGEdge::from_label(current_block, try_block, None));
                             let error_return = BlockId(*counter);
                             *counter += 1;
-                            blocks.insert(error_return, CFGBlock {
-                                id: error_return,
-                                label: format!("Err/None propagate ({}x ?)", try_count),
-                                block_type: BlockType::ErrorReturn,
-                                statements: Vec::new(),
-                                func_calls: Vec::new(),
-                                start_line: child.start_position().row + 1,
-                                end_line: child.end_position().row + 1,
-                            });
+                            blocks.insert(
+                                error_return,
+                                CFGBlock {
+                                    id: error_return,
+                                    label: format!("Err/None propagate ({}x ?)", try_count),
+                                    block_type: BlockType::ErrorReturn,
+                                    statements: Vec::new(),
+                                    func_calls: Vec::new(),
+                                    start_line: child.start_position().row + 1,
+                                    end_line: child.end_position().row + 1,
+                                },
+                            );
                             edges.push(CFGEdge::new(try_block, error_return, EdgeType::ErrNone));
                             exits.push(error_return);
                             let success_block = BlockId(*counter);
                             *counter += 1;
-                            blocks.insert(success_block, CFGBlock {
-                                id: success_block,
-                                label: "Ok/Some continue".to_string(),
-                                block_type: BlockType::Body,
-                                statements: Vec::new(),
-                                func_calls: Vec::new(),
-                                start_line: child.end_position().row + 1,
-                                end_line: child.end_position().row + 1,
-                            });
+                            blocks.insert(
+                                success_block,
+                                CFGBlock {
+                                    id: success_block,
+                                    label: "Ok/Some continue".to_string(),
+                                    block_type: BlockType::Body,
+                                    statements: Vec::new(),
+                                    func_calls: Vec::new(),
+                                    start_line: child.end_position().row + 1,
+                                    end_line: child.end_position().row + 1,
+                                },
+                            );
                             edges.push(CFGEdge::new(try_block, success_block, EdgeType::OkSome));
                             current_block = success_block;
                         } else if self.contains_panic_site(child, source) {
@@ -3904,8 +4216,8 @@ impl Rust {
     /// Build DFG for a Rust function.
     fn build_rust_dfg(&self, node: Node, source: &[u8], function_name: &str) -> DFGInfo {
         let mut edges = Vec::new();
-        let mut definitions: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut uses: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut definitions: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+        let mut uses: FxHashMap<String, Vec<usize>> = FxHashMap::default();
 
         // Extract parameters as definitions
         let params = self.extract_parameters(node, source);
@@ -3940,7 +4252,7 @@ impl Rust {
                     from_line: param_line,
                     to_line: param_line,
                     kind: DataflowKind::Param,
-                            });
+                });
             }
         }
 
@@ -3952,7 +4264,12 @@ impl Rust {
             self.process_dfg_node(body, source, &mut edges, &mut definitions, &mut uses);
         }
 
-        DFGInfo::new(function_name.to_string(), edges, definitions, uses)
+        DFGInfo::new(
+            function_name.to_string(),
+            edges,
+            definitions.into_iter().collect(),
+            uses.into_iter().collect(),
+        )
     }
 
     /// Process a node for DFG building.
@@ -3961,8 +4278,8 @@ impl Rust {
         node: Node,
         source: &[u8],
         edges: &mut Vec<DataflowEdge>,
-        definitions: &mut HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         match node.kind() {
             "let_declaration" => {
@@ -4128,7 +4445,7 @@ impl Rust {
                                         from_line: line,
                                         to_line: line,
                                         kind: DataflowKind::Param,
-                            });
+                                    });
                                 }
                             } else if param.kind() == "parameter" {
                                 // Typed closure parameters: |x: i32, y: &str|
@@ -4153,7 +4470,7 @@ impl Rust {
                                                 from_line: line,
                                                 to_line: line,
                                                 kind: DataflowKind::Param,
-                            });
+                                            });
                                         }
                                         break; // Only take first identifier (the param name)
                                     }
@@ -4200,7 +4517,7 @@ impl Rust {
         node: Node,
         source: &[u8],
         edges: &mut Vec<DataflowEdge>,
-        definitions: &mut HashMap<String, Vec<usize>>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
         line: usize,
     ) {
         // Find pattern node in children
@@ -4236,7 +4553,7 @@ impl Rust {
         pattern: Node,
         source: &[u8],
         edges: &mut Vec<DataflowEdge>,
-        definitions: &mut HashMap<String, Vec<usize>>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
         line: usize,
     ) {
         for child in pattern.children(&mut pattern.walk()) {
@@ -4252,7 +4569,7 @@ impl Rust {
                             from_line: line,
                             to_line: line,
                             kind: DataflowKind::Definition,
-                            });
+                        });
                     }
                 }
                 "tuple_struct_pattern" | "tuple_pattern" | "struct_pattern" => {
@@ -4270,8 +4587,8 @@ impl Rust {
         node: Node,
         source: &[u8],
         edges: &mut Vec<DataflowEdge>,
-        definitions: &HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         let line = node.start_position().row + 1;
 
@@ -4311,7 +4628,7 @@ impl Rust {
                                         from_line: def_line,
                                         to_line: line,
                                         kind: DataflowKind::Use,
-                            });
+                                    });
                                 }
                             }
                         }
@@ -4678,7 +4995,9 @@ impl Language for Rust {
                 // Extract type annotation
                 let const_type = node
                     .children(&mut node.walk())
-                    .find(|c| c.is_named() && c.kind().contains("type") && c.kind() != "type_parameters")
+                    .find(|c| {
+                        c.is_named() && c.kind().contains("type") && c.kind() != "type_parameters"
+                    })
                     .map(|n| self.node_text(n, source).to_string());
 
                 // Extract value expression
@@ -4734,7 +5053,9 @@ impl Language for Rust {
                 // Extract type annotation
                 let static_type = node
                     .children(&mut node.walk())
-                    .find(|c| c.is_named() && c.kind().contains("type") && c.kind() != "type_parameters")
+                    .find(|c| {
+                        c.is_named() && c.kind().contains("type") && c.kind() != "type_parameters"
+                    })
                     .map(|n| self.node_text(n, source).to_string());
 
                 // Extract value expression
@@ -4936,8 +5257,7 @@ impl Language for Rust {
                         if child.kind() == "function_signature_item" {
                             if let Some(mut func) = self.extract_function_signature(child, source) {
                                 // Mark as extern with ABI
-                                func.decorators
-                                    .insert(0, format!("extern \"{}\"", abi));
+                                func.decorators.insert(0, format!("extern \"{}\"", abi));
                                 funcs.push(func);
                             }
                         }
@@ -5554,7 +5874,10 @@ fn complex(x: i32) -> i32 {
         let code = "fn test() { let x = foo()?; }";
         let tree = parse_rust(code);
         let func = tree.root_node().child(0).unwrap();
-        let body = func.children(&mut func.walk()).find(|c| c.kind() == "block").unwrap();
+        let body = func
+            .children(&mut func.walk())
+            .find(|c| c.kind() == "block")
+            .unwrap();
         let stmt = body.child(1).unwrap();
         assert!(rust.contains_try_expression(stmt));
     }
@@ -5625,7 +5948,10 @@ macro_rules! my_vec {
 
         assert_eq!(func.name, "my_vec");
         assert!(func.decorators.contains(&"macro".to_string()));
-        assert!(func.decorators.iter().any(|d| d.contains("#[macro_export]")));
+        assert!(func
+            .decorators
+            .iter()
+            .any(|d| d.contains("#[macro_export]")));
         assert!(func.docstring.is_some());
         assert!(func.docstring.unwrap().contains("useful macro"));
     }
@@ -5669,7 +5995,10 @@ pub fn my_derive(input: TokenStream) -> TokenStream {
         let func = rust.extract_function(func_node, code.as_bytes()).unwrap();
 
         assert_eq!(func.name, "my_derive");
-        assert!(func.decorators.iter().any(|d| d.contains("proc_macro_derive")));
+        assert!(func
+            .decorators
+            .iter()
+            .any(|d| d.contains("proc_macro_derive")));
         assert!(func.decorators.iter().any(|d| d.contains("MyDerive")));
     }
 
@@ -5833,8 +6162,14 @@ pub fn my_attr(attr: TokenStream, item: TokenStream) -> TokenStream {
         assert!(class.decorators.contains(&"type_alias".to_string()));
         assert!(class.decorators.contains(&"pub".to_string()));
         // Check for generic type parameter T
-        assert!(class.decorators.iter().any(|d| d.contains("type_params:") && d.contains("T")));
-        assert!(class.bases.iter().any(|b| b.contains("std::result::Result<T, Error>")));
+        assert!(class
+            .decorators
+            .iter()
+            .any(|d| d.contains("type_params:") && d.contains("T")));
+        assert!(class
+            .bases
+            .iter()
+            .any(|b| b.contains("std::result::Result<T, Error>")));
     }
 
     #[test]
@@ -5851,7 +6186,10 @@ pub fn my_attr(attr: TokenStream, item: TokenStream) -> TokenStream {
         assert_eq!(class.name, "RefStr");
         assert!(class.decorators.contains(&"type_alias".to_string()));
         // Check for lifetime parameter
-        assert!(class.decorators.iter().any(|d| d.contains("lifetimes:") && d.contains("'a")));
+        assert!(class
+            .decorators
+            .iter()
+            .any(|d| d.contains("lifetimes:") && d.contains("'a")));
     }
 
     // ========================================
@@ -5968,7 +6306,11 @@ pub mod utils;
 
         assert_eq!(class.name, "utils");
         assert!(class.docstring.is_some());
-        assert!(class.docstring.as_ref().unwrap().contains("utility functions"));
+        assert!(class
+            .docstring
+            .as_ref()
+            .unwrap()
+            .contains("utility functions"));
     }
 
     // ========================================
@@ -6020,7 +6362,10 @@ extern "system" {
         let class = rust.extract_class(extern_node, code.as_bytes()).unwrap();
 
         assert_eq!(class.name, "extern_system");
-        assert!(class.decorators.iter().any(|d| d.contains("extern \"system\"")));
+        assert!(class
+            .decorators
+            .iter()
+            .any(|d| d.contains("extern \"system\"")));
         assert_eq!(class.methods.len(), 1);
         assert!(class.methods.iter().any(|m| m.name == "GetLastError"));
     }
@@ -6297,12 +6642,14 @@ trait FullIterator {
         assert_eq!(class.methods.len(), 4);
 
         // Check associated types
-        assert!(class.methods.iter().any(
-            |m| m.name == "Item" && m.decorators.contains(&"associated_type".to_string())
-        ));
-        assert!(class.methods.iter().any(
-            |m| m.name == "Error" && m.decorators.contains(&"associated_type".to_string())
-        ));
+        assert!(class
+            .methods
+            .iter()
+            .any(|m| m.name == "Item" && m.decorators.contains(&"associated_type".to_string())));
+        assert!(class
+            .methods
+            .iter()
+            .any(|m| m.name == "Error" && m.decorators.contains(&"associated_type".to_string())));
 
         // Check associated constant
         assert!(class.methods.iter().any(
@@ -6310,9 +6657,10 @@ trait FullIterator {
         ));
 
         // Check function
-        assert!(class.methods.iter().any(
-            |m| m.name == "next" && !m.decorators.contains(&"associated_type".to_string())
-        ));
+        assert!(class
+            .methods
+            .iter()
+            .any(|m| m.name == "next" && !m.decorators.contains(&"associated_type".to_string())));
     }
 
     #[test]
@@ -6333,14 +6681,8 @@ fn fixed_size<const N: usize>() -> [i32; N] {
 
         assert_eq!(func.name, "fixed_size");
         // const_params should be separately tracked
-        assert!(func
-            .decorators
-            .iter()
-            .any(|d| d.contains("const_params:")));
-        assert!(func
-            .decorators
-            .iter()
-            .any(|d| d.contains("const N: usize")));
+        assert!(func.decorators.iter().any(|d| d.contains("const_params:")));
+        assert!(func.decorators.iter().any(|d| d.contains("const N: usize")));
     }
 
     #[test]
@@ -6364,15 +6706,9 @@ pub struct Array<T, const N: usize> {
 
         assert_eq!(class.name, "Array");
         // Should have both type_params (T) and const_params (const N: usize)
-        assert!(class
-            .decorators
-            .iter()
-            .any(|d| d.contains("type_params:")));
+        assert!(class.decorators.iter().any(|d| d.contains("type_params:")));
         assert!(class.decorators.iter().any(|d| d.contains("T")));
-        assert!(class
-            .decorators
-            .iter()
-            .any(|d| d.contains("const_params:")));
+        assert!(class.decorators.iter().any(|d| d.contains("const_params:")));
         assert!(class
             .decorators
             .iter()
@@ -6399,14 +6735,8 @@ impl<T, const N: usize> Array<T, N> {
 
         assert_eq!(class.name, "Array");
         // Should have both type_params (T) and const_params (const N: usize)
-        assert!(class
-            .decorators
-            .iter()
-            .any(|d| d.contains("type_params:")));
-        assert!(class
-            .decorators
-            .iter()
-            .any(|d| d.contains("const_params:")));
+        assert!(class.decorators.iter().any(|d| d.contains("type_params:")));
+        assert!(class.decorators.iter().any(|d| d.contains("const_params:")));
     }
 
     #[test]
@@ -6456,19 +6786,10 @@ fn complex<'a, T: Clone, const N: usize>(data: &'a [T; N]) -> &'a T {
         // Should have all three: lifetimes, type_params, and const_params
         assert!(func.decorators.iter().any(|d| d.contains("lifetimes:")));
         assert!(func.decorators.iter().any(|d| d.contains("'a")));
-        assert!(func
-            .decorators
-            .iter()
-            .any(|d| d.contains("type_params:")));
+        assert!(func.decorators.iter().any(|d| d.contains("type_params:")));
         assert!(func.decorators.iter().any(|d| d.contains("T: Clone")));
-        assert!(func
-            .decorators
-            .iter()
-            .any(|d| d.contains("const_params:")));
-        assert!(func
-            .decorators
-            .iter()
-            .any(|d| d.contains("const N: usize")));
+        assert!(func.decorators.iter().any(|d| d.contains("const_params:")));
+        assert!(func.decorators.iter().any(|d| d.contains("const N: usize")));
     }
 
     // ============================================================
@@ -6804,7 +7125,10 @@ fn iterate_option(mut iter: impl Iterator<Item = i32>) {
             e.condition.as_ref().map_or(false, |c| c.contains("next"))
                 || e.edge_type == EdgeType::Next
         });
-        assert!(has_back_edge || cfg.edges.len() > 2, "Expected loop structure");
+        assert!(
+            has_back_edge || cfg.edges.len() > 2,
+            "Expected loop structure"
+        );
     }
 
     #[test]
@@ -7040,11 +7364,18 @@ async fn fetch_data(url: &str) -> Result<Data, Error> {
         assert!(cfg.is_async, "Function should be detected as async");
 
         // Verify await points are counted
-        assert!(cfg.await_points >= 2, "Should have at least 2 await points, got {}", cfg.await_points);
+        assert!(
+            cfg.await_points >= 2,
+            "Should have at least 2 await points, got {}",
+            cfg.await_points
+        );
 
         // Verify entry block is labeled as async
         let entry = cfg.blocks.get(&cfg.entry).unwrap();
-        assert!(entry.label.contains("async"), "Entry block should be labeled as async");
+        assert!(
+            entry.label.contains("async"),
+            "Entry block should be labeled as async"
+        );
     }
 
     #[test]
@@ -7060,11 +7391,20 @@ fn regular_function(x: i32) -> i32 {
 
         let cfg = rust.build_rust_cfg(func, code.as_bytes(), "regular_function");
 
-        assert!(!cfg.is_async, "Sync function should not be detected as async");
-        assert_eq!(cfg.await_points, 0, "Sync function should have 0 await points");
+        assert!(
+            !cfg.is_async,
+            "Sync function should not be detected as async"
+        );
+        assert_eq!(
+            cfg.await_points, 0,
+            "Sync function should have 0 await points"
+        );
 
         let entry = cfg.blocks.get(&cfg.entry).unwrap();
-        assert!(!entry.label.contains("async"), "Entry block should not be labeled as async");
+        assert!(
+            !entry.label.contains("async"),
+            "Entry block should not be labeled as async"
+        );
     }
 
     #[test]
@@ -7083,19 +7423,35 @@ async fn process() {
         let cfg = rust.build_rust_cfg(func, code.as_bytes(), "process");
 
         // Should have 3 await points
-        assert_eq!(cfg.await_points, 3, "Expected 3 await points, got {}", cfg.await_points);
+        assert_eq!(
+            cfg.await_points, 3,
+            "Expected 3 await points, got {}",
+            cfg.await_points
+        );
 
         // Should have RustAwaitPoint blocks
-        let await_blocks: Vec<_> = cfg.blocks.values()
+        let await_blocks: Vec<_> = cfg
+            .blocks
+            .values()
             .filter(|b| matches!(b.block_type, BlockType::RustAwaitPoint))
             .collect();
-        assert!(await_blocks.len() >= 3, "Expected at least 3 RustAwaitPoint blocks, got {}", await_blocks.len());
+        assert!(
+            await_blocks.len() >= 3,
+            "Expected at least 3 RustAwaitPoint blocks, got {}",
+            await_blocks.len()
+        );
 
         // Should have RustAwait edges
-        let await_edges: Vec<_> = cfg.edges.iter()
+        let await_edges: Vec<_> = cfg
+            .edges
+            .iter()
             .filter(|e| matches!(e.edge_type, EdgeType::RustAwait))
             .collect();
-        assert!(await_edges.len() >= 3, "Expected at least 3 RustAwait edges, got {}", await_edges.len());
+        assert!(
+            await_edges.len() >= 3,
+            "Expected at least 3 RustAwait edges, got {}",
+            await_edges.len()
+        );
     }
 
     #[test]
@@ -7116,10 +7472,15 @@ async fn fetch() -> Result<(), Error> {
         assert!(cfg.await_points >= 1, "Should have at least 1 await point");
 
         // Should have error propagation path (ErrNone edge)
-        let err_edges: Vec<_> = cfg.edges.iter()
+        let err_edges: Vec<_> = cfg
+            .edges
+            .iter()
             .filter(|e| matches!(e.edge_type, EdgeType::ErrNone))
             .collect();
-        assert!(!err_edges.is_empty(), "Should have Err propagation edges for await?");
+        assert!(
+            !err_edges.is_empty(),
+            "Should have Err propagation edges for await?"
+        );
     }
 
     #[test]
@@ -7142,13 +7503,17 @@ async fn spawn_task() {
         assert!(cfg.is_async, "Should be detected as async");
 
         // Should have task spawn block
-        let spawn_blocks: Vec<_> = cfg.blocks.values()
+        let spawn_blocks: Vec<_> = cfg
+            .blocks
+            .values()
             .filter(|b| matches!(b.block_type, BlockType::RustTaskSpawn))
             .collect();
         assert!(!spawn_blocks.is_empty(), "Should have RustTaskSpawn block");
 
         // Should have spawn edge
-        let spawn_edges: Vec<_> = cfg.edges.iter()
+        let spawn_edges: Vec<_> = cfg
+            .edges
+            .iter()
             .filter(|e| matches!(e.edge_type, EdgeType::RustSpawn))
             .collect();
         assert!(!spawn_edges.is_empty(), "Should have RustSpawn edge");
@@ -7173,10 +7538,15 @@ async fn concurrent() {
         assert!(cfg.is_async, "Should be detected as async");
 
         // Should have join block
-        let join_blocks: Vec<_> = cfg.blocks.values()
+        let join_blocks: Vec<_> = cfg
+            .blocks
+            .values()
             .filter(|b| matches!(b.block_type, BlockType::RustJoin))
             .collect();
-        assert!(!join_blocks.is_empty(), "Should have RustJoin block for tokio::join!");
+        assert!(
+            !join_blocks.is_empty(),
+            "Should have RustJoin block for tokio::join!"
+        );
     }
 
     #[test]
@@ -7198,13 +7568,21 @@ async fn select_first() {
         assert!(cfg.is_async, "Should be detected as async");
 
         // Should have select block
-        let select_blocks: Vec<_> = cfg.blocks.values()
+        let select_blocks: Vec<_> = cfg
+            .blocks
+            .values()
             .filter(|b| matches!(b.block_type, BlockType::RustSelect))
             .collect();
-        assert!(!select_blocks.is_empty(), "Should have RustSelect block for tokio::select!");
+        assert!(
+            !select_blocks.is_empty(),
+            "Should have RustSelect block for tokio::select!"
+        );
 
         // Select should count as a decision point
-        assert!(cfg.decision_points >= 1, "select! should be counted as decision point");
+        assert!(
+            cfg.decision_points >= 1,
+            "select! should be counted as decision point"
+        );
     }
 
     #[test]
@@ -7223,15 +7601,27 @@ async fn bad_async() {
         assert!(cfg.is_async, "Should be detected as async");
 
         // Should detect blocking call
-        assert!(!cfg.blocking_calls.is_empty(), "Should detect blocking call in async context");
-        assert!(cfg.blocking_calls.iter().any(|(name, _)| name.contains("thread::sleep")),
-                "Should detect std::thread::sleep as blocking");
+        assert!(
+            !cfg.blocking_calls.is_empty(),
+            "Should detect blocking call in async context"
+        );
+        assert!(
+            cfg.blocking_calls
+                .iter()
+                .any(|(name, _)| name.contains("thread::sleep")),
+            "Should detect std::thread::sleep as blocking"
+        );
 
         // Should have blocking block type
-        let blocking_blocks: Vec<_> = cfg.blocks.values()
+        let blocking_blocks: Vec<_> = cfg
+            .blocks
+            .values()
             .filter(|b| matches!(b.block_type, BlockType::RustBlockingCall))
             .collect();
-        assert!(!blocking_blocks.is_empty(), "Should have RustBlockingCall block");
+        assert!(
+            !blocking_blocks.is_empty(),
+            "Should have RustBlockingCall block"
+        );
     }
 
     #[test]
@@ -7249,7 +7639,10 @@ fn sync_sleep() {
 
         assert!(!cfg.is_async, "Should not be async");
         // In sync context, blocking calls are fine
-        assert!(cfg.blocking_calls.is_empty(), "Should not flag blocking calls in sync context");
+        assert!(
+            cfg.blocking_calls.is_empty(),
+            "Should not flag blocking calls in sync context"
+        );
     }
 
     #[test]
@@ -7268,10 +7661,15 @@ fn returns_future() -> impl Future<Output = ()> {
         let cfg = rust.build_rust_cfg(func, code.as_bytes(), "returns_future");
 
         // Should have async block
-        let async_blocks: Vec<_> = cfg.blocks.values()
+        let async_blocks: Vec<_> = cfg
+            .blocks
+            .values()
             .filter(|b| matches!(b.block_type, BlockType::RustAsyncBlock))
             .collect();
-        assert!(!async_blocks.is_empty(), "Should have RustAsyncBlock for async {{ }}");
+        assert!(
+            !async_blocks.is_empty(),
+            "Should have RustAsyncBlock for async {{ }}"
+        );
     }
 
     #[test]
@@ -7281,10 +7679,16 @@ fn returns_future() -> impl Future<Output = ()> {
         let code_with_await = "async { x.await }";
         let tree = parse_rust(&format!("fn f() {{ {} }}", code_with_await));
         let func = tree.root_node().child(0).unwrap();
-        let body = func.children(&mut func.walk()).find(|c| c.kind() == "block").unwrap();
+        let body = func
+            .children(&mut func.walk())
+            .find(|c| c.kind() == "block")
+            .unwrap();
         let stmt = body.child(1).unwrap();
 
-        assert!(rust.contains_await(stmt), "Should detect .await in async block");
+        assert!(
+            rust.contains_await(stmt),
+            "Should detect .await in async block"
+        );
     }
 
     #[test]
@@ -7294,11 +7698,19 @@ fn returns_future() -> impl Future<Output = ()> {
         let tokio_code = "tokio::spawn(async { work().await })";
         let tree = parse_rust(&format!("fn f() {{ {} }}", tokio_code));
         let func = tree.root_node().child(0).unwrap();
-        let body = func.children(&mut func.walk()).find(|c| c.kind() == "block").unwrap();
+        let body = func
+            .children(&mut func.walk())
+            .find(|c| c.kind() == "block")
+            .unwrap();
         let stmt = body.child(1).unwrap();
-        let expr = if stmt.kind() == "expression_statement" { stmt.child(0).unwrap() } else { stmt };
+        let expr = if stmt.kind() == "expression_statement" {
+            stmt.child(0).unwrap()
+        } else {
+            stmt
+        };
 
-        let (is_spawn, spawn_type) = rust.is_spawn_call(expr, format!("fn f() {{ {} }}", tokio_code).as_bytes());
+        let (is_spawn, spawn_type) =
+            rust.is_spawn_call(expr, format!("fn f() {{ {} }}", tokio_code).as_bytes());
         assert!(is_spawn, "Should detect tokio::spawn as spawn call");
         assert_eq!(spawn_type, Some("tokio"));
     }
@@ -7311,11 +7723,19 @@ fn returns_future() -> impl Future<Output = ()> {
         let join_code = "tokio::join!(a, b)";
         let tree = parse_rust(&format!("fn f() {{ {} }}", join_code));
         let func = tree.root_node().child(0).unwrap();
-        let body = func.children(&mut func.walk()).find(|c| c.kind() == "block").unwrap();
+        let body = func
+            .children(&mut func.walk())
+            .find(|c| c.kind() == "block")
+            .unwrap();
         let stmt = body.child(1).unwrap();
-        let expr = if stmt.kind() == "expression_statement" { stmt.child(0).unwrap() } else { stmt };
+        let expr = if stmt.kind() == "expression_statement" {
+            stmt.child(0).unwrap()
+        } else {
+            stmt
+        };
 
-        let (is_async_macro, macro_type) = rust.is_async_macro(expr, format!("fn f() {{ {} }}", join_code).as_bytes());
+        let (is_async_macro, macro_type) =
+            rust.is_async_macro(expr, format!("fn f() {{ {} }}", join_code).as_bytes());
         assert!(is_async_macro, "Should detect tokio::join! as async macro");
         assert_eq!(macro_type, Some("join!"));
     }
@@ -7327,12 +7747,19 @@ fn returns_future() -> impl Future<Output = ()> {
         let blocking_code = "std::thread::sleep(duration)";
         let tree = parse_rust(&format!("fn f() {{ {} }}", blocking_code));
         let func = tree.root_node().child(0).unwrap();
-        let body = func.children(&mut func.walk()).find(|c| c.kind() == "block").unwrap();
+        let body = func
+            .children(&mut func.walk())
+            .find(|c| c.kind() == "block")
+            .unwrap();
         let stmt = body.child(1).unwrap();
 
-        let (is_blocking, blocking_type) = rust.is_blocking_call(stmt, format!("fn f() {{ {} }}", blocking_code).as_bytes());
+        let (is_blocking, blocking_type) =
+            rust.is_blocking_call(stmt, format!("fn f() {{ {} }}", blocking_code).as_bytes());
         assert!(is_blocking, "Should detect std::thread::sleep as blocking");
-        assert!(blocking_type.as_ref().map(|s| s.contains("thread::sleep")).unwrap_or(false));
+        assert!(blocking_type
+            .as_ref()
+            .map(|s| s.contains("thread::sleep"))
+            .unwrap_or(false));
     }
 
     #[test]
@@ -7365,11 +7792,18 @@ async fn fetch_and_process(url: &str) -> Result<ProcessedData, Error> {
         assert!(cfg.is_async, "Should be detected as async");
 
         // Verify await points (at least 3 explicit .await)
-        assert!(cfg.await_points >= 3, "Should have at least 3 await points, got {}", cfg.await_points);
+        assert!(
+            cfg.await_points >= 3,
+            "Should have at least 3 await points, got {}",
+            cfg.await_points
+        );
 
         // Should have proper entry and exit
         let entry = cfg.blocks.get(&cfg.entry).unwrap();
-        assert!(entry.label.contains("async entry"), "Entry should be labeled async");
+        assert!(
+            entry.label.contains("async entry"),
+            "Entry should be labeled async"
+        );
 
         // Should have exit blocks (normal exit + error exits from ?)
         assert!(!cfg.exits.is_empty(), "Should have exit blocks");
@@ -7385,15 +7819,23 @@ async fn foo() {
         let tree = parse_rust(code);
         let rust = Rust;
         let func = tree.root_node().child(0).unwrap();
-        let body = func.children(&mut func.walk()).find(|c| c.kind() == "block").unwrap();
+        let body = func
+            .children(&mut func.walk())
+            .find(|c| c.kind() == "block")
+            .unwrap();
 
         // Find the let_declaration
-        let stmt = body.children(&mut body.walk())
+        let stmt = body
+            .children(&mut body.walk())
             .find(|c| c.kind() == "let_declaration")
             .expect("Should find let_declaration");
 
         let count = rust.count_await_expressions(stmt);
-        assert_eq!(count, 1, "Expected 1 await expression in let declaration, got {}", count);
+        assert_eq!(
+            count, 1,
+            "Expected 1 await expression in let declaration, got {}",
+            count
+        );
     }
 
     #[test]
@@ -7402,12 +7844,23 @@ async fn foo() {
         let code = "foo().await";
         let tree = parse_rust(&format!("fn f() {{ {} }}", code));
         let func = tree.root_node().child(0).unwrap();
-        let body = func.children(&mut func.walk()).find(|c| c.kind() == "block").unwrap();
+        let body = func
+            .children(&mut func.walk())
+            .find(|c| c.kind() == "block")
+            .unwrap();
         // Get the expression_statement or direct expression
         let stmt = body.child(1).unwrap();
-        let expr = if stmt.kind() == "expression_statement" { stmt.child(0).unwrap() } else { stmt };
+        let expr = if stmt.kind() == "expression_statement" {
+            stmt.child(0).unwrap()
+        } else {
+            stmt
+        };
 
-        assert!(rust.is_await_expression(expr), "Should detect await_expression, got kind: {}", expr.kind());
+        assert!(
+            rust.is_await_expression(expr),
+            "Should detect await_expression, got kind: {}",
+            expr.kind()
+        );
     }
 
     #[test]
@@ -7428,9 +7881,16 @@ async fn foo() {
         assert!(cfg.is_async, "Should be detected as async");
 
         // This should have exactly 1 await point
-        assert_eq!(cfg.await_points, 1, "Expected 1 await point in simple async fn, got {}. Blocks: {:?}",
-                   cfg.await_points,
-                   cfg.blocks.values().map(|b| (&b.label, &b.block_type)).collect::<Vec<_>>());
+        assert_eq!(
+            cfg.await_points,
+            1,
+            "Expected 1 await point in simple async fn, got {}. Blocks: {:?}",
+            cfg.await_points,
+            cfg.blocks
+                .values()
+                .map(|b| (&b.label, &b.block_type))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -7451,8 +7911,14 @@ async fn fetch() -> Result<(), Error> {
         assert!(cfg.is_async, "Should be detected as async");
 
         // This should have 1 await point
-        assert!(cfg.await_points >= 1, "Expected at least 1 await point in async fn with await?, got {}. Blocks: {:?}",
-                   cfg.await_points,
-                   cfg.blocks.values().map(|b| (&b.label, &b.block_type)).collect::<Vec<_>>());
+        assert!(
+            cfg.await_points >= 1,
+            "Expected at least 1 await point in async fn with await?, got {}. Blocks: {:?}",
+            cfg.await_points,
+            cfg.blocks
+                .values()
+                .map(|b| (&b.label, &b.block_type))
+                .collect::<Vec<_>>()
+        );
     }
 }

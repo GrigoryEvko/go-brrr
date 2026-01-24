@@ -8,15 +8,43 @@
 //! - Control flow graph building
 //! - Data flow graph building
 
-use std::collections::HashMap;
 use std::path::Path;
+
+use rustc_hash::FxHashMap;
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::ast::types::{ClassInfo, FieldInfo, FunctionInfo, ImportInfo};
 use crate::cfg::types::{BlockId, BlockType, CFGBlock, CFGEdge, CFGInfo, EdgeType};
 use crate::dfg::types::{DFGInfo, DataflowEdge, DataflowKind};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::traits::Language;
+
+// =============================================================================
+// Helper functions
+// =============================================================================
+
+/// Check if a function node has an async keyword.
+///
+/// Searches for an "async" keyword child node rather than using string matching,
+/// which correctly handles:
+/// - Comments before async: `/* comment */ async function foo() {}`
+/// - Decorators before async: `@decorator async function foo() {}`
+/// - Visibility modifiers: `class C { public async method() {} }`
+///
+/// Early exits when it reaches the function body since async always precedes it.
+#[inline]
+fn has_async_keyword(node: Node) -> bool {
+    for child in node.children(&mut node.walk()) {
+        if child.kind() == "async" {
+            return true;
+        }
+        // Early exit: async keyword always precedes the function body
+        if child.kind() == "statement_block" || child.kind() == "block" {
+            break;
+        }
+    }
+    false
+}
 
 /// TypeScript language implementation (also handles JavaScript, TSX, and JSX).
 ///
@@ -107,7 +135,11 @@ impl TypeScript {
             }
 
             // Strip /** prefix
-            if j.saturating_sub(i) >= 3 && bytes[i] == b'/' && bytes[i + 1] == b'*' && bytes[i + 2] == b'*' {
+            if j.saturating_sub(i) >= 3
+                && bytes[i] == b'/'
+                && bytes[i + 1] == b'*'
+                && bytes[i + 2] == b'*'
+            {
                 i += 3;
                 while i < j && bytes[i].is_ascii_whitespace() {
                     i += 1;
@@ -208,22 +240,10 @@ impl TypeScript {
 
     /// Check if function is async using AST traversal.
     ///
-    /// Searches for an "async" keyword child node rather than using string matching,
-    /// which correctly handles:
-    /// - Comments before async: `/* comment */ async function foo() {}`
-    /// - Decorators before async: `@decorator async function foo() {}`
-    /// - Visibility modifiers: `class C { public async method() {} }`
+    /// Delegates to `has_async_keyword` helper for the actual check.
+    #[inline]
     fn is_async(&self, node: Node, _source: &[u8]) -> bool {
-        for child in node.children(&mut node.walk()) {
-            if child.kind() == "async" {
-                return true;
-            }
-            // Early exit optimization: async keyword always precedes the body
-            if child.kind() == "statement_block" {
-                break;
-            }
-        }
-        false
+        has_async_keyword(node)
     }
 
     /// Extract function name from various node types.
@@ -375,7 +395,7 @@ impl TypeScript {
                     // Try to find require() in the value expression
                     if let Some(module_path) = self.find_require_module(value, source) {
                         let mut names = Vec::new();
-                        let mut aliases = HashMap::new();
+                        let mut aliases = FxHashMap::default();
 
                         // Extract imported names based on the name pattern
                         if let Some(name) = name_node {
@@ -387,7 +407,8 @@ impl TypeScript {
                                     if value.kind() == "member_expression" {
                                         if let Some(prop) = value.child_by_field_name("property") {
                                             let prop_name = self.get_text(prop, source).to_string();
-                                            let local_name = self.get_text(name, source).to_string();
+                                            let local_name =
+                                                self.get_text(name, source).to_string();
                                             if prop_name != local_name {
                                                 aliases.insert(prop_name.clone(), local_name);
                                             }
@@ -412,7 +433,8 @@ impl TypeScript {
                                                 let value = prop.child_by_field_name("value");
                                                 if let (Some(k), Some(v)) = (key, value) {
                                                     let orig = self.get_text(k, source).to_string();
-                                                    let alias = self.get_text(v, source).to_string();
+                                                    let alias =
+                                                        self.get_text(v, source).to_string();
                                                     if orig != alias {
                                                         aliases.insert(orig.clone(), alias);
                                                     }
@@ -439,7 +461,7 @@ impl TypeScript {
                         return Some(ImportInfo {
                             module: module_path,
                             names,
-                            aliases,
+                            aliases: aliases.into_iter().collect(),
                             is_from: true, // CommonJS is conceptually similar to "from X import Y"
                             level: 0,
                             line_number: node.start_position().row + 1,
@@ -466,7 +488,7 @@ impl TypeScript {
                                 return Some(ImportInfo {
                                     module: module_path,
                                     names: Vec::new(), // No names - side-effect import
-                                    aliases: HashMap::new(),
+                                    aliases: FxHashMap::default(),
                                     is_from: false, // Side-effect import, like `import 'module'`
                                     level: 0,
                                     line_number: node.start_position().row + 1,
@@ -485,7 +507,7 @@ impl TypeScript {
     fn extract_single_import(&self, node: Node, source: &[u8]) -> Option<ImportInfo> {
         let mut module_path = String::new();
         let mut names = Vec::new();
-        let mut aliases = HashMap::new();
+        let mut aliases = FxHashMap::default();
         let mut is_from = false;
 
         for child in node.children(&mut node.walk()) {
@@ -521,7 +543,7 @@ impl TypeScript {
         Some(ImportInfo {
             module: module_path,
             names,
-            aliases,
+            aliases: aliases.into_iter().collect(),
             is_from,
             level: 0,
             line_number: node.start_position().row + 1,
@@ -536,12 +558,12 @@ impl TypeScript {
         source: &[u8],
     ) -> (
         Vec<String>,
-        HashMap<String, String>,
+        FxHashMap<String, String>,
         Option<String>,
         Option<String>,
     ) {
         let mut names = Vec::new();
-        let mut aliases = HashMap::new();
+        let mut aliases = FxHashMap::default();
         let mut default_import = None;
         let mut namespace_import = None;
 
@@ -658,13 +680,17 @@ impl TypeScript {
                     for body_child in child.children(&mut child.walk()) {
                         match body_child.kind() {
                             "method_signature" | "property_signature" => {
-                                if let Some(method) = self.extract_interface_method(body_child, source) {
+                                if let Some(method) =
+                                    self.extract_interface_method(body_child, source)
+                                {
                                     methods.push(method);
                                 }
                             }
                             // FEATURE: Extract index signatures like [key: string]: any
                             "index_signature" => {
-                                if let Some(index_sig) = self.extract_index_signature(body_child, source) {
+                                if let Some(index_sig) =
+                                    self.extract_index_signature(body_child, source)
+                                {
                                     methods.push(index_sig);
                                 }
                             }
@@ -930,9 +956,15 @@ impl TypeScript {
                 "enum_body" => {
                     // Extract enum members as "methods" for consistency
                     for member in child.children(&mut child.walk()) {
-                        if member.kind() == "enum_assignment" || member.kind() == "property_identifier" {
+                        if member.kind() == "enum_assignment"
+                            || member.kind() == "property_identifier"
+                        {
                             let member_name = self.get_text(member, source).to_string();
-                            if !member_name.is_empty() && member_name != "," && member_name != "{" && member_name != "}" {
+                            if !member_name.is_empty()
+                                && member_name != ","
+                                && member_name != "{"
+                                && member_name != "}"
+                            {
                                 methods.push(FunctionInfo {
                                     name: member_name,
                                     params: Vec::new(),
@@ -1071,9 +1103,9 @@ impl TypeScript {
                     field_type = Some(text.trim_start_matches(':').trim().to_string());
                 }
                 // Default value - any expression after '='
-                "number" | "string" | "true" | "false" | "null" | "undefined"
-                | "identifier" | "new_expression" | "call_expression" | "array"
-                | "object" | "arrow_function" | "template_string" => {
+                "number" | "string" | "true" | "false" | "null" | "undefined" | "identifier"
+                | "new_expression" | "call_expression" | "array" | "object" | "arrow_function"
+                | "template_string" => {
                     default_value = Some(self.get_text(child, source).to_string());
                 }
                 _ => {}
@@ -1124,7 +1156,7 @@ impl TypeScript {
             if has_from {
                 if let Some(module) = module_path {
                     let mut names = Vec::new();
-                    let mut aliases = HashMap::new();
+                    let mut aliases = FxHashMap::default();
 
                     for child in node.children(&mut node.walk()) {
                         match child.kind() {
@@ -1178,7 +1210,7 @@ impl TypeScript {
                     imports.push(ImportInfo {
                         module,
                         names,
-                        aliases,
+                        aliases: aliases.into_iter().collect(),
                         is_from: true,
                         level: 0,
                         line_number: node.start_position().row + 1,
@@ -1622,9 +1654,8 @@ impl Language for TypeScript {
                             "pair" | "property" => parent
                                 .child_by_field_name("key")
                                 .map(|n| self.get_text(n, source).to_string()),
-                            "assignment_expression" => parent
-                                .child_by_field_name("left")
-                                .and_then(|n| {
+                            "assignment_expression" => {
+                                parent.child_by_field_name("left").and_then(|n| {
                                     if n.kind() == "identifier" {
                                         Some(self.get_text(n, source).to_string())
                                     } else if n.kind() == "member_expression" {
@@ -1635,7 +1666,8 @@ impl Language for TypeScript {
                                     } else {
                                         None
                                     }
-                                }),
+                                })
+                            }
                             _ => None,
                         }
                     } else {
@@ -2001,10 +2033,20 @@ impl Language for TypeScript {
                     for heritage_child in child.children(&mut child.walk()) {
                         match heritage_child.kind() {
                             "extends_clause" => {
-                                self.extract_heritage_types(heritage_child, source, &mut bases, false);
+                                self.extract_heritage_types(
+                                    heritage_child,
+                                    source,
+                                    &mut bases,
+                                    false,
+                                );
                             }
                             "implements_clause" => {
-                                self.extract_heritage_types(heritage_child, source, &mut bases, true);
+                                self.extract_heritage_types(
+                                    heritage_child,
+                                    source,
+                                    &mut bases,
+                                    true,
+                                );
                             }
                             _ => {}
                         }
@@ -2227,7 +2269,12 @@ impl ExceptionContext {
     }
 
     /// Add a catch handler to this exception context.
-    fn add_handler(&mut self, catch_block: BlockId, is_bare_catch: bool, exception_param: Option<String>) {
+    fn add_handler(
+        &mut self,
+        catch_block: BlockId,
+        is_bare_catch: bool,
+        exception_param: Option<String>,
+    ) {
         self.handlers.push(ExceptionHandler {
             catch_block,
             is_bare_catch,
@@ -2242,7 +2289,10 @@ impl ExceptionContext {
 
     /// Get the primary exception target (first catch handler or finally if no catch).
     fn exception_target(&self) -> Option<BlockId> {
-        self.handlers.first().map(|h| h.catch_block).or(self.finally_block)
+        self.handlers
+            .first()
+            .map(|h| h.catch_block)
+            .or(self.finally_block)
     }
 }
 
@@ -2259,7 +2309,7 @@ impl ExceptionContext {
 /// - for await...of async iteration
 struct TypeScriptCFGBuilder<'a> {
     source: &'a [u8],
-    blocks: HashMap<BlockId, CFGBlock>,
+    blocks: FxHashMap<BlockId, CFGBlock>,
     edges: Vec<CFGEdge>,
     next_block_id: usize,
     current_block: Option<BlockId>,
@@ -2302,14 +2352,24 @@ struct TypeScriptCFGBuilder<'a> {
     last_await_line: Option<usize>,
 
     /// Variables defined by awaits for dependency analysis
-    await_defined_vars: HashMap<String, usize>,
+    await_defined_vars: FxHashMap<String, usize>,
+
+    // =========================================================================
+    // Generator tracking fields (function*, async function*)
+    // =========================================================================
+    /// Whether this is a generator function (function*)
+    is_generator: bool,
+    /// Whether this is an async generator function (async function*)
+    is_async_generator: bool,
+    /// Count of yield expressions (suspension points)
+    yield_count: usize,
 }
 
 impl<'a> TypeScriptCFGBuilder<'a> {
     fn new(source: &'a [u8]) -> Self {
         Self {
             source,
-            blocks: HashMap::new(),
+            blocks: FxHashMap::default(),
             edges: Vec::new(),
             next_block_id: 0,
             current_block: None,
@@ -2326,7 +2386,11 @@ impl<'a> TypeScriptCFGBuilder<'a> {
             unhandled_promises: Vec::new(),
             sequential_await_candidates: Vec::new(),
             last_await_line: None,
-            await_defined_vars: HashMap::new(),
+            await_defined_vars: FxHashMap::default(),
+            // Generator tracking
+            is_generator: false,
+            is_async_generator: false,
+            yield_count: 0,
         }
     }
 
@@ -2362,7 +2426,13 @@ impl<'a> TypeScriptCFGBuilder<'a> {
     }
 
     /// Add a typed edge with specific EdgeType and optional condition.
-    fn add_typed_edge(&mut self, from: BlockId, to: BlockId, edge_type: EdgeType, condition: Option<String>) {
+    fn add_typed_edge(
+        &mut self,
+        from: BlockId,
+        to: BlockId,
+        edge_type: EdgeType,
+        condition: Option<String>,
+    ) {
         let edge = match condition {
             Some(cond) => CFGEdge::with_condition(from, to, edge_type, cond),
             None => CFGEdge::new(from, to, edge_type),
@@ -2371,22 +2441,56 @@ impl<'a> TypeScriptCFGBuilder<'a> {
     }
 
     /// Check if a function node is async.
+    ///
+    /// Delegates to `has_async_keyword` helper for the actual check.
+    #[inline]
     fn check_is_async(&self, node: Node) -> bool {
-        for child in node.children(&mut node.walk()) {
-            if child.kind() == "async" {
-                return true;
+        has_async_keyword(node)
+    }
+
+    /// Check if a function node is a generator function.
+    ///
+    /// Generator functions are identified by:
+    /// - `generator_function` or `generator_function_declaration` node types
+    /// - Presence of `*` operator after `function` keyword
+    ///
+    /// Note: Arrow functions cannot be generators in JavaScript/TypeScript.
+    /// `const gen = *() => {}` is a syntax error.
+    fn check_is_generator(&self, node: Node) -> bool {
+        // Check node type directly - generator functions have distinct node types
+        match node.kind() {
+            "generator_function" | "generator_function_declaration" => true,
+            "function_declaration" | "function_expression" | "method_definition" => {
+                // Check for * token after function keyword
+                for child in node.children(&mut node.walk()) {
+                    if child.kind() == "*" {
+                        return true;
+                    }
+                    // Early exit: * always comes before parameters
+                    if child.kind() == "formal_parameters" {
+                        break;
+                    }
+                }
+                false
             }
-            // Early exit: async keyword always precedes the function body
-            if child.kind() == "statement_block" || child.kind() == "block" {
-                break;
+            "arrow_function" => {
+                // Arrow functions cannot be generators - syntax error
+                // However, we could detect and warn about this pattern
+                false
             }
+            _ => false,
         }
-        false
     }
 
     fn build(&mut self, node: Node, func_name: &str) -> Result<CFGInfo> {
         // Detect if this is an async function for await exception handling
         self.is_async_function = self.check_is_async(node);
+
+        // Detect if this is a generator function
+        self.is_generator = self.check_is_generator(node);
+
+        // Async generator = both async and generator
+        self.is_async_generator = self.is_async_function && self.is_generator;
 
         // Create entry block
         let entry = self.new_block(
@@ -2444,10 +2548,14 @@ impl<'a> TypeScriptCFGBuilder<'a> {
             exits: self.exits.clone(),
             decision_points: self.decision_points,
             comprehension_decision_points: 0, // TypeScript doesn't have Python-style comprehensions
-            nested_cfgs: HashMap::new(),      // TODO: Handle arrow functions/nested functions as nested CFGs
+            nested_cfgs: FxHashMap::default(),
             is_async: self.is_async_function,
             await_points: self.await_points,
             blocking_calls: blocking_calls_formatted,
+            // Generator tracking
+            is_generator: self.is_generator,
+            is_async_generator: self.is_async_generator,
+            yield_count: self.yield_count,
             ..Default::default()
         })
     }
@@ -2875,11 +2983,7 @@ impl<'a> TypeScriptCFGBuilder<'a> {
         let end_line = node.end_position().row + 1;
 
         // Create after-try block for merging all paths
-        let after_try = self.new_block(
-            "after_try".to_string(),
-            end_line,
-            end_line,
-        );
+        let after_try = self.new_block("after_try".to_string(), end_line, end_line);
 
         // Create try block first
         let try_block_id = if let Some(body) = node.child_by_field_name("body") {
@@ -3255,17 +3359,14 @@ impl<'a> TypeScriptCFGBuilder<'a> {
             // Simple heuristic: if they're on consecutive lines and don't share variables
             if line == last_line + 1 || line == last_line + 2 {
                 // Potential parallelization candidate
-                self.sequential_await_candidates.push((last_line, line, Vec::new()));
+                self.sequential_await_candidates
+                    .push((last_line, line, Vec::new()));
             }
         }
         self.last_await_line = Some(line);
 
         // Create after-await block for successful resolution
-        let after_await = self.new_block(
-            "after_await".to_string(),
-            line,
-            line,
-        );
+        let after_await = self.new_block("after_await".to_string(), line, line);
 
         // Add resolve path using Await edge type (represents suspension and resume)
         self.add_typed_edge(
@@ -3450,10 +3551,7 @@ impl<'a> TypeScriptCFGBuilder<'a> {
         for child in node.children(&mut node.walk()) {
             if child.kind() == "arguments" {
                 for arg_child in child.children(&mut child.walk()) {
-                    if arg_child.is_named()
-                        && arg_child.kind() != "("
-                        && arg_child.kind() != ")"
-                    {
+                    if arg_child.is_named() && arg_child.kind() != "(" && arg_child.kind() != ")" {
                         let text = self.get_text(arg_child);
                         // Abbreviate if too long
                         if text.len() > 20 {
@@ -3965,9 +4063,7 @@ impl<'a> TypeScriptCFGBuilder<'a> {
             if child.kind() == "arguments" {
                 self.current_block = Some(resolved_block);
                 for arg_child in child.children(&mut child.walk()) {
-                    if arg_child.is_named()
-                        && !matches!(arg_child.kind(), "(" | ")" | ",")
-                    {
+                    if arg_child.is_named() && !matches!(arg_child.kind(), "(" | ")" | ",") {
                         self.visit_node(arg_child);
                         break; // Only visit first handler in resolved block
                     }
@@ -4143,23 +4239,14 @@ impl<'a> TypeScriptCFGBuilder<'a> {
 
         // Create branch edges for each task (conceptual parallel branches)
         for (i, task) in tasks.iter().enumerate() {
-            let task_block = self.new_block(
-                format!("task[{}]: {}", i, task),
-                line,
-                line,
-            );
+            let task_block = self.new_block(format!("task[{}]: {}", i, task), line, line);
             self.add_typed_edge(
                 parallel_block,
                 task_block,
                 EdgeType::PromiseAllBranch,
                 Some(format!("task {}", i)),
             );
-            self.add_typed_edge(
-                task_block,
-                join_block,
-                EdgeType::PromiseAllJoin,
-                None,
-            );
+            self.add_typed_edge(task_block, join_block, EdgeType::PromiseAllJoin, None);
         }
 
         // If no tasks, direct edge to join
@@ -4233,11 +4320,7 @@ impl<'a> TypeScriptCFGBuilder<'a> {
 
         // Each task can be the winner
         for (i, task) in tasks.iter().enumerate() {
-            let task_block = self.new_block(
-                format!("racer[{}]: {}", i, task),
-                line,
-                line,
-            );
+            let task_block = self.new_block(format!("racer[{}]: {}", i, task), line, line);
             self.add_typed_edge(
                 race_block,
                 task_block,
@@ -4379,10 +4462,23 @@ impl<'a> TypeScriptCFGBuilder<'a> {
     }
 
     // =========================================================================
-    // ASYNC GENERATOR: yield expressions
+    // GENERATOR: yield expressions (function* and async function*)
     // =========================================================================
 
-    /// Handle yield expression in async generators.
+    /// Handle yield expression in generators (sync and async).
+    ///
+    /// Creates a suspension point in the CFG where:
+    /// - `yield value` returns value to caller, suspends until .next() is called
+    /// - `yield* iterable` delegates to another iterator until exhausted
+    ///
+    /// Modeling:
+    /// - Sync generator (function*): Uses JSYieldPoint/JSYieldStar block types
+    /// - Async generator (async function*): Uses AsyncGeneratorYield block type
+    ///
+    /// The yield expression creates branching for:
+    /// 1. Normal resume: .next(value) resumes with value
+    /// 2. Return path: .return(value) triggers cleanup via finally blocks
+    /// 3. Throw path: .throw(error) injects exception at yield point
     fn visit_yield(&mut self, node: Node) {
         let current = match self.current_block {
             Some(id) => id,
@@ -4391,38 +4487,140 @@ impl<'a> TypeScriptCFGBuilder<'a> {
 
         let line = node.start_position().row + 1;
 
+        // Increment yield count for generator complexity tracking
+        self.yield_count += 1;
+
         // Check if this is yield* (delegation)
         let is_delegation = self.get_text(node).contains("yield*");
 
+        // Extract yielded expression for better labeling
+        let yield_expr = self.extract_yield_expression(node);
         let label = if is_delegation {
-            "yield*".to_string()
+            if let Some(ref expr) = yield_expr {
+                format!("yield* {}", expr)
+            } else {
+                "yield*".to_string()
+            }
+        } else if let Some(ref expr) = yield_expr {
+            format!("yield {}", expr)
         } else {
             "yield".to_string()
+        };
+
+        // Determine block type based on generator type
+        let block_type = if is_delegation {
+            BlockType::JSYieldStar
+        } else if self.is_async_generator {
+            BlockType::AsyncGeneratorYield
+        } else {
+            BlockType::JSYieldPoint
         };
 
         // Update current block
         if let Some(block) = self.blocks.get_mut(&current) {
             block.label = label;
-            block.block_type = BlockType::AsyncGeneratorYield;
+            block.block_type = block_type;
             block.end_line = line;
         }
 
-        // Create resume block
-        let resume_block = self.new_block(
-            "after_yield".to_string(),
-            line,
-            line,
-        );
+        if is_delegation {
+            // yield* delegation: more complex control flow
+            self.visit_yield_delegation(node, current, line);
+        } else {
+            // Simple yield: create resume block
+            self.visit_simple_yield(current, line);
+        }
+    }
 
-        // Yield edge (suspension)
-        self.add_typed_edge(
-            current,
-            resume_block,
-            EdgeType::AsyncYield,
-            Some("yield".to_string()),
-        );
+    /// Handle simple yield expression (non-delegation).
+    fn visit_simple_yield(&mut self, current: BlockId, line: usize) {
+        // Create resume block where .next() continues execution
+        let resume_block = self.new_block("after_yield".to_string(), line, line);
+
+        // Set resume block type
+        if let Some(block) = self.blocks.get_mut(&resume_block) {
+            block.block_type = BlockType::JSGeneratorResume;
+        }
+
+        // Determine edge type based on generator type
+        let edge_type = if self.is_async_generator {
+            EdgeType::AsyncYield
+        } else {
+            EdgeType::JSYield
+        };
+
+        // Yield edge (suspension) - normal resume path
+        self.add_typed_edge(current, resume_block, edge_type, Some("yield".to_string()));
 
         self.current_block = Some(resume_block);
+    }
+
+    /// Handle yield* delegation expression.
+    ///
+    /// yield* iterable:
+    /// 1. Iterates through delegate iterator
+    /// 2. Each value is re-yielded to caller
+    /// 3. When delegate is exhausted, control returns with delegate's return value
+    ///
+    /// The iterator protocol methods pass through:
+    /// - .next(value) is forwarded to delegate
+    /// - .return(value) triggers delegate's .return() if defined
+    /// - .throw(error) triggers delegate's .throw() if defined
+    fn visit_yield_delegation(&mut self, _node: Node, current: BlockId, line: usize) {
+        // Create delegation loop block
+        let delegate_loop = self.new_block("yield*_iterate".to_string(), line, line);
+
+        // Create exhausted/done block
+        let after_delegation = self.new_block("after_yield*".to_string(), line, line);
+
+        if let Some(block) = self.blocks.get_mut(&after_delegation) {
+            block.block_type = BlockType::JSGeneratorResume;
+        }
+
+        // Edge from yield* to delegation loop
+        self.add_typed_edge(
+            current,
+            delegate_loop,
+            EdgeType::JSYieldStarDelegate,
+            Some("delegate".to_string()),
+        );
+
+        // Delegation loop back edge (for each yielded value from delegate)
+        self.add_typed_edge(
+            delegate_loop,
+            delegate_loop,
+            EdgeType::Iterate,
+            Some("next value".to_string()),
+        );
+
+        // Edge from delegation loop to after (when delegate exhausted)
+        self.add_typed_edge(
+            delegate_loop,
+            after_delegation,
+            EdgeType::JSYieldStarExhausted,
+            Some("exhausted".to_string()),
+        );
+
+        self.current_block = Some(after_delegation);
+    }
+
+    /// Extract the yield expression text for better CFG labeling.
+    fn extract_yield_expression(&self, node: Node) -> Option<String> {
+        for child in node.children(&mut node.walk()) {
+            // Skip yield keyword and *
+            if child.kind() == "yield" || child.kind() == "*" {
+                continue;
+            }
+            if child.is_named() {
+                let text = self.get_text(child);
+                // Abbreviate long expressions
+                if text.len() > 25 {
+                    return Some(format!("{}...", &text[..22]));
+                }
+                return Some(text.to_string());
+            }
+        }
+        None
     }
 
     // =========================================================================
@@ -4442,14 +4640,32 @@ impl<'a> TypeScriptCFGBuilder<'a> {
 
         // Patterns that indicate blocking calls in async context
         let blocking_patterns = [
-            ("readFileSync", "Use fs.promises.readFile or fs.readFile with await"),
-            ("writeFileSync", "Use fs.promises.writeFile or fs.writeFile with await"),
-            ("existsSync", "Use fs.promises.access or fs.access with await"),
+            (
+                "readFileSync",
+                "Use fs.promises.readFile or fs.readFile with await",
+            ),
+            (
+                "writeFileSync",
+                "Use fs.promises.writeFile or fs.writeFile with await",
+            ),
+            (
+                "existsSync",
+                "Use fs.promises.access or fs.access with await",
+            ),
             ("statSync", "Use fs.promises.stat or fs.stat with await"),
-            ("readdirSync", "Use fs.promises.readdir or fs.readdir with await"),
+            (
+                "readdirSync",
+                "Use fs.promises.readdir or fs.readdir with await",
+            ),
             ("mkdirSync", "Use fs.promises.mkdir or fs.mkdir with await"),
-            ("unlinkSync", "Use fs.promises.unlink or fs.unlink with await"),
-            ("execSync", "Use child_process.exec with await or util.promisify"),
+            (
+                "unlinkSync",
+                "Use fs.promises.unlink or fs.unlink with await",
+            ),
+            (
+                "execSync",
+                "Use child_process.exec with await or util.promisify",
+            ),
             ("spawnSync", "Use child_process.spawn with event handlers"),
             (".alert(", "Blocking UI operation"),
             (".confirm(", "Blocking UI operation"),
@@ -4460,11 +4676,8 @@ impl<'a> TypeScriptCFGBuilder<'a> {
         let call_text_owned = call_text.to_string();
         for (pattern, reason) in blocking_patterns {
             if call_text_owned.contains(pattern) {
-                self.blocking_calls.push((
-                    pattern.to_string(),
-                    line,
-                    reason.to_string(),
-                ));
+                self.blocking_calls
+                    .push((pattern.to_string(), line, reason.to_string()));
             }
         }
     }
@@ -4478,11 +4691,11 @@ impl<'a> TypeScriptCFGBuilder<'a> {
 struct TypeScriptDFGBuilder<'a> {
     source: &'a [u8],
     edges: Vec<DataflowEdge>,
-    definitions: HashMap<String, Vec<usize>>,
-    uses: HashMap<String, Vec<usize>>,
+    definitions: FxHashMap<String, Vec<usize>>,
+    uses: FxHashMap<String, Vec<usize>>,
     /// Variable -> (definition line, definition kind)
     /// Stores the most recent definition for each variable to create def->use edges.
-    current_defs: HashMap<String, (usize, DataflowKind)>,
+    current_defs: FxHashMap<String, (usize, DataflowKind)>,
 }
 
 impl<'a> TypeScriptDFGBuilder<'a> {
@@ -4490,9 +4703,9 @@ impl<'a> TypeScriptDFGBuilder<'a> {
         Self {
             source,
             edges: Vec::new(),
-            definitions: HashMap::new(),
-            uses: HashMap::new(),
-            current_defs: HashMap::new(),
+            definitions: FxHashMap::default(),
+            uses: FxHashMap::default(),
+            current_defs: FxHashMap::default(),
         }
     }
 
@@ -4527,8 +4740,8 @@ impl<'a> TypeScriptDFGBuilder<'a> {
         Ok(DFGInfo::new(
             func_name.to_string(),
             self.edges.clone(),
-            self.definitions.clone(),
-            self.uses.clone(),
+            self.definitions.clone().into_iter().collect(),
+            self.uses.clone().into_iter().collect(),
         ))
     }
 
@@ -5139,13 +5352,19 @@ const fetchData = async (url: string): Promise<Response> => {
         let source1 = "async function foo() {}";
         let tree1 = parse_ts(source1);
         let func1 = tree1.root_node().child(0).unwrap();
-        assert!(ts.is_async(func1, source1.as_bytes()), "basic async function");
+        assert!(
+            ts.is_async(func1, source1.as_bytes()),
+            "basic async function"
+        );
 
         // 2. Non-async function
         let source2 = "function bar() {}";
         let tree2 = parse_ts(source2);
         let func2 = tree2.root_node().child(0).unwrap();
-        assert!(!ts.is_async(func2, source2.as_bytes()), "non-async function");
+        assert!(
+            !ts.is_async(func2, source2.as_bytes()),
+            "non-async function"
+        );
 
         // 3. Async arrow function
         let source3 = "const f = async () => {};";
@@ -5158,7 +5377,10 @@ const fetchData = async (url: string): Promise<Response> => {
             .unwrap() // variable_declarator
             .child(2)
             .unwrap(); // arrow_function
-        assert!(ts.is_async(arrow3, source3.as_bytes()), "async arrow function");
+        assert!(
+            ts.is_async(arrow3, source3.as_bytes()),
+            "async arrow function"
+        );
 
         // 4. Non-async arrow function
         let source4 = "const g = () => {};";
@@ -5219,7 +5441,10 @@ const fetchData = async (url: string): Promise<Response> => {
             .unwrap()
             .child(1)
             .unwrap();
-        assert!(!ts.is_async(method7, source7.as_bytes()), "non-async method");
+        assert!(
+            !ts.is_async(method7, source7.as_bytes()),
+            "non-async method"
+        );
     }
 
     #[test]
@@ -5316,7 +5541,10 @@ function MyComponent(): JSX.Element {
 
         // Verify the tree is valid and contains JSX elements
         let root = tsx_tree.root_node();
-        assert!(!root.has_error(), "TSX parser should handle JSX syntax without errors");
+        assert!(
+            !root.has_error(),
+            "TSX parser should handle JSX syntax without errors"
+        );
 
         // Find the JSX element in the tree
         let has_jsx = find_node_by_kind(root, "jsx_element").is_some()
@@ -5343,7 +5571,10 @@ function MyComponent(): JSX.Element {
     }
 
     /// Helper function to find a node by kind in the AST tree.
-    fn find_node_by_kind<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
+    fn find_node_by_kind<'a>(
+        node: tree_sitter::Node<'a>,
+        kind: &str,
+    ) -> Option<tree_sitter::Node<'a>> {
         if node.kind() == kind {
             return Some(node);
         }
@@ -5508,10 +5739,7 @@ class Config {
 
         let class_info = ts.extract_class(class_node, source.as_bytes()).unwrap();
 
-        let static_getter = class_info
-            .methods
-            .iter()
-            .find(|m| m.name == "instance");
+        let static_getter = class_info.methods.iter().find(|m| m.name == "instance");
         assert!(static_getter.is_some(), "Should find 'instance' getter");
 
         let method = static_getter.unwrap();
@@ -5552,7 +5780,9 @@ interface Dict {
 
         let index_sig = &class_info.methods[0];
         assert!(
-            index_sig.decorators.contains(&"index_signature".to_string()),
+            index_sig
+                .decorators
+                .contains(&"index_signature".to_string()),
             "Should have 'index_signature' decorator, got: {:?}",
             index_sig.decorators
         );
@@ -5588,7 +5818,9 @@ interface ArrayLike {
         let index_sig = &class_info.methods[0];
 
         assert!(
-            index_sig.decorators.contains(&"index_signature".to_string()),
+            index_sig
+                .decorators
+                .contains(&"index_signature".to_string()),
             "Should have 'index_signature' decorator"
         );
         assert!(
@@ -5701,7 +5933,10 @@ function isString(x: unknown): x is string {
             func.decorators
         );
         assert!(
-            func.return_type.as_ref().map(|rt| rt.contains("is")).unwrap_or(false),
+            func.return_type
+                .as_ref()
+                .map(|rt| rt.contains("is"))
+                .unwrap_or(false),
             "Return type should contain 'is' predicate, got: {:?}",
             func.return_type
         );
@@ -5729,7 +5964,10 @@ function isNumber(x: unknown): x is number {
             "Should have 'type_guard' decorator"
         );
         assert!(
-            func.return_type.as_ref().map(|rt| rt.contains("number")).unwrap_or(false),
+            func.return_type
+                .as_ref()
+                .map(|rt| rt.contains("number"))
+                .unwrap_or(false),
             "Return type should mention 'number'"
         );
     }
@@ -5770,7 +6008,10 @@ function isUser(obj: unknown): obj is User {
             "Should have 'type_guard' decorator for custom type guard"
         );
         assert!(
-            func.return_type.as_ref().map(|rt| rt.contains("User")).unwrap_or(false),
+            func.return_type
+                .as_ref()
+                .map(|rt| rt.contains("User"))
+                .unwrap_or(false),
             "Return type should mention 'User'"
         );
     }
@@ -5879,7 +6120,10 @@ function assertIsString(x: unknown): asserts x is string {
         // Asserts type guard may or may not be detected depending on tree-sitter
         // The important thing is the return type is captured
         assert!(
-            func.return_type.as_ref().map(|rt| rt.contains("asserts")).unwrap_or(false)
+            func.return_type
+                .as_ref()
+                .map(|rt| rt.contains("asserts"))
+                .unwrap_or(false)
                 || func.decorators.contains(&"type_guard".to_string()),
             "Asserts type guard should be captured in return type or decorator"
         );
@@ -5899,7 +6143,10 @@ function foo() {}"#;
         let tree1 = parse_ts(source1);
         let func1 = tree1.root_node().child(1).unwrap();
         let doc1 = ts.find_jsdoc(func1, source1.as_bytes());
-        assert!(doc1.is_some(), "JSDoc should be found directly before function");
+        assert!(
+            doc1.is_some(),
+            "JSDoc should be found directly before function"
+        );
         assert!(
             doc1.unwrap().contains("JSDoc for foo"),
             "JSDoc content should be extracted"
@@ -5927,7 +6174,10 @@ function baz() {}"#;
         let tree3 = parse_ts(source3);
         let func3 = tree3.root_node().child(1).unwrap();
         let doc3 = ts.find_jsdoc(func3, source3.as_bytes());
-        assert!(doc3.is_none(), "Regular comment should not be treated as JSDoc");
+        assert!(
+            doc3.is_none(),
+            "Regular comment should not be treated as JSDoc"
+        );
 
         // Test 4: Multiple regular comments before JSDoc
         let source4 = r#"/** JSDoc found through multiple comments */
@@ -6220,10 +6470,7 @@ function processWithCleanup(data: any) {
                 .filter(|e| matches!(e.edge_type, EdgeType::Finally))
                 .collect();
 
-            assert!(
-                !finally_edges.is_empty(),
-                "CFG should have finally edges"
-            );
+            assert!(!finally_edges.is_empty(), "CFG should have finally edges");
         }
 
         /// Test try with only finally (no catch) exception flow.
@@ -6337,7 +6584,10 @@ function validateWithCatch(data: any) {
                 .iter()
                 .filter(|e| {
                     matches!(e.edge_type, EdgeType::Exception)
-                        && e.condition.as_ref().map(|c| c.contains("throw")).unwrap_or(false)
+                        && e.condition
+                            .as_ref()
+                            .map(|c| c.contains("throw"))
+                            .unwrap_or(false)
                 })
                 .collect();
 
@@ -6413,7 +6663,10 @@ function suppressError() {
             let has_catch_block = cfg.blocks.values().any(|b| b.label.starts_with("catch"));
 
             assert!(has_try_block, "CFG should have a 'try' block");
-            assert!(has_catch_block, "CFG should have a 'catch' block even with optional binding");
+            assert!(
+                has_catch_block,
+                "CFG should have a 'catch' block even with optional binding"
+            );
         }
 
         /// Test Promise.catch() creates implicit exception handling.
@@ -6442,10 +6695,13 @@ function fetchWithFallback(url: string) {
                 .values()
                 .any(|b| b.label.contains("catch") || b.label.contains("handler"));
 
-            let has_exception_edge = cfg
-                .edges
-                .iter()
-                .any(|e| matches!(e.edge_type, EdgeType::Exception) || e.condition.as_ref().map(|c| c.contains("rejected")).unwrap_or(false));
+            let has_exception_edge = cfg.edges.iter().any(|e| {
+                matches!(e.edge_type, EdgeType::Exception)
+                    || e.condition
+                        .as_ref()
+                        .map(|c| c.contains("rejected"))
+                        .unwrap_or(false)
+            });
 
             assert!(
                 has_catch_block || has_exception_edge || cfg.blocks.len() > 2,
@@ -6570,10 +6826,9 @@ function nestedHandling(data: any) {
                 .iter()
                 .any(|e| matches!(e.edge_type, EdgeType::Exception));
 
-            let has_try_like_block = cfg
-                .blocks
-                .values()
-                .any(|b| b.label.contains("try") || b.label.contains("catch") || b.label.contains("throw"));
+            let has_try_like_block = cfg.blocks.values().any(|b| {
+                b.label.contains("try") || b.label.contains("catch") || b.label.contains("throw")
+            });
 
             assert!(
                 has_exception_edges || has_try_like_block,
@@ -6657,21 +6912,26 @@ async function fetchUser(id: string): Promise<User> {
             let cfg = ts.build_cfg(func_node, source.as_bytes()).unwrap();
 
             // CFG should be marked as async
-            assert!(cfg.is_async, "CFG should be marked as async for async function");
+            assert!(
+                cfg.is_async,
+                "CFG should be marked as async for async function"
+            );
 
             // Should have exactly 1 await point
             assert_eq!(cfg.await_points, 1, "Should have 1 await point");
 
             // Should have AwaitPoint block type
-            let has_await_block = cfg.blocks.values().any(|b| {
-                matches!(b.block_type, BlockType::AwaitPoint)
-            });
+            let has_await_block = cfg
+                .blocks
+                .values()
+                .any(|b| matches!(b.block_type, BlockType::AwaitPoint));
             assert!(has_await_block, "Should have AwaitPoint block");
 
             // Should have Await edge type
-            let has_await_edge = cfg.edges.iter().any(|e| {
-                matches!(e.edge_type, EdgeType::Await)
-            });
+            let has_await_edge = cfg
+                .edges
+                .iter()
+                .any(|e| matches!(e.edge_type, EdgeType::Await));
             assert!(has_await_edge, "Should have Await edge");
         }
 
@@ -6698,13 +6958,17 @@ async function processData(id: string): Promise<Data> {
             assert_eq!(cfg.await_points, 3, "Should have 3 await points");
 
             // Should have 3 AwaitPoint blocks
-            let await_block_count = cfg.blocks.values()
+            let await_block_count = cfg
+                .blocks
+                .values()
                 .filter(|b| matches!(b.block_type, BlockType::AwaitPoint))
                 .count();
             assert_eq!(await_block_count, 3, "Should have 3 AwaitPoint blocks");
 
             // Should have 3 Await edges
-            let await_edge_count = cfg.edges.iter()
+            let await_edge_count = cfg
+                .edges
+                .iter()
                 .filter(|e| matches!(e.edge_type, EdgeType::Await))
                 .count();
             assert_eq!(await_edge_count, 3, "Should have 3 Await edges");
@@ -6737,10 +7001,14 @@ async function safeFetch(url: string): Promise<any> {
             assert_eq!(cfg.await_points, 2, "Should have 2 await points");
 
             // Should have rejection paths to catch block
-            let has_rejection_edge = cfg.edges.iter().any(|e| {
-                matches!(e.edge_type, EdgeType::PromiseRejected)
-            });
-            assert!(has_rejection_edge, "Should have PromiseRejected edge to catch");
+            let has_rejection_edge = cfg
+                .edges
+                .iter()
+                .any(|e| matches!(e.edge_type, EdgeType::PromiseRejected));
+            assert!(
+                has_rejection_edge,
+                "Should have PromiseRejected edge to catch"
+            );
         }
 
         /// Test Promise.then() chain CFG transformation.
@@ -6762,15 +7030,17 @@ function processWithPromises(url: string) {
             let cfg = ts.build_cfg(func_node, source.as_bytes()).unwrap();
 
             // Should have PromiseThen blocks
-            let has_then_block = cfg.blocks.values().any(|b| {
-                matches!(b.block_type, BlockType::PromiseThen)
-            });
+            let has_then_block = cfg
+                .blocks
+                .values()
+                .any(|b| matches!(b.block_type, BlockType::PromiseThen));
             assert!(has_then_block, "Should have PromiseThen block");
 
             // Should have PromiseResolved edges
-            let has_resolved_edge = cfg.edges.iter().any(|e| {
-                matches!(e.edge_type, EdgeType::PromiseResolved)
-            });
+            let has_resolved_edge = cfg
+                .edges
+                .iter()
+                .any(|e| matches!(e.edge_type, EdgeType::PromiseResolved));
             assert!(has_resolved_edge, "Should have PromiseResolved edge");
         }
 
@@ -6796,16 +7066,23 @@ function fetchWithErrorHandling(url: string) {
             let cfg = ts.build_cfg(func_node, source.as_bytes()).unwrap();
 
             // Should have PromiseCatch block
-            let has_catch_block = cfg.blocks.values().any(|b| {
-                matches!(b.block_type, BlockType::PromiseCatch)
-            });
+            let has_catch_block = cfg
+                .blocks
+                .values()
+                .any(|b| matches!(b.block_type, BlockType::PromiseCatch));
             assert!(has_catch_block, "Should have PromiseCatch block");
 
             // Should have rejected edge
             let has_rejected_edge = cfg.edges.iter().any(|e| {
-                e.condition.as_ref().map(|c| c.contains("rejected")).unwrap_or(false)
+                e.condition
+                    .as_ref()
+                    .map(|c| c.contains("rejected"))
+                    .unwrap_or(false)
             });
-            assert!(has_rejected_edge, "Should have rejected edge to catch handler");
+            assert!(
+                has_rejected_edge,
+                "Should have rejected edge to catch handler"
+            );
         }
 
         /// Test Promise.finally() always-execute path.
@@ -6829,15 +7106,17 @@ function fetchWithCleanup(url: string) {
             let cfg = ts.build_cfg(func_node, source.as_bytes()).unwrap();
 
             // Should have PromiseFinally block
-            let has_finally_block = cfg.blocks.values().any(|b| {
-                matches!(b.block_type, BlockType::PromiseFinally)
-            });
+            let has_finally_block = cfg
+                .blocks
+                .values()
+                .any(|b| matches!(b.block_type, BlockType::PromiseFinally));
             assert!(has_finally_block, "Should have PromiseFinally block");
 
             // Should have PromiseSettled edge
-            let has_settled_edge = cfg.edges.iter().any(|e| {
-                matches!(e.edge_type, EdgeType::PromiseSettled)
-            });
+            let has_settled_edge = cfg
+                .edges
+                .iter()
+                .any(|e| matches!(e.edge_type, EdgeType::PromiseSettled));
             assert!(has_settled_edge, "Should have PromiseSettled edge");
         }
 
@@ -6862,25 +7141,31 @@ async function fetchAll(ids: string[]) {
             let cfg = ts.build_cfg(func_node, source.as_bytes()).unwrap();
 
             // Should have PromiseAll block
-            let has_all_block = cfg.blocks.values().any(|b| {
-                matches!(b.block_type, BlockType::PromiseAll)
-            });
+            let has_all_block = cfg
+                .blocks
+                .values()
+                .any(|b| matches!(b.block_type, BlockType::PromiseAll));
             assert!(has_all_block, "Should have PromiseAll block");
 
             // Should have TaskSpawn edge (spawning parallel tasks)
-            let has_spawn_edge = cfg.edges.iter().any(|e| {
-                matches!(e.edge_type, EdgeType::TaskSpawn)
-            });
+            let has_spawn_edge = cfg
+                .edges
+                .iter()
+                .any(|e| matches!(e.edge_type, EdgeType::TaskSpawn));
             assert!(has_spawn_edge, "Should have TaskSpawn edge");
 
             // Should have PromiseAllBranch edges (one per task)
-            let branch_edge_count = cfg.edges.iter()
+            let branch_edge_count = cfg
+                .edges
+                .iter()
                 .filter(|e| matches!(e.edge_type, EdgeType::PromiseAllBranch))
                 .count();
             assert_eq!(branch_edge_count, 2, "Should have 2 PromiseAllBranch edges");
 
             // Should have PromiseAllJoin edges
-            let join_edge_count = cfg.edges.iter()
+            let join_edge_count = cfg
+                .edges
+                .iter()
                 .filter(|e| matches!(e.edge_type, EdgeType::PromiseAllJoin))
                 .count();
             assert_eq!(join_edge_count, 2, "Should have 2 PromiseAllJoin edges");
@@ -6907,21 +7192,24 @@ async function fetchWithTimeout(url: string, timeout: number) {
             let cfg = ts.build_cfg(func_node, source.as_bytes()).unwrap();
 
             // Should have PromiseRace block
-            let has_race_block = cfg.blocks.values().any(|b| {
-                matches!(b.block_type, BlockType::PromiseRace)
-            });
+            let has_race_block = cfg
+                .blocks
+                .values()
+                .any(|b| matches!(b.block_type, BlockType::PromiseRace));
             assert!(has_race_block, "Should have PromiseRace block");
 
             // Should have PromiseRaceBranch edges
-            let has_race_branch = cfg.edges.iter().any(|e| {
-                matches!(e.edge_type, EdgeType::PromiseRaceBranch)
-            });
+            let has_race_branch = cfg
+                .edges
+                .iter()
+                .any(|e| matches!(e.edge_type, EdgeType::PromiseRaceBranch));
             assert!(has_race_branch, "Should have PromiseRaceBranch edge");
 
             // Should have PromiseRaceWinner edges
-            let has_winner_edge = cfg.edges.iter().any(|e| {
-                matches!(e.edge_type, EdgeType::PromiseRaceWinner)
-            });
+            let has_winner_edge = cfg
+                .edges
+                .iter()
+                .any(|e| matches!(e.edge_type, EdgeType::PromiseRaceWinner));
             assert!(has_winner_edge, "Should have PromiseRaceWinner edge");
         }
 
@@ -6947,15 +7235,17 @@ async function fetchAllSettled(urls: string[]) {
             let cfg = ts.build_cfg(func_node, source.as_bytes()).unwrap();
 
             // Should have PromiseAllSettled block
-            let has_all_settled_block = cfg.blocks.values().any(|b| {
-                matches!(b.block_type, BlockType::PromiseAllSettled)
-            });
+            let has_all_settled_block = cfg
+                .blocks
+                .values()
+                .any(|b| matches!(b.block_type, BlockType::PromiseAllSettled));
             assert!(has_all_settled_block, "Should have PromiseAllSettled block");
 
             // Should have PromiseSettled edge (allSettled never rejects)
-            let has_settled_edge = cfg.edges.iter().any(|e| {
-                matches!(e.edge_type, EdgeType::PromiseSettled)
-            });
+            let has_settled_edge = cfg
+                .edges
+                .iter()
+                .any(|e| matches!(e.edge_type, EdgeType::PromiseSettled));
             assert!(has_settled_edge, "Should have PromiseSettled edge");
         }
 
@@ -6978,21 +7268,24 @@ async function processStream(stream: AsyncIterable<Data>) {
             let cfg = ts.build_cfg(func_node, source.as_bytes()).unwrap();
 
             // Should have ForAwaitOf block
-            let has_for_await_block = cfg.blocks.values().any(|b| {
-                matches!(b.block_type, BlockType::ForAwaitOf)
-            });
+            let has_for_await_block = cfg
+                .blocks
+                .values()
+                .any(|b| matches!(b.block_type, BlockType::ForAwaitOf));
             assert!(has_for_await_block, "Should have ForAwaitOf block");
 
             // Should have ForAwaitIterate edge
-            let has_iterate_edge = cfg.edges.iter().any(|e| {
-                matches!(e.edge_type, EdgeType::ForAwaitIterate)
-            });
+            let has_iterate_edge = cfg
+                .edges
+                .iter()
+                .any(|e| matches!(e.edge_type, EdgeType::ForAwaitIterate));
             assert!(has_iterate_edge, "Should have ForAwaitIterate edge");
 
             // Should have ForAwaitExhausted edge
-            let has_exhausted_edge = cfg.edges.iter().any(|e| {
-                matches!(e.edge_type, EdgeType::ForAwaitExhausted)
-            });
+            let has_exhausted_edge = cfg
+                .edges
+                .iter()
+                .any(|e| matches!(e.edge_type, EdgeType::ForAwaitExhausted));
             assert!(has_exhausted_edge, "Should have ForAwaitExhausted edge");
         }
 
@@ -7048,7 +7341,9 @@ async function badAsyncFunction(path: string) {
             );
 
             // Blocking call should mention readFileSync (tuple format: (name, line))
-            let has_read_file_sync = cfg.blocking_calls.iter()
+            let has_read_file_sync = cfg
+                .blocking_calls
+                .iter()
                 .any(|(name, _line)| name.contains("readFileSync"));
             assert!(has_read_file_sync, "Should report readFileSync as blocking");
         }
@@ -7091,16 +7386,26 @@ async function handleRequest(req: Request, res: Response) {
             assert!(cfg.is_async, "Express handler should be async");
 
             // Should have 2 await points
-            assert_eq!(cfg.await_points, 2, "Should have 2 await points (findById and findByUserId)");
+            assert_eq!(
+                cfg.await_points, 2,
+                "Should have 2 await points (findById and findByUserId)"
+            );
 
             // Should have rejection paths to catch
-            let has_rejection_to_catch = cfg.edges.iter().any(|e| {
-                matches!(e.edge_type, EdgeType::PromiseRejected)
-            });
-            assert!(has_rejection_to_catch, "Should have rejection paths to catch block");
+            let has_rejection_to_catch = cfg
+                .edges
+                .iter()
+                .any(|e| matches!(e.edge_type, EdgeType::PromiseRejected));
+            assert!(
+                has_rejection_to_catch,
+                "Should have rejection paths to catch block"
+            );
 
             // Should have branching for the if(!user) check
-            assert!(cfg.decision_points >= 1, "Should have decision points for if check");
+            assert!(
+                cfg.decision_points >= 1,
+                "Should have decision points for if check"
+            );
         }
 
         /// Test nested Promise.all with individual error handling.
@@ -7132,9 +7437,10 @@ async function complexFetch(ids: string[]) {
             assert!(cfg.is_async, "Function should be async");
 
             // Should have Promise.all block
-            let has_all_block = cfg.blocks.values().any(|b| {
-                matches!(b.block_type, BlockType::PromiseAll)
-            });
+            let has_all_block = cfg
+                .blocks
+                .values()
+                .any(|b| matches!(b.block_type, BlockType::PromiseAll));
             assert!(has_all_block, "Should have PromiseAll block");
         }
 
@@ -7159,10 +7465,278 @@ function syncFunction(x: number): number {
             assert!(!cfg.is_async, "Sync function should not be async");
 
             // Should have 0 await points
-            assert_eq!(cfg.await_points, 0, "Sync function should have 0 await points");
+            assert_eq!(
+                cfg.await_points, 0,
+                "Sync function should have 0 await points"
+            );
 
             // Should have no blocking call warnings (not in async context)
-            assert!(cfg.blocking_calls.is_empty(), "Sync function should not track blocking calls");
+            assert!(
+                cfg.blocking_calls.is_empty(),
+                "Sync function should not track blocking calls"
+            );
+        }
+    }
+
+    /// Tests for JavaScript/TypeScript generator functions (function*, async function*)
+    mod generator {
+        use super::*;
+
+        /// Test simple generator function detection.
+        #[test]
+        fn test_generator_function_basic() {
+            let source = r#"
+function* range(start: number, end: number) {
+    for (let i = start; i < end; i++) {
+        yield i;
+    }
+}
+"#;
+            let tree = parse_ts(source);
+            let ts = TypeScript::new();
+
+            let root = tree.root_node();
+            let func_node = root.child(0).unwrap();
+
+            let cfg = ts.build_cfg(func_node, source.as_bytes()).unwrap();
+
+            // Should be marked as generator
+            assert!(cfg.is_generator, "Should be detected as generator function");
+
+            // Should NOT be async generator
+            assert!(!cfg.is_async_generator, "Should not be async generator");
+
+            // Should have 1 yield point
+            assert_eq!(cfg.yield_count, 1, "Should have 1 yield point");
+
+            // Should have JSYieldPoint block
+            let has_yield_block = cfg
+                .blocks
+                .values()
+                .any(|b| matches!(b.block_type, BlockType::JSYieldPoint));
+            assert!(has_yield_block, "Should have JSYieldPoint block");
+
+            // Should have JSYield edge
+            let has_yield_edge = cfg
+                .edges
+                .iter()
+                .any(|e| matches!(e.edge_type, EdgeType::JSYield));
+            assert!(has_yield_edge, "Should have JSYield edge");
+        }
+
+        /// Test yield* delegation.
+        #[test]
+        fn test_yield_star_delegation() {
+            let source = r#"
+function* flatten(arr: any[]) {
+    for (const item of arr) {
+        if (Array.isArray(item)) {
+            yield* flatten(item);
+        } else {
+            yield item;
+        }
+    }
+}
+"#;
+            let tree = parse_ts(source);
+            let ts = TypeScript::new();
+
+            let root = tree.root_node();
+            let func_node = root.child(0).unwrap();
+
+            let cfg = ts.build_cfg(func_node, source.as_bytes()).unwrap();
+
+            // Should be generator
+            assert!(cfg.is_generator, "Should be detected as generator");
+
+            // Should have 2 yield points (yield* and yield)
+            assert_eq!(cfg.yield_count, 2, "Should have 2 yield points");
+
+            // Should have JSYieldStar block
+            let has_yield_star_block = cfg
+                .blocks
+                .values()
+                .any(|b| matches!(b.block_type, BlockType::JSYieldStar));
+            assert!(has_yield_star_block, "Should have JSYieldStar block");
+
+            // Should have JSYieldStarDelegate edge
+            let has_delegate_edge = cfg
+                .edges
+                .iter()
+                .any(|e| matches!(e.edge_type, EdgeType::JSYieldStarDelegate));
+            assert!(has_delegate_edge, "Should have JSYieldStarDelegate edge");
+
+            // Should have JSYieldStarExhausted edge
+            let has_exhausted_edge = cfg
+                .edges
+                .iter()
+                .any(|e| matches!(e.edge_type, EdgeType::JSYieldStarExhausted));
+            assert!(has_exhausted_edge, "Should have JSYieldStarExhausted edge");
+        }
+
+        /// Test async generator function.
+        #[test]
+        fn test_async_generator() {
+            let source = r#"
+async function* fetchPages(urls: string[]) {
+    for (const url of urls) {
+        const response = await fetch(url);
+        yield await response.json();
+    }
+}
+"#;
+            let tree = parse_ts(source);
+            let ts = TypeScript::new();
+
+            let root = tree.root_node();
+            let func_node = root.child(0).unwrap();
+
+            let cfg = ts.build_cfg(func_node, source.as_bytes()).unwrap();
+
+            // Should be marked as async
+            assert!(cfg.is_async, "Should be async");
+
+            // Should be marked as generator
+            assert!(cfg.is_generator, "Should be generator");
+
+            // Should be marked as async generator
+            assert!(cfg.is_async_generator, "Should be async generator");
+
+            // Should have yield point
+            assert!(cfg.yield_count > 0, "Should have yield points");
+
+            // Should have await points
+            assert!(cfg.await_points > 0, "Should have await points");
+
+            // Should have AsyncGeneratorYield block
+            let has_async_yield_block = cfg
+                .blocks
+                .values()
+                .any(|b| matches!(b.block_type, BlockType::AsyncGeneratorYield));
+            assert!(
+                has_async_yield_block,
+                "Should have AsyncGeneratorYield block"
+            );
+        }
+
+        /// Test generator with try/finally for cleanup.
+        #[test]
+        fn test_generator_try_finally() {
+            let source = r#"
+function* resourceGenerator() {
+    const resource = acquireResource();
+    try {
+        yield resource.data;
+        yield resource.moreData;
+    } finally {
+        releaseResource(resource);
+    }
+}
+"#;
+            let tree = parse_ts(source);
+            let ts = TypeScript::new();
+
+            let root = tree.root_node();
+            let func_node = root.child(0).unwrap();
+
+            let cfg = ts.build_cfg(func_node, source.as_bytes()).unwrap();
+
+            // Should be generator
+            assert!(cfg.is_generator, "Should be detected as generator");
+
+            // Should have 2 yield points
+            assert_eq!(cfg.yield_count, 2, "Should have 2 yield points");
+
+            // Should have finally block for cleanup
+            let has_finally_block = cfg.blocks.values().any(|b| b.label.contains("finally"));
+            assert!(has_finally_block, "Should have finally block for cleanup");
+        }
+
+        /// Test generator expression (not declaration).
+        #[test]
+        fn test_generator_expression() {
+            let source = r#"
+const gen = function* () {
+    yield 1;
+    yield 2;
+    yield 3;
+};
+"#;
+            let tree = parse_ts(source);
+            let ts = TypeScript::new();
+
+            // Navigate to generator function expression
+            let root = tree.root_node();
+            // lexical_declaration -> variable_declarator -> generator_function
+            let lexical = root.child(0).unwrap();
+            let declarator = lexical.child(1).unwrap();
+            let gen_func = declarator.child(2).unwrap();
+
+            let cfg = ts.build_cfg(gen_func, source.as_bytes()).unwrap();
+
+            // Should be generator
+            assert!(cfg.is_generator, "Generator expression should be detected");
+
+            // Should have 3 yield points
+            assert_eq!(cfg.yield_count, 3, "Should have 3 yield points");
+        }
+
+        /// Test regular function should NOT be generator.
+        #[test]
+        fn test_non_generator_function() {
+            let source = r#"
+function regularFunction(x: number): number {
+    return x * 2;
+}
+"#;
+            let tree = parse_ts(source);
+            let ts = TypeScript::new();
+
+            let root = tree.root_node();
+            let func_node = root.child(0).unwrap();
+
+            let cfg = ts.build_cfg(func_node, source.as_bytes()).unwrap();
+
+            // Should NOT be generator
+            assert!(
+                !cfg.is_generator,
+                "Regular function should not be generator"
+            );
+            assert!(
+                !cfg.is_async_generator,
+                "Regular function should not be async generator"
+            );
+            assert_eq!(cfg.yield_count, 0, "Regular function should have no yields");
+        }
+
+        /// Test for await...of loop in async function.
+        #[test]
+        fn test_for_await_of_in_async_function() {
+            let source = r#"
+async function consumeAsyncIterable(stream: AsyncIterable<Data>) {
+    for await (const item of stream) {
+        processItem(item);
+    }
+}
+"#;
+            let tree = parse_ts(source);
+            let ts = TypeScript::new();
+
+            let root = tree.root_node();
+            let func_node = root.child(0).unwrap();
+
+            let cfg = ts.build_cfg(func_node, source.as_bytes()).unwrap();
+
+            // Should be async but NOT a generator (just consuming async iterable)
+            assert!(cfg.is_async, "Should be async");
+            assert!(!cfg.is_generator, "Should not be a generator");
+
+            // Should have ForAwaitOf block
+            let has_for_await_block = cfg
+                .blocks
+                .values()
+                .any(|b| matches!(b.block_type, BlockType::ForAwaitOf));
+            assert!(has_for_await_block, "Should have ForAwaitOf block");
         }
     }
 }

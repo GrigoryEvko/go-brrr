@@ -52,15 +52,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use aho_corasick::AhoCorasick;
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use once_cell::sync::Lazy;
-use xxhash_rust::xxh3::xxh3_64;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, trace};
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
 
 // =============================================================================
@@ -125,7 +125,12 @@ impl CloneInstance {
 
     /// Create a clone instance with a preview line.
     #[must_use]
-    pub fn with_preview(file: PathBuf, start_line: usize, end_line: usize, preview: String) -> Self {
+    pub fn with_preview(
+        file: PathBuf,
+        start_line: usize,
+        end_line: usize,
+        preview: String,
+    ) -> Self {
         Self {
             file,
             start_line,
@@ -493,10 +498,7 @@ impl<'a> LineNormalizer<'a> {
         }
 
         // Normalize whitespace: collapse multiple spaces to one
-        let normalized: String = result
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let normalized: String = result.split_whitespace().collect::<Vec<_>>().join(" ");
 
         // Skip empty lines
         if normalized.is_empty() {
@@ -713,8 +715,15 @@ fn is_generated_file(path: &Path, first_lines: &[String]) -> bool {
     }
 
     // Check first few lines for generation markers
-    let header = first_lines.iter().take(10).map(|l| l.to_lowercase()).collect::<Vec<_>>().join(" ");
-    GENERATED_PATTERNS.iter().any(|pattern| header.contains(pattern))
+    let header = first_lines
+        .iter()
+        .take(10)
+        .map(|l| l.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    GENERATED_PATTERNS
+        .iter()
+        .any(|pattern| header.contains(pattern))
 }
 
 /// Check if a file is in a test fixtures directory.
@@ -806,7 +815,8 @@ impl TextualCloneDetector {
         stats.files_scanned = files.len();
 
         // Shared state for parallel processing
-        let fingerprints: Mutex<FxHashMap<u64, Vec<CloneInstance>>> = Mutex::new(FxHashMap::default());
+        let fingerprints: Mutex<FxHashMap<u64, Vec<CloneInstance>>> =
+            Mutex::new(FxHashMap::default());
         let errors: Mutex<Vec<CloneError>> = Mutex::new(Vec::new());
         let total_lines: Mutex<usize> = Mutex::new(0);
         let files_excluded: Mutex<usize> = Mutex::new(0);
@@ -832,10 +842,13 @@ impl TextualCloneDetector {
                     *files_excluded.lock().unwrap_or_else(|e| e.into_inner()) += 1;
                 }
                 Err(e) => {
-                    errors.lock().unwrap_or_else(|e| e.into_inner()).push(CloneError {
-                        file: file.clone(),
-                        message: e.to_string(),
-                    });
+                    errors
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(CloneError {
+                            file: file.clone(),
+                            message: e.to_string(),
+                        });
                 }
             }
         };
@@ -855,7 +868,7 @@ impl TextualCloneDetector {
 
         // Build clone groups from fingerprints
         let mut clone_groups = Vec::new();
-        let mut files_with_clones = std::collections::HashSet::new();
+        let mut files_with_clones = FxHashSet::default();
 
         for (hash, instances) in fingerprints {
             if instances.len() >= 2 {
@@ -864,7 +877,10 @@ impl TextualCloneDetector {
                     files_with_clones.insert(inst.file.clone());
                 }
 
-                let line_count = instances.first().map(|i| i.line_count()).unwrap_or(window_size);
+                let line_count = instances
+                    .first()
+                    .map(|i| i.line_count())
+                    .unwrap_or(window_size);
                 let clone = Clone::new_type1(instances, line_count).with_fingerprint(hash);
                 clone_groups.push(clone);
             }
@@ -903,8 +919,8 @@ impl TextualCloneDetector {
         window_size: usize,
     ) -> Result<Option<(Vec<(u64, CloneInstance)>, usize)>> {
         // Read file content
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| BrrrError::io_with_path(e, path))?;
+        let content =
+            std::fs::read_to_string(path).map_err(|e| BrrrError::io_with_path(e, path))?;
 
         let original_lines: Vec<&str> = content.lines().collect();
 
@@ -933,7 +949,11 @@ impl TextualCloneDetector {
 
         // Check for generated code
         if self.config.exclude_generated {
-            let first_lines: Vec<String> = original_lines.iter().take(15).map(|s| s.to_string()).collect();
+            let first_lines: Vec<String> = original_lines
+                .iter()
+                .take(15)
+                .map(|s| s.to_string())
+                .collect();
             if is_generated_file(path, &first_lines) {
                 trace!("Skipping generated file: {:?}", path);
                 return Ok(None);
@@ -942,7 +962,8 @@ impl TextualCloneDetector {
 
         // Check for license-heavy content (>50% license patterns in first 30 lines)
         if self.config.exclude_license_headers {
-            let license_lines = normalized_lines.iter()
+            let license_lines = normalized_lines
+                .iter()
                 .take(30)
                 .filter(|(_, l)| is_license_content(l))
                 .count();
@@ -959,9 +980,7 @@ impl TextualCloneDetector {
         }
 
         // Compute line hashes
-        let line_hashes: Vec<u64> = normalized_lines.iter()
-            .map(|(_, l)| hash_line(l))
-            .collect();
+        let line_hashes: Vec<u64> = normalized_lines.iter().map(|(_, l)| hash_line(l)).collect();
 
         // Build fingerprints using rolling hash
         let mut hasher = RabinHasher::new(window_size);
@@ -978,10 +997,12 @@ impl TextualCloneDetector {
         let preview = normalized_lines[0].1.chars().take(60).collect::<String>();
 
         // Skip if this block is mostly license content
-        let block_is_license = self.config.exclude_license_headers &&
-            normalized_lines[..window_size].iter()
+        let block_is_license = self.config.exclude_license_headers
+            && normalized_lines[..window_size]
+                .iter()
                 .filter(|(_, l)| is_license_content(l))
-                .count() > window_size / 2;
+                .count()
+                > window_size / 2;
 
         if !block_is_license {
             fingerprints.push((
@@ -999,13 +1020,19 @@ impl TextualCloneDetector {
 
             let start_line = normalized_lines[i - window_size + 1].0;
             let end_line = normalized_lines[i].0;
-            let preview = normalized_lines[i - window_size + 1].1.chars().take(60).collect::<String>();
+            let preview = normalized_lines[i - window_size + 1]
+                .1
+                .chars()
+                .take(60)
+                .collect::<String>();
 
             // Skip if this block is mostly license content
-            let block_is_license = self.config.exclude_license_headers &&
-                normalized_lines[i - window_size + 1..=i].iter()
+            let block_is_license = self.config.exclude_license_headers
+                && normalized_lines[i - window_size + 1..=i]
+                    .iter()
                     .filter(|(_, l)| is_license_content(l))
-                    .count() > window_size / 2;
+                    .count()
+                    > window_size / 2;
 
             if !block_is_license {
                 fingerprints.push((
@@ -1090,12 +1117,30 @@ pub fn format_clone_summary(analysis: &CloneAnalysis) -> String {
 
     // Statistics
     output.push_str("Statistics:\n");
-    output.push_str(&format!("  Files scanned:     {}\n", analysis.stats.files_scanned));
-    output.push_str(&format!("  Files with clones: {}\n", analysis.stats.files_with_clones));
-    output.push_str(&format!("  Clone groups:      {}\n", analysis.stats.clone_groups));
-    output.push_str(&format!("  Clone instances:   {}\n", analysis.stats.clone_instances));
-    output.push_str(&format!("  Total lines:       {}\n", analysis.stats.total_lines));
-    output.push_str(&format!("  Duplicated lines:  {}\n", analysis.stats.duplicated_lines));
+    output.push_str(&format!(
+        "  Files scanned:     {}\n",
+        analysis.stats.files_scanned
+    ));
+    output.push_str(&format!(
+        "  Files with clones: {}\n",
+        analysis.stats.files_with_clones
+    ));
+    output.push_str(&format!(
+        "  Clone groups:      {}\n",
+        analysis.stats.clone_groups
+    ));
+    output.push_str(&format!(
+        "  Clone instances:   {}\n",
+        analysis.stats.clone_instances
+    ));
+    output.push_str(&format!(
+        "  Total lines:       {}\n",
+        analysis.stats.total_lines
+    ));
+    output.push_str(&format!(
+        "  Duplicated lines:  {}\n",
+        analysis.stats.duplicated_lines
+    ));
     output.push_str(&format!(
         "  Duplication:       {:.1}%\n\n",
         analysis.stats.duplication_percentage
@@ -1183,7 +1228,10 @@ mod tests {
         hasher.push(h3);
         let fp_bc_direct = hasher.fingerprint();
 
-        assert_ne!(fp_ab, fp_bc, "Different windows should have different fingerprints");
+        assert_ne!(
+            fp_ab, fp_bc,
+            "Different windows should have different fingerprints"
+        );
         assert_eq!(fp_bc, fp_bc_direct, "Sliding and direct should match");
     }
 
@@ -1269,7 +1317,9 @@ mod tests {
 
     #[test]
     fn test_is_test_fixture() {
-        assert!(is_test_fixture(Path::new("/project/tests/fixtures/data.json")));
+        assert!(is_test_fixture(Path::new(
+            "/project/tests/fixtures/data.json"
+        )));
         assert!(is_test_fixture(Path::new("/project/__fixtures__/mock.js")));
         assert!(is_test_fixture(Path::new("/project/testdata/input.txt")));
         assert!(!is_test_fixture(Path::new("/project/src/main.rs")));
@@ -1281,10 +1331,7 @@ mod tests {
             Path::new("proto.pb.go"),
             &["// Code generated by protoc-gen-go. DO NOT EDIT.".to_string()]
         ));
-        assert!(is_generated_file(
-            Path::new("types_generated.rs"),
-            &[]
-        ));
+        assert!(is_generated_file(Path::new("types_generated.rs"), &[]));
         assert!(!is_generated_file(
             Path::new("main.rs"),
             &["fn main() {}".to_string()]
@@ -1318,13 +1365,15 @@ fn other_code() {
 
         let config = CloneConfig::default().with_min_lines(4);
         let detector = TextualCloneDetector::new(config);
-        let result = detector.detect_in_files(
-            temp_dir.path().to_path_buf(),
-            &[file1, file2]
-        ).unwrap();
+        let result = detector
+            .detect_in_files(temp_dir.path().to_path_buf(), &[file1, file2])
+            .unwrap();
 
         assert!(result.stats.clone_groups > 0, "Should detect clone groups");
-        assert!(result.stats.duplicated_lines > 0, "Should have duplicated lines");
+        assert!(
+            result.stats.duplicated_lines > 0,
+            "Should have duplicated lines"
+        );
     }
 
     #[test]
@@ -1339,12 +1388,14 @@ fn other_code() {
 
         let config = CloneConfig::default().with_min_lines(6);
         let detector = TextualCloneDetector::new(config);
-        let result = detector.detect_in_files(
-            temp_dir.path().to_path_buf(),
-            &[file1, file2]
-        ).unwrap();
+        let result = detector
+            .detect_in_files(temp_dir.path().to_path_buf(), &[file1, file2])
+            .unwrap();
 
-        assert_eq!(result.stats.clone_groups, 0, "Should not detect clones in different code");
+        assert_eq!(
+            result.stats.clone_groups, 0,
+            "Should not detect clones in different code"
+        );
     }
 
     #[test]
@@ -1402,10 +1453,16 @@ fn other_code() {
             clone_groups: vec![Clone::new_type1(
                 vec![
                     CloneInstance::with_preview(
-                        PathBuf::from("a.rs"), 1, 6, "fn test()".to_string()
+                        PathBuf::from("a.rs"),
+                        1,
+                        6,
+                        "fn test()".to_string(),
                     ),
                     CloneInstance::with_preview(
-                        PathBuf::from("b.rs"), 10, 15, "fn test()".to_string()
+                        PathBuf::from("b.rs"),
+                        10,
+                        15,
+                        "fn test()".to_string(),
                     ),
                 ],
                 6,

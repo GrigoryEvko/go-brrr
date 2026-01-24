@@ -41,8 +41,8 @@ use tracing::debug;
 
 use crate::ast::{AstExtractor, FunctionInfo};
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
-use crate::cfg::{CfgBuilder, CFGInfo};
-use crate::error::{Result, BrrrError};
+use crate::cfg::{CFGInfo, CfgBuilder};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
 
 // =============================================================================
@@ -102,10 +102,10 @@ impl RiskLevel {
     #[must_use]
     pub const fn color_code(&self) -> &'static str {
         match self {
-            Self::Low => "\x1b[32m",       // Green
-            Self::Medium => "\x1b[33m",    // Yellow
-            Self::High => "\x1b[31m",      // Red
-            Self::Critical => "\x1b[35m",  // Magenta
+            Self::Low => "\x1b[32m",      // Green
+            Self::Medium => "\x1b[33m",   // Yellow
+            Self::High => "\x1b[31m",     // Red
+            Self::Critical => "\x1b[35m", // Magenta
         }
     }
 }
@@ -329,18 +329,8 @@ pub struct ComplexityStats {
     pub histogram: Vec<HistogramBucket>,
 }
 
-/// Histogram bucket for complexity distribution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HistogramBucket {
-    /// Lower bound (inclusive)
-    pub min: u32,
-    /// Upper bound (inclusive)
-    pub max: u32,
-    /// Label for display
-    pub label: String,
-    /// Number of functions in this bucket
-    pub count: usize,
-}
+// Re-export HistogramBucket from common module for backward compatibility
+pub use super::common::HistogramBucket;
 
 impl ComplexityStats {
     /// Calculate statistics from a list of complexity values.
@@ -401,7 +391,8 @@ impl ComplexityStats {
         for i in 0..num_buckets.min(20) {
             let min_val = (i as u32) * bucket_size + 1;
             let max_val = min_val + bucket_size - 1;
-            let count = complexities.iter()
+            let count = complexities
+                .iter()
                 .filter(|&&c| c >= min_val && c <= max_val)
                 .count();
 
@@ -518,9 +509,9 @@ pub fn analyze_complexity(
     }
 
     // Directory analysis - scan for source files
-    let path_str = path.to_str().ok_or_else(|| {
-        BrrrError::InvalidArgument("Invalid path encoding".to_string())
-    })?;
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| BrrrError::InvalidArgument("Invalid path encoding".to_string()))?;
 
     let scanner = ProjectScanner::new(path_str)?;
 
@@ -629,9 +620,7 @@ pub fn analyze_file_complexity(
 
     // Detect language from file extension
     let registry = LanguageRegistry::global();
-    let language = registry
-        .detect_language(file)
-        .map(|l| l.name().to_string());
+    let language = registry.detect_language(file).map(|l| l.name().to_string());
 
     Ok(ComplexityAnalysis {
         path: file.to_path_buf(),
@@ -727,14 +716,22 @@ fn analyze_function(
     end_line: usize,
 ) -> Result<CyclomaticComplexity> {
     let cfg = CfgBuilder::extract_from_file(file, function_name)?;
-    Ok(CyclomaticComplexity::from_cfg(&cfg, Path::new(file), start_line, end_line))
+    Ok(CyclomaticComplexity::from_cfg(
+        &cfg,
+        Path::new(file),
+        start_line,
+        end_line,
+    ))
 }
 
 /// Estimate complexity from function info when CFG extraction fails.
 ///
 /// This is a fallback that provides approximate complexity based on
 /// function structure (nesting depth, parameters, etc.).
-fn estimate_complexity_from_function(func: &FunctionInfo, file: &Path) -> Option<CyclomaticComplexity> {
+fn estimate_complexity_from_function(
+    func: &FunctionInfo,
+    file: &Path,
+) -> Option<CyclomaticComplexity> {
     // Simple heuristic: base complexity of 1
     // Real implementation would count decision keywords in source
     let base_complexity = 1u32;
@@ -809,8 +806,8 @@ fn count_word_boundary(word: &str, text: &str) -> usize {
     for i in 0..=text.len().saturating_sub(word_len) {
         if &text_bytes[i..i + word_len] == word_bytes {
             let before_ok = i == 0 || !text_bytes[i - 1].is_ascii_alphanumeric();
-            let after_ok = i + word_len >= text.len()
-                || !text_bytes[i + word_len].is_ascii_alphanumeric();
+            let after_ok =
+                i + word_len >= text.len() || !text_bytes[i + word_len].is_ascii_alphanumeric();
 
             if before_ok && after_ok {
                 count += 1;
@@ -979,8 +976,14 @@ class Calculator:
         assert_eq!(analysis.functions.len(), 2);
 
         // Find the methods by name
-        let add = analysis.functions.iter().find(|f| f.function_name == "Calculator.add");
-        let divide = analysis.functions.iter().find(|f| f.function_name == "Calculator.smart_divide");
+        let add = analysis
+            .functions
+            .iter()
+            .find(|f| f.function_name == "Calculator.add");
+        let divide = analysis
+            .functions
+            .iter()
+            .find(|f| f.function_name == "Calculator.smart_divide");
 
         assert!(add.is_some(), "Should find add method");
         assert!(divide.is_some(), "Should find smart_divide method");
@@ -1200,9 +1203,9 @@ function withIf(x: number): string {
         let complexities = vec![1, 5, 10, 15, 25, 55];
         let counts = RiskLevelCounts::count_simd(&complexities);
 
-        assert_eq!(counts.low, 3);      // 1, 5, 10
-        assert_eq!(counts.medium, 1);   // 15
-        assert_eq!(counts.high, 1);     // 25
+        assert_eq!(counts.low, 3); // 1, 5, 10
+        assert_eq!(counts.medium, 1); // 15
+        assert_eq!(counts.high, 1); // 25
         assert_eq!(counts.critical, 1); // 55
     }
 
@@ -1212,9 +1215,9 @@ function withIf(x: number): string {
         let complexities = vec![1, 5, 10, 15, 20, 25, 50, 100];
         let counts = RiskLevelCounts::count_simd(&complexities);
 
-        assert_eq!(counts.low, 3);      // 1, 5, 10
-        assert_eq!(counts.medium, 2);   // 15, 20
-        assert_eq!(counts.high, 2);     // 25, 50
+        assert_eq!(counts.low, 3); // 1, 5, 10
+        assert_eq!(counts.medium, 2); // 15, 20
+        assert_eq!(counts.high, 2); // 25, 50
         assert_eq!(counts.critical, 1); // 100
     }
 
@@ -1222,7 +1225,7 @@ function withIf(x: number): string {
     fn test_simd_risk_level_16_elements() {
         // Test with 16 elements (two full SIMD vectors)
         let complexities = vec![
-            1, 2, 3, 4, 5, 6, 7, 8,     // All low (8)
+            1, 2, 3, 4, 5, 6, 7, 8, // All low (8)
             11, 12, 13, 14, 15, 16, 17, 18, // All medium (8)
         ];
         let counts = RiskLevelCounts::count_simd(&complexities);
@@ -1237,9 +1240,9 @@ function withIf(x: number): string {
     fn test_simd_risk_level_17_elements() {
         // Test with 17 elements (two vectors + 1 tail)
         let complexities = vec![
-            1, 2, 3, 4, 5, 6, 7, 10,    // All low (8)
+            1, 2, 3, 4, 5, 6, 7, 10, // All low (8)
             21, 22, 23, 24, 25, 26, 27, 30, // All high (8)
-            51,                          // Critical (1 tail)
+            51, // Critical (1 tail)
         ];
         let counts = RiskLevelCounts::count_simd(&complexities);
 
@@ -1254,16 +1257,16 @@ function withIf(x: number): string {
         // Large test with all categories
         let mut complexities = Vec::with_capacity(1000);
         for i in 0..250 {
-            complexities.push(i % 10 + 1);   // Low: 1-10
+            complexities.push(i % 10 + 1); // Low: 1-10
         }
         for i in 0..250 {
-            complexities.push(i % 10 + 11);  // Medium: 11-20
+            complexities.push(i % 10 + 11); // Medium: 11-20
         }
         for i in 0..250 {
-            complexities.push(i % 30 + 21);  // High: 21-50
+            complexities.push(i % 30 + 21); // High: 21-50
         }
         for _ in 0..250 {
-            complexities.push(100);          // Critical: 100
+            complexities.push(100); // Critical: 100
         }
 
         let counts = RiskLevelCounts::count_simd(&complexities);

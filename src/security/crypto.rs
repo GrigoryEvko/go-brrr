@@ -47,7 +47,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 
 // =============================================================================
 // Types
@@ -86,7 +86,9 @@ impl std::fmt::Display for WeakCryptoIssue {
             WeakCryptoIssue::HardcodedKey => write!(f, "Hardcoded Encryption Key"),
             WeakCryptoIssue::HardcodedIv => write!(f, "Hardcoded Initialization Vector"),
             WeakCryptoIssue::PredictableRandom => write!(f, "Predictable Random for Crypto"),
-            WeakCryptoIssue::MissingAuthentication => write!(f, "Encryption Without Authentication"),
+            WeakCryptoIssue::MissingAuthentication => {
+                write!(f, "Encryption Without Authentication")
+            }
             WeakCryptoIssue::DeprecatedFunction => write!(f, "Deprecated Cryptographic Function"),
         }
     }
@@ -1179,7 +1181,9 @@ impl WeakCryptoDetector {
         {
             return UsageContext::FileChecksum;
         }
-        if line_lower.contains("cache_key") || line_lower.contains("cache") && line_lower.contains("hash") {
+        if line_lower.contains("cache_key")
+            || line_lower.contains("cache") && line_lower.contains("hash")
+        {
             return UsageContext::CacheKey;
         }
         if line_lower.contains("git") && !line_lower.contains("digit") {
@@ -1190,16 +1194,24 @@ impl WeakCryptoDetector {
         }
 
         // SECOND: Check CURRENT LINE for security-sensitive context
-        if line_lower.contains("password") || line_lower.contains("passwd") || line_lower.contains("pwd") {
+        if line_lower.contains("password")
+            || line_lower.contains("passwd")
+            || line_lower.contains("pwd")
+        {
             return UsageContext::PasswordHashing;
         }
-        if line_lower.contains("signature") || (line_lower.contains("sign") && !line_lower.contains("assign")) {
+        if line_lower.contains("signature")
+            || (line_lower.contains("sign") && !line_lower.contains("assign"))
+        {
             return UsageContext::Signature;
         }
         if line_lower.contains("encrypt") || line_lower.contains("cipher") {
             return UsageContext::Encryption;
         }
-        if line_lower.contains("token") || line_lower.contains("credential") || line_lower.contains("auth") {
+        if line_lower.contains("token")
+            || line_lower.contains("credential")
+            || line_lower.contains("auth")
+        {
             return UsageContext::PasswordHashing;
         }
 
@@ -1208,7 +1220,9 @@ impl WeakCryptoDetector {
         if surrounding.contains("password") || surrounding.contains("passwd") {
             return UsageContext::PasswordHashing;
         }
-        if surrounding.contains("signature") || (surrounding.contains("sign") && !surrounding.contains("assign")) {
+        if surrounding.contains("signature")
+            || (surrounding.contains("sign") && !surrounding.contains("assign"))
+        {
             return UsageContext::Signature;
         }
         if surrounding.contains("encrypt") || surrounding.contains("cipher") {
@@ -1404,7 +1418,11 @@ impl WeakCryptoDetector {
                     // Determine if likely safe - security-sensitive always wins
                     let likely_safe = !is_security_sensitive
                         && (pattern_safe
-                            || Self::is_likely_safe(context, pattern.issue_type, &pattern.algorithm));
+                            || Self::is_likely_safe(
+                                context,
+                                pattern.issue_type,
+                                &pattern.algorithm,
+                            ));
 
                     // Skip safe patterns if not including them
                     if likely_safe && !self.include_safe_patterns {
@@ -1412,12 +1430,8 @@ impl WeakCryptoDetector {
                     }
 
                     // Adjust severity
-                    let severity = Self::adjust_severity(
-                        pattern.base_severity,
-                        context,
-                        is_test,
-                        likely_safe,
-                    );
+                    let severity =
+                        Self::adjust_severity(pattern.base_severity, context, is_test, likely_safe);
 
                     // Get code snippet
                     let snippet_start = line_num.saturating_sub(1);
@@ -1588,7 +1602,10 @@ pub fn scan_weak_crypto(path: &str, language: Option<&str>) -> Result<ScanResult
 }
 
 /// Scan a single file for weak cryptography.
-pub fn scan_file_weak_crypto(path: &Path, _language: Option<&str>) -> Result<Vec<WeakCryptoFinding>> {
+pub fn scan_file_weak_crypto(
+    path: &Path,
+    _language: Option<&str>,
+) -> Result<Vec<WeakCryptoFinding>> {
     let detector = WeakCryptoDetector::new();
     detector.scan_file(path.to_str().unwrap_or(""))
 }
@@ -1647,7 +1664,10 @@ file_checksum = hashlib.md5(file_content).hexdigest()
             .expect("Scan should succeed");
 
         // By default, safe patterns are not included
-        assert!(findings.is_empty(), "Should not flag MD5 for checksums by default");
+        assert!(
+            findings.is_empty(),
+            "Should not flag MD5 for checksums by default"
+        );
     }
 
     #[test]
@@ -1663,9 +1683,16 @@ file_checksum = hashlib.md5(file_content).hexdigest()
             .scan_file(file.path().to_str().unwrap())
             .expect("Scan should succeed");
 
-        assert!(!findings.is_empty(), "Should detect MD5 when including safe patterns");
+        assert!(
+            !findings.is_empty(),
+            "Should detect MD5 when including safe patterns"
+        );
         assert!(findings[0].likely_safe, "Should mark as likely safe");
-        assert_eq!(findings[0].severity, Severity::Info, "Severity should be reduced");
+        assert_eq!(
+            findings[0].severity,
+            Severity::Info,
+            "Severity should be reduced"
+        );
     }
 
     #[test]
@@ -1729,7 +1756,9 @@ encryption_key = ''.join(random.choice(chars) for _ in range(32))
             .scan_file(file.path().to_str().unwrap())
             .expect("Scan should succeed");
 
-        let random_finding = findings.iter().find(|f| f.issue_type == WeakCryptoIssue::PredictableRandom);
+        let random_finding = findings
+            .iter()
+            .find(|f| f.issue_type == WeakCryptoIssue::PredictableRandom);
         assert!(random_finding.is_some(), "Should detect insecure random");
     }
 
@@ -1979,7 +2008,9 @@ const cipher = crypto.createCipheriv('aes-256-cbc', encryption_key, iv);
             .scan_file(file.path().to_str().unwrap())
             .expect("Scan should succeed");
 
-        let key_finding = findings.iter().find(|f| f.issue_type == WeakCryptoIssue::HardcodedKey);
+        let key_finding = findings
+            .iter()
+            .find(|f| f.issue_type == WeakCryptoIssue::HardcodedKey);
         assert!(key_finding.is_some(), "Should detect hardcoded key");
         assert_eq!(key_finding.unwrap().severity, Severity::Critical);
     }
@@ -1996,7 +2027,9 @@ cipher = AES.new(key, AES.MODE_CBC, iv)
             .scan_file(file.path().to_str().unwrap())
             .expect("Scan should succeed");
 
-        let iv_finding = findings.iter().find(|f| f.issue_type == WeakCryptoIssue::HardcodedIv);
+        let iv_finding = findings
+            .iter()
+            .find(|f| f.issue_type == WeakCryptoIssue::HardcodedIv);
         assert!(iv_finding.is_some(), "Should detect hardcoded IV");
     }
 
@@ -2016,7 +2049,9 @@ key = RSA.generate(1024)
             .scan_file(file.path().to_str().unwrap())
             .expect("Scan should succeed");
 
-        let rsa_finding = findings.iter().find(|f| f.issue_type == WeakCryptoIssue::InsufficientKeySize);
+        let rsa_finding = findings
+            .iter()
+            .find(|f| f.issue_type == WeakCryptoIssue::InsufficientKeySize);
         assert!(rsa_finding.is_some(), "Should detect weak RSA key size");
     }
 
@@ -2078,9 +2113,18 @@ hash = hashlib.md5(data).hexdigest()
     #[test]
     fn test_issue_type_display() {
         assert_eq!(WeakCryptoIssue::WeakHash.to_string(), "Weak Hash Algorithm");
-        assert_eq!(WeakCryptoIssue::WeakCipher.to_string(), "Weak Cipher Algorithm");
-        assert_eq!(WeakCryptoIssue::InsecureMode.to_string(), "Insecure Cipher Mode");
-        assert_eq!(WeakCryptoIssue::HardcodedKey.to_string(), "Hardcoded Encryption Key");
+        assert_eq!(
+            WeakCryptoIssue::WeakCipher.to_string(),
+            "Weak Cipher Algorithm"
+        );
+        assert_eq!(
+            WeakCryptoIssue::InsecureMode.to_string(),
+            "Insecure Cipher Mode"
+        );
+        assert_eq!(
+            WeakCryptoIssue::HardcodedKey.to_string(),
+            "Hardcoded Encryption Key"
+        );
     }
 
     #[test]

@@ -9,13 +9,15 @@
 //! - Generic type parameters
 //! - Import statements (regular and static)
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
+use std::mem;
+
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::ast::types::{ClassInfo, FieldInfo, FunctionInfo, ImportInfo};
 use crate::cfg::types::{BlockId, BlockType, CFGBlock, CFGEdge, CFGInfo};
 use crate::dfg::types::{DFGInfo, DataflowEdge, DataflowKind};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::traits::Language;
 
 /// Java language implementation.
@@ -193,7 +195,8 @@ impl Java {
                     "non-sealed" => mods.is_non_sealed = true,
                     // Annotations
                     "marker_annotation" | "annotation" => {
-                        mods.annotations.push(self.extract_annotation(child, source));
+                        mods.annotations
+                            .push(self.extract_annotation(child, source));
                     }
                     _ => {}
                 }
@@ -221,8 +224,10 @@ impl Java {
                         }
                         "type_list" => {
                             for inner in type_child.children(&mut type_child.walk()) {
-                                if matches!(inner.kind(), "type_identifier" | "scoped_type_identifier")
-                                {
+                                if matches!(
+                                    inner.kind(),
+                                    "type_identifier" | "scoped_type_identifier"
+                                ) {
                                     permits.push(self.extract_type(inner, source));
                                 }
                             }
@@ -897,12 +902,7 @@ impl Java {
 
     /// BUG #9 FIX: Extract static initializer block.
     /// Static initializers are represented as special FunctionInfo entries.
-    fn extract_static_initializer(
-        &self,
-        node: Node,
-        source: &[u8],
-        index: usize,
-    ) -> FunctionInfo {
+    fn extract_static_initializer(&self, node: Node, source: &[u8], index: usize) -> FunctionInfo {
         let line_number = node.start_position().row + 1;
         let end_line_number = Some(node.end_position().row + 1);
 
@@ -1127,7 +1127,7 @@ impl Java {
         &self,
         body: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         next_id: &mut usize,
     ) -> (BlockId, Vec<BlockId>) {
@@ -1143,17 +1143,17 @@ impl Java {
                 "if_statement" => {
                     // Create current block with statements so far
                     if !statements.is_empty() {
+                        let label = statements.join("; ");
                         let block = CFGBlock {
-                id: entry_id,
-                label: statements.join("; "),
-                block_type: BlockType::Body,
-                statements: statements.clone(),
-                func_calls: Vec::new(),
-                start_line: body.start_position().row + 1,
-                end_line: child.start_position().row + 1,
-            };
+                            id: entry_id,
+                            label,
+                            block_type: BlockType::Body,
+                            statements: mem::take(&mut statements),
+                            func_calls: Vec::new(),
+                            start_line: body.start_position().row + 1,
+                            end_line: child.start_position().row + 1,
+                        };
                         blocks.insert(entry_id, block);
-                        statements.clear();
                     }
 
                     // Process if statement branches
@@ -1166,17 +1166,17 @@ impl Java {
                     let (loop_entry, loop_exits) =
                         self.build_cfg_for_loop(child, source, blocks, edges, next_id);
                     if !statements.is_empty() {
+                        let label = statements.join("; ");
                         let block = CFGBlock {
-                id: entry_id,
-                label: statements.join("; "),
-                block_type: BlockType::Body,
-                statements: statements.clone(),
-                func_calls: Vec::new(),
-                start_line: body.start_position().row + 1,
-                end_line: child.start_position().row + 1,
-            };
+                            id: entry_id,
+                            label,
+                            block_type: BlockType::Body,
+                            statements: mem::take(&mut statements),
+                            func_calls: Vec::new(),
+                            start_line: body.start_position().row + 1,
+                            end_line: child.start_position().row + 1,
+                        };
                         blocks.insert(entry_id, block);
-                        statements.clear();
                         edges.push(CFGEdge::from_label(entry_id, loop_entry, None));
                     }
                     exits.extend(loop_exits);
@@ -1186,17 +1186,17 @@ impl Java {
                     let (do_entry, do_exits) =
                         self.build_cfg_for_do_while(child, source, blocks, edges, next_id);
                     if !statements.is_empty() {
+                        let label = statements.join("; ");
                         let block = CFGBlock {
-                id: entry_id,
-                label: statements.join("; "),
-                block_type: BlockType::Body,
-                statements: statements.clone(),
-                func_calls: Vec::new(),
-                start_line: body.start_position().row + 1,
-                end_line: child.start_position().row + 1,
-            };
+                            id: entry_id,
+                            label,
+                            block_type: BlockType::Body,
+                            statements: mem::take(&mut statements),
+                            func_calls: Vec::new(),
+                            start_line: body.start_position().row + 1,
+                            end_line: child.start_position().row + 1,
+                        };
                         blocks.insert(entry_id, block);
-                        statements.clear();
                         edges.push(CFGEdge::from_label(entry_id, do_entry, None));
                     }
                     exits.extend(do_exits);
@@ -1206,17 +1206,17 @@ impl Java {
                     let (label_entry, label_exits) =
                         self.build_cfg_for_labeled(child, source, blocks, edges, next_id);
                     if !statements.is_empty() {
+                        let label = statements.join("; ");
                         let block = CFGBlock {
-                id: entry_id,
-                label: statements.join("; "),
-                block_type: BlockType::Body,
-                statements: statements.clone(),
-                func_calls: Vec::new(),
-                start_line: body.start_position().row + 1,
-                end_line: child.start_position().row + 1,
-            };
+                            id: entry_id,
+                            label,
+                            block_type: BlockType::Body,
+                            statements: mem::take(&mut statements),
+                            func_calls: Vec::new(),
+                            start_line: body.start_position().row + 1,
+                            end_line: child.start_position().row + 1,
+                        };
                         blocks.insert(entry_id, block);
-                        statements.clear();
                         edges.push(CFGEdge::from_label(entry_id, label_entry, None));
                     }
                     exits.extend(label_exits);
@@ -1226,54 +1226,54 @@ impl Java {
                     statements.push(self.node_text(child, source).trim().to_string());
                     let stmt_id = BlockId(*next_id);
                     *next_id += 1;
+                    let label = statements.join("; ");
                     let block = CFGBlock {
-                id: stmt_id,
-                label: statements.join("; "),
-                block_type: BlockType::Body,
-                statements: statements.clone(),
-                func_calls: Vec::new(),
-                start_line: child.start_position().row + 1,
-                end_line: child.end_position().row + 1,
-            };
+                        id: stmt_id,
+                        label,
+                        block_type: BlockType::Body,
+                        statements: mem::take(&mut statements),
+                        func_calls: Vec::new(),
+                        start_line: child.start_position().row + 1,
+                        end_line: child.end_position().row + 1,
+                    };
                     blocks.insert(stmt_id, block);
                     // Break/continue are control flow exits from current block
                     exits.push(stmt_id);
-                    statements.clear();
                 }
                 "return_statement" => {
                     statements.push(self.node_text(child, source).trim().to_string());
                     // Return statement is an exit
                     let return_id = BlockId(*next_id);
                     *next_id += 1;
+                    let label = statements.join("; ");
                     let block = CFGBlock {
-                id: return_id,
-                label: statements.join("; "),
-                block_type: BlockType::Body,
-                statements: statements.clone(),
-                func_calls: Vec::new(),
-                start_line: child.start_position().row + 1,
-                end_line: child.end_position().row + 1,
-            };
+                        id: return_id,
+                        label,
+                        block_type: BlockType::Body,
+                        statements: mem::take(&mut statements),
+                        func_calls: Vec::new(),
+                        start_line: child.start_position().row + 1,
+                        end_line: child.end_position().row + 1,
+                    };
                     blocks.insert(return_id, block);
                     exits.push(return_id);
-                    statements.clear();
                 }
                 "throw_statement" => {
                     statements.push(self.node_text(child, source).trim().to_string());
                     let throw_id = BlockId(*next_id);
                     *next_id += 1;
+                    let label = statements.join("; ");
                     let block = CFGBlock {
-                id: throw_id,
-                label: statements.join("; "),
-                block_type: BlockType::Body,
-                statements: statements.clone(),
-                func_calls: Vec::new(),
-                start_line: child.start_position().row + 1,
-                end_line: child.end_position().row + 1,
-            };
+                        id: throw_id,
+                        label,
+                        block_type: BlockType::Body,
+                        statements: mem::take(&mut statements),
+                        func_calls: Vec::new(),
+                        start_line: child.start_position().row + 1,
+                        end_line: child.end_position().row + 1,
+                    };
                     blocks.insert(throw_id, block);
                     exits.push(throw_id);
-                    statements.clear();
                 }
                 // FEATURE: Handle yield statements (Java 14+ switch expressions)
                 // yield is similar to return - it exits the switch expression with a value
@@ -1281,35 +1281,35 @@ impl Java {
                     statements.push(self.node_text(child, source).trim().to_string());
                     let yield_id = BlockId(*next_id);
                     *next_id += 1;
+                    let label = statements.join("; ");
                     let block = CFGBlock {
-                id: yield_id,
-                label: statements.join("; "),
-                block_type: BlockType::Body,
-                statements: statements.clone(),
-                func_calls: Vec::new(),
-                start_line: child.start_position().row + 1,
-                end_line: child.end_position().row + 1,
-            };
+                        id: yield_id,
+                        label,
+                        block_type: BlockType::Body,
+                        statements: mem::take(&mut statements),
+                        func_calls: Vec::new(),
+                        start_line: child.start_position().row + 1,
+                        end_line: child.end_position().row + 1,
+                    };
                     blocks.insert(yield_id, block);
                     // yield is an exit point from the switch expression
                     exits.push(yield_id);
-                    statements.clear();
                 }
                 "try_statement" => {
                     let (try_entry, try_exits) =
                         self.build_cfg_for_try(child, source, blocks, edges, next_id);
                     if !statements.is_empty() {
+                        let label = statements.join("; ");
                         let block = CFGBlock {
-                id: entry_id,
-                label: statements.join("; "),
-                block_type: BlockType::Body,
-                statements: statements.clone(),
-                func_calls: Vec::new(),
-                start_line: body.start_position().row + 1,
-                end_line: child.start_position().row + 1,
-            };
+                            id: entry_id,
+                            label,
+                            block_type: BlockType::Body,
+                            statements: mem::take(&mut statements),
+                            func_calls: Vec::new(),
+                            start_line: body.start_position().row + 1,
+                            end_line: child.start_position().row + 1,
+                        };
                         blocks.insert(entry_id, block);
-                        statements.clear();
                         edges.push(CFGEdge::from_label(entry_id, try_entry, None));
                     }
                     exits.extend(try_exits);
@@ -1318,17 +1318,17 @@ impl Java {
                     let (switch_entry, switch_exits) =
                         self.build_cfg_for_switch(child, source, blocks, edges, next_id);
                     if !statements.is_empty() {
+                        let label = statements.join("; ");
                         let block = CFGBlock {
-                id: entry_id,
-                label: statements.join("; "),
-                block_type: BlockType::Body,
-                statements: statements.clone(),
-                func_calls: Vec::new(),
-                start_line: body.start_position().row + 1,
-                end_line: child.start_position().row + 1,
-            };
+                            id: entry_id,
+                            label,
+                            block_type: BlockType::Body,
+                            statements: mem::take(&mut statements),
+                            func_calls: Vec::new(),
+                            start_line: body.start_position().row + 1,
+                            end_line: child.start_position().row + 1,
+                        };
                         blocks.insert(entry_id, block);
-                        statements.clear();
                         edges.push(CFGEdge::from_label(entry_id, switch_entry, None));
                     }
                     exits.extend(switch_exits);
@@ -1338,17 +1338,17 @@ impl Java {
                     let (sync_entry, sync_exits) =
                         self.build_cfg_for_synchronized(child, source, blocks, edges, next_id);
                     if !statements.is_empty() {
+                        let label = statements.join("; ");
                         let block = CFGBlock {
-                id: entry_id,
-                label: statements.join("; "),
-                block_type: BlockType::Body,
-                statements: statements.clone(),
-                func_calls: Vec::new(),
-                start_line: body.start_position().row + 1,
-                end_line: child.start_position().row + 1,
-            };
+                            id: entry_id,
+                            label,
+                            block_type: BlockType::Body,
+                            statements: mem::take(&mut statements),
+                            func_calls: Vec::new(),
+                            start_line: body.start_position().row + 1,
+                            end_line: child.start_position().row + 1,
+                        };
                         blocks.insert(entry_id, block);
-                        statements.clear();
                         edges.push(CFGEdge::from_label(entry_id, sync_entry, None));
                     }
                     exits.extend(sync_exits);
@@ -1359,20 +1359,20 @@ impl Java {
                     // Assert can throw AssertionError, creating a potential exit point
                     let assert_id = BlockId(*next_id);
                     *next_id += 1;
+                    let label = statements.join("; ");
                     let block = CFGBlock {
-                id: assert_id,
-                label: statements.join("; "),
-                block_type: BlockType::Body,
-                statements: statements.clone(),
-                func_calls: Vec::new(),
-                start_line: child.start_position().row + 1,
-                end_line: child.end_position().row + 1,
-            };
+                        id: assert_id,
+                        label,
+                        block_type: BlockType::Body,
+                        statements: mem::take(&mut statements),
+                        func_calls: Vec::new(),
+                        start_line: child.start_position().row + 1,
+                        end_line: child.end_position().row + 1,
+                    };
                     blocks.insert(assert_id, block);
                     // Assert has two paths: continue (pass) or throw (fail)
                     // For simplicity, we mark it as a potential exit due to AssertionError
                     exits.push(assert_id);
-                    statements.clear();
                 }
                 "{" | "}" => {
                     // Skip braces
@@ -1419,7 +1419,7 @@ impl Java {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         next_id: &mut usize,
     ) -> (BlockId, Vec<BlockId>) {
@@ -1449,7 +1449,11 @@ impl Java {
         if let Some(consequence) = self.child_by_field(node, "consequence") {
             let (then_entry, then_exits) =
                 self.build_cfg_from_body(consequence, source, blocks, edges, next_id);
-            edges.push(CFGEdge::from_label(condition_id, then_entry, Some("true".to_string())));
+            edges.push(CFGEdge::from_label(
+                condition_id,
+                then_entry,
+                Some("true".to_string()),
+            ));
             exits.extend(then_exits);
         }
 
@@ -1457,7 +1461,11 @@ impl Java {
         if let Some(alternative) = self.child_by_field(node, "alternative") {
             let (else_entry, else_exits) =
                 self.build_cfg_from_body(alternative, source, blocks, edges, next_id);
-            edges.push(CFGEdge::from_label(condition_id, else_entry, Some("false".to_string())));
+            edges.push(CFGEdge::from_label(
+                condition_id,
+                else_entry,
+                Some("false".to_string()),
+            ));
             exits.extend(else_exits);
         } else {
             // No else branch - condition itself is an exit for false case
@@ -1472,7 +1480,7 @@ impl Java {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         next_id: &mut usize,
     ) -> (BlockId, Vec<BlockId>) {
@@ -1493,21 +1501,25 @@ impl Java {
         };
 
         let block = CFGBlock {
-                id: loop_id,
-                label: label.clone(),
-                block_type: BlockType::Body,
-                statements: vec![label],
-                func_calls: Vec::new(),
-                start_line: node.start_position().row + 1,
-                end_line: node.start_position().row + 1,
-            };
+            id: loop_id,
+            label: label.clone(),
+            block_type: BlockType::Body,
+            statements: vec![label],
+            func_calls: Vec::new(),
+            start_line: node.start_position().row + 1,
+            end_line: node.start_position().row + 1,
+        };
         blocks.insert(loop_id, block);
 
         // Process loop body
         if let Some(body) = self.child_by_field(node, "body") {
             let (body_entry, body_exits) =
                 self.build_cfg_from_body(body, source, blocks, edges, next_id);
-            edges.push(CFGEdge::from_label(loop_id, body_entry, Some("true".to_string())));
+            edges.push(CFGEdge::from_label(
+                loop_id,
+                body_entry,
+                Some("true".to_string()),
+            ));
             // Back edge from body to loop condition
             for exit in &body_exits {
                 edges.push(CFGEdge::from_label(*exit, loop_id, None));
@@ -1518,16 +1530,20 @@ impl Java {
         let exit_id = BlockId(*next_id);
         *next_id += 1;
         let exit_block = CFGBlock {
-                id: exit_id,
-                label: "loop exit".to_string(),
-                block_type: BlockType::Body,
-                statements: vec![],
-                func_calls: Vec::new(),
-                start_line: node.end_position().row + 1,
-                end_line: node.end_position().row + 1,
-            };
+            id: exit_id,
+            label: "loop exit".to_string(),
+            block_type: BlockType::Body,
+            statements: vec![],
+            func_calls: Vec::new(),
+            start_line: node.end_position().row + 1,
+            end_line: node.end_position().row + 1,
+        };
         blocks.insert(exit_id, exit_block);
-        edges.push(CFGEdge::from_label(loop_id, exit_id, Some("false".to_string())));
+        edges.push(CFGEdge::from_label(
+            loop_id,
+            exit_id,
+            Some("false".to_string()),
+        ));
 
         (loop_id, vec![exit_id])
     }
@@ -1538,7 +1554,7 @@ impl Java {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         next_id: &mut usize,
     ) -> (BlockId, Vec<BlockId>) {
@@ -1559,14 +1575,14 @@ impl Java {
         };
 
         let block = CFGBlock {
-                id: try_id,
-                label: try_label.clone(),
-                block_type: BlockType::Body,
-                statements: vec![try_label],
-                func_calls: Vec::new(),
-                start_line: node.start_position().row + 1,
-                end_line: node.start_position().row + 1,
-            };
+            id: try_id,
+            label: try_label.clone(),
+            block_type: BlockType::Body,
+            statements: vec![try_label],
+            func_calls: Vec::new(),
+            start_line: node.start_position().row + 1,
+            end_line: node.start_position().row + 1,
+        };
         blocks.insert(try_id, block);
 
         let mut exits = Vec::new();
@@ -1592,7 +1608,11 @@ impl Java {
             blocks.insert(resource_id, resource_block);
 
             // Edge from try to resource acquisition
-            edges.push(CFGEdge::from_label(try_id, resource_id, Some("acquire".to_string())));
+            edges.push(CFGEdge::from_label(
+                try_id,
+                resource_id,
+                Some("acquire".to_string()),
+            ));
 
             resource_id
         } else {
@@ -1606,7 +1626,11 @@ impl Java {
 
             // Edge from resource acquisition (or try) to body
             if resource_spec.is_some() {
-                edges.push(CFGEdge::from_label(effective_entry, body_entry, Some("success".to_string())));
+                edges.push(CFGEdge::from_label(
+                    effective_entry,
+                    body_entry,
+                    Some("success".to_string()),
+                ));
             } else {
                 edges.push(CFGEdge::from_label(try_id, body_entry, None));
             }
@@ -1632,7 +1656,11 @@ impl Java {
 
             // All body exits flow through resource close
             for exit in &exits {
-                edges.push(CFGEdge::from_label(*exit, close_id, Some("close".to_string())));
+                edges.push(CFGEdge::from_label(
+                    *exit,
+                    close_id,
+                    Some("close".to_string()),
+                ));
             }
 
             // Replace exits with close block
@@ -1656,13 +1684,25 @@ impl Java {
                     // 3. Resource close (suppressed exceptions)
                     if resource_spec.is_some() {
                         // Exception from resource acquisition
-                        edges.push(CFGEdge::from_label(effective_entry, catch_entry, Some("exception (acquire)".to_string())));
+                        edges.push(CFGEdge::from_label(
+                            effective_entry,
+                            catch_entry,
+                            Some("exception (acquire)".to_string()),
+                        ));
                         // Exception from close
                         if let Some(close_id) = close_block_id {
-                            edges.push(CFGEdge::from_label(close_id, catch_entry, Some("exception (close)".to_string())));
+                            edges.push(CFGEdge::from_label(
+                                close_id,
+                                catch_entry,
+                                Some("exception (close)".to_string()),
+                            ));
                         }
                     } else {
-                        edges.push(CFGEdge::from_label(try_id, catch_entry, Some("exception".to_string())));
+                        edges.push(CFGEdge::from_label(
+                            try_id,
+                            catch_entry,
+                            Some("exception".to_string()),
+                        ));
                     }
                     exits.extend(catch_exits);
                 }
@@ -1724,7 +1764,7 @@ impl Java {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         next_id: &mut usize,
     ) -> (BlockId, Vec<BlockId>) {
@@ -1770,14 +1810,14 @@ impl Java {
                             .unwrap_or_else(|| "case".to_string());
 
                         let case_block = CFGBlock {
-                id: case_id,
-                label: case_label.clone(),
-                block_type: BlockType::Body,
-                statements: vec![case_text.to_string()],
-                func_calls: Vec::new(),
-                start_line: child.start_position().row + 1,
-                end_line: child.end_position().row + 1,
-            };
+                            id: case_id,
+                            label: case_label.clone(),
+                            block_type: BlockType::Body,
+                            statements: vec![case_text.to_string()],
+                            func_calls: Vec::new(),
+                            start_line: child.start_position().row + 1,
+                            end_line: child.end_position().row + 1,
+                        };
                         blocks.insert(case_id, case_block);
 
                         edges.push(CFGEdge::from_label(switch_id, case_id, Some(case_label)));
@@ -1796,14 +1836,14 @@ impl Java {
                             .unwrap_or("case")
                             .to_string();
                         let case_block = CFGBlock {
-                id: case_id,
-                label: case_label.clone(),
-                block_type: BlockType::Body,
-                statements: vec![case_label],
-                func_calls: Vec::new(),
-                start_line: child.start_position().row + 1,
-                end_line: child.end_position().row + 1,
-            };
+                            id: case_id,
+                            label: case_label.clone(),
+                            block_type: BlockType::Body,
+                            statements: vec![case_label],
+                            func_calls: Vec::new(),
+                            start_line: child.start_position().row + 1,
+                            end_line: child.end_position().row + 1,
+                        };
                         blocks.insert(case_id, case_block);
 
                         edges.push(CFGEdge::from_label(switch_id, case_id, None));
@@ -1827,7 +1867,7 @@ impl Java {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         next_id: &mut usize,
     ) -> (BlockId, Vec<BlockId>) {
@@ -1838,14 +1878,14 @@ impl Java {
         // Create body block label
         let body_label = "do".to_string();
         let body_block = CFGBlock {
-                id: body_id,
-                label: body_label.clone(),
-                block_type: BlockType::Body,
-                statements: vec![body_label],
-                func_calls: Vec::new(),
-                start_line: node.start_position().row + 1,
-                end_line: node.start_position().row + 1,
-            };
+            id: body_id,
+            label: body_label.clone(),
+            block_type: BlockType::Body,
+            statements: vec![body_label],
+            func_calls: Vec::new(),
+            start_line: node.start_position().row + 1,
+            end_line: node.start_position().row + 1,
+        };
         blocks.insert(body_id, body_block);
 
         // Process do-while body
@@ -1883,23 +1923,31 @@ impl Java {
         }
 
         // Back edge: condition true -> body (loop back)
-        edges.push(CFGEdge::from_label(condition_id, body_id, Some("true".to_string())));
+        edges.push(CFGEdge::from_label(
+            condition_id,
+            body_id,
+            Some("true".to_string()),
+        ));
 
         // Exit block (condition false)
         let exit_id = BlockId(*next_id);
         *next_id += 1;
         let exit_block = CFGBlock {
-                id: exit_id,
-                label: "do-while exit".to_string(),
-                block_type: BlockType::Body,
-                statements: vec![],
-                func_calls: Vec::new(),
-                start_line: node.end_position().row + 1,
-                end_line: node.end_position().row + 1,
-            };
+            id: exit_id,
+            label: "do-while exit".to_string(),
+            block_type: BlockType::Body,
+            statements: vec![],
+            func_calls: Vec::new(),
+            start_line: node.end_position().row + 1,
+            end_line: node.end_position().row + 1,
+        };
         blocks.insert(exit_id, exit_block);
 
-        edges.push(CFGEdge::from_label(condition_id, exit_id, Some("false".to_string())));
+        edges.push(CFGEdge::from_label(
+            condition_id,
+            exit_id,
+            Some("false".to_string()),
+        ));
 
         (body_id, vec![exit_id])
     }
@@ -1910,7 +1958,7 @@ impl Java {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         next_id: &mut usize,
     ) -> (BlockId, Vec<BlockId>) {
@@ -1960,7 +2008,7 @@ impl Java {
         &self,
         node: Node,
         source: &[u8],
-        blocks: &mut HashMap<BlockId, CFGBlock>,
+        blocks: &mut FxHashMap<BlockId, CFGBlock>,
         edges: &mut Vec<CFGEdge>,
         next_id: &mut usize,
     ) -> (BlockId, Vec<BlockId>) {
@@ -1990,7 +2038,11 @@ impl Java {
         if let Some(body) = self.child_by_field(node, "body") {
             let (body_entry, body_exits) =
                 self.build_cfg_from_body(body, source, blocks, edges, next_id);
-            edges.push(CFGEdge::from_label(sync_id, body_entry, Some("acquire".to_string())));
+            edges.push(CFGEdge::from_label(
+                sync_id,
+                body_entry,
+                Some("acquire".to_string()),
+            ));
             exits = body_exits;
         }
 
@@ -2002,7 +2054,7 @@ impl Java {
         &self,
         node: Node,
         source: &[u8],
-        definitions: &mut HashMap<String, Vec<usize>>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
         edges: &mut Vec<DataflowEdge>,
     ) {
         match node.kind() {
@@ -2033,7 +2085,7 @@ impl Java {
                         from_line: line,
                         to_line: line,
                         kind: DataflowKind::Mutation,
-                            });
+                    });
                 }
             }
             // BUG #13 FIX: Handle increment/decrement operators (i++, ++i, i--, --i)
@@ -2049,7 +2101,7 @@ impl Java {
                             from_line: line,
                             to_line: line,
                             kind: DataflowKind::Mutation,
-                            });
+                        });
                         break;
                     }
                 }
@@ -2065,7 +2117,7 @@ impl Java {
                         from_line: line,
                         to_line: line,
                         kind: DataflowKind::Mutation,
-                            });
+                    });
                 }
             }
             // BUG #26 FIX: Handle pattern matching instanceof (Java 16+)
@@ -2113,8 +2165,8 @@ impl Java {
         &self,
         node: Node,
         source: &[u8],
-        definitions: &HashMap<String, Vec<usize>>,
-        uses: &mut HashMap<String, Vec<usize>>,
+        definitions: &FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
         edges: &mut Vec<DataflowEdge>,
     ) {
         match node.kind() {
@@ -2141,7 +2193,7 @@ impl Java {
                                     from_line: def_line,
                                     to_line: line,
                                     kind: DataflowKind::Use,
-                            });
+                                });
                             }
                         }
                     }
@@ -2282,7 +2334,7 @@ impl Language for Java {
             .map(|n| self.node_text(n, source).to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        let mut blocks = HashMap::new();
+        let mut blocks = FxHashMap::default();
         let mut edges = Vec::new();
         let mut next_id = 0usize;
 
@@ -2319,10 +2371,10 @@ impl Language for Java {
             exits,
             decision_points: 0, // TODO: Calculate actual decision points for Java
             comprehension_decision_points: 0, // Java doesn't have Python-style comprehensions
-            nested_cfgs: HashMap::new(),      // TODO: Handle Java lambdas/anonymous classes as nested CFGs
-            is_async: false,                  // Java uses different async patterns (CompletableFuture)
-            await_points: 0,                  // Java doesn't have await keyword
-            blocking_calls: Vec::new(),       // TODO: Track blocking calls in async contexts
+            nested_cfgs: FxHashMap::default(), // TODO: Handle Java lambdas/anonymous classes as nested CFGs
+            is_async: false,             // Java uses different async patterns (CompletableFuture)
+            await_points: 0,             // Java doesn't have await keyword
+            blocking_calls: Vec::new(),  // TODO: Track blocking calls in async contexts
             ..Default::default()
         })
     }
@@ -2333,8 +2385,8 @@ impl Language for Java {
             .map(|n| self.node_text(n, source).to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        let mut definitions = HashMap::new();
-        let mut uses = HashMap::new();
+        let mut definitions = FxHashMap::default();
+        let mut uses = FxHashMap::default();
         let mut edges = Vec::new();
 
         // Extract parameters as definitions
@@ -2353,7 +2405,7 @@ impl Language for Java {
                             from_line: line,
                             to_line: line,
                             kind: DataflowKind::Param,
-                            });
+                        });
                     }
                 }
             }
@@ -2473,7 +2525,8 @@ impl Java {
                     }
                 }
                 "annotation_type_declaration" => {
-                    if let Some(annotation) = self.extract_annotation_type_declaration(child, source)
+                    if let Some(annotation) =
+                        self.extract_annotation_type_declaration(child, source)
                     {
                         inner_classes.push(annotation);
                     }
@@ -2571,24 +2624,24 @@ impl Java {
         let docstring = self.extract_javadoc(node, source);
 
         // BUG #20 & #21 FIX: Extract methods, fields, enum constants, and inner classes from enum body
-        let (methods, fields, inner_classes) =
-            if let Some(body) = self.child_by_field(node, "body") {
-                // BUG #21 FIX: Extract enum constants as fields
-                let enum_constants = self.extract_enum_constants(body, source);
-                let regular_fields = self.extract_fields(body, source);
+        let (methods, fields, inner_classes) = if let Some(body) = self.child_by_field(node, "body")
+        {
+            // BUG #21 FIX: Extract enum constants as fields
+            let enum_constants = self.extract_enum_constants(body, source);
+            let regular_fields = self.extract_fields(body, source);
 
-                // Combine enum constants with regular fields
-                let mut all_fields = enum_constants;
-                all_fields.extend(regular_fields);
+            // Combine enum constants with regular fields
+            let mut all_fields = enum_constants;
+            all_fields.extend(regular_fields);
 
-                (
-                    self.extract_methods(body, source),
-                    all_fields,
-                    self.extract_inner_classes(body, source),
-                )
-            } else {
-                (Vec::new(), Vec::new(), Vec::new())
-            };
+            (
+                self.extract_methods(body, source),
+                all_fields,
+                self.extract_inner_classes(body, source),
+            )
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
 
         // Line numbers
         let line_number = node.start_position().row + 1;
@@ -2852,7 +2905,7 @@ impl Java {
                     module: package_name,
                     names: vec![],
                     aliases: {
-                        let mut m = HashMap::new();
+                        let mut m = FxHashMap::default();
                         m.insert("package".to_string(), "true".to_string());
                         m
                     },
@@ -2911,7 +2964,7 @@ impl Java {
             (full_path, vec![])
         };
 
-        let mut aliases = HashMap::new();
+        let mut aliases = FxHashMap::default();
         if is_static {
             aliases.insert("static".to_string(), "true".to_string());
         }
@@ -3417,7 +3470,10 @@ public class Counter {
                 let class = java.extract_class(child, code.as_bytes()).unwrap();
                 assert_eq!(class.name, "Counter");
                 // Instance initializer should be captured
-                assert!(class.methods.iter().any(|m| m.name.contains("instance_init")));
+                assert!(class
+                    .methods
+                    .iter()
+                    .any(|m| m.name.contains("instance_init")));
                 break;
             }
         }

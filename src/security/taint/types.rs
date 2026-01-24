@@ -674,7 +674,9 @@ mod tests {
     #[test]
     fn test_taint_label_severity() {
         assert!(TaintLabel::UserInput.severity_weight() > TaintLabel::Config.severity_weight());
-        assert!(TaintLabel::ProcessArgs.severity_weight() > TaintLabel::FileContent.severity_weight());
+        assert!(
+            TaintLabel::ProcessArgs.severity_weight() > TaintLabel::FileContent.severity_weight()
+        );
     }
 
     #[test]
@@ -706,7 +708,10 @@ mod tests {
         assert!(copied.is_tainted());
         assert!(copied.has_label(&TaintLabel::UserInput));
         assert_eq!(copied.propagation_path.len(), 1);
-        assert_eq!(copied.propagation_path[0].propagation, TaintPropagation::Copy);
+        assert_eq!(
+            copied.propagation_path[0].propagation,
+            TaintPropagation::Copy
+        );
     }
 
     #[test]
@@ -736,7 +741,10 @@ mod tests {
 
         assert!(!sanitized.is_tainted());
         assert!(sanitized.sanitized);
-        assert_eq!(sanitized.sanitization_method, Some("html_escape".to_string()));
+        assert_eq!(
+            sanitized.sanitization_method,
+            Some("html_escape".to_string())
+        );
     }
 
     #[test]

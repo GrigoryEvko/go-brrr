@@ -29,12 +29,19 @@
 //! # Ok::<(), go_brrr::error::BrrrError>(())
 //! ```
 
+pub mod constants;
 pub mod extractor;
 pub mod structure;
 pub mod tree;
 pub mod types;
 
 // Re-exports for the crate's public API (used by lib.rs)
+#[allow(unused_imports)]
+pub use constants::{
+    BRANCH_NODE_TYPES, COMMENT_NODE_TYPES, DECISION_NODE_TYPES, EXIT_NODE_TYPES,
+    FUNCTION_NODE_TYPES, LOOP_NODE_TYPES, NESTING_NODE_TYPES, RETURN_NODE_TYPES,
+    STATEMENT_NODE_TYPES, STRING_NODE_TYPES, VARIABLE_DECL_TYPES,
+};
 #[allow(unused_imports)]
 pub use extractor::{clear_parser_cache, clear_query_cache, extract_imports, AstExtractor};
 #[allow(unused_imports)]

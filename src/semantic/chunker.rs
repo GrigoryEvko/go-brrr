@@ -9,59 +9,46 @@
 //! The chunking strategy prioritizes semantic coherence over strict token limits,
 //! attempting to keep related code (e.g., function with its docstring) together.
 //!
-//! # Tokenizer Mismatch Warning (BUG-02)
+//! # Qwen3 Tokenizer (Native)
 //!
-//! **IMPORTANT**: This module uses `cl100k_base` (GPT-4/ChatGPT tokenizer) for local
-//! token counting, while Python's semantic module uses Qwen3-Embedding-0.6B's tokenizer.
-//! Different tokenizers produce different token counts for the same text:
+//! This module uses the native Qwen3-Embedding-0.6B tokenizer loaded from HuggingFace Hub,
+//! providing **exact parity with Python's token counting**. Both Rust and Python use:
 //!
-//! - `cl100k_base`: ~100K vocabulary, optimized for English + code
-//! - Qwen3 tokenizer: Different vocabulary size and subword tokenization
+//! ```python
+//! from tokenizers import Tokenizer
+//! tokenizer = Tokenizer.from_pretrained("Qwen/Qwen3-Embedding-0.6B")
+//! len(tokenizer.encode(text, add_special_tokens=False).ids)
+//! ```
 //!
-//! This can cause **5-15% variance** in token counts between Rust and Python,
-//! leading to inconsistent chunk boundaries.
+//! ## Fallback Behavior
 //!
-//! ## Solutions for Exact Parity
+//! If the tokenizer cannot be loaded (network issues, missing model), the module
+//! falls back to Unicode-aware character estimation (~4 chars per token for ASCII,
+//! higher density for CJK/emoji). Use [`TokenizerType::CharEstimate`] explicitly
+//! for consistent fallback behavior across Rust and Python.
 //!
-//! 1. **Use TEI Server** (recommended): Call [`count_tokens_tei`] or [`count_tokens_batch_tei`]
-//!    to use the actual embedding model's tokenizer via the TEI gRPC server.
+//! ## TEI Server Integration
 //!
-//! 2. **Accept Variance**: For most use cases, the ~10% variance is acceptable since
-//!    both tokenizers produce reasonable chunk boundaries.
+//! For scenarios where the local tokenizer differs from the embedding server's tokenizer,
+//! use [`count_tokens_tei`] or [`count_tokens_batch_tei`] to query the TEI server directly.
 //!
-//! 3. **Use ChunkConfig**: Configure token limits with [`ChunkConfig`] to specify
-//!    the tokenizer type and adjust limits based on expected variance.
+//! # Example: Basic Token Counting
 //!
-//! # Example: TEI-based Token Counting
+//! ```
+//! use go_brrr::semantic::chunker::count_tokens;
 //!
-//! ```no_run
-//! use go_brrr::semantic::chunker::{count_tokens_tei, ChunkConfig, TokenizerType};
-//! use go_brrr::embedding::TeiClient;
-//!
-//! async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//!     let client = TeiClient::new("http://localhost:18080").await?;
-//!
-//!     // Count tokens using TEI (matches Python exactly)
-//!     let code = "def hello(): pass";
-//!     let tokens = count_tokens_tei(code, &client).await?;
-//!
-//!     // Configure chunking with explicit tokenizer awareness
-//!     let config = ChunkConfig::new()
-//!         .with_tokenizer(TokenizerType::Cl100kBase)
-//!         .with_variance_margin(0.10); // 10% safety margin
-//!
-//!     Ok(())
-//! }
+//! let code = "def hello(): pass";
+//! let tokens = count_tokens(code);
+//! assert!(tokens > 0);
 //! ```
 
-use std::cell::RefCell;
 use std::sync::OnceLock;
 
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tiktoken_rs::CoreBPE;
+use tokenizers::Tokenizer;
 
 use super::types::{CHUNK_OVERLAP_TOKENS, MAX_CODE_PREVIEW_TOKENS};
 use crate::embedding::{TeiClient, TeiError};
@@ -166,53 +153,52 @@ pub fn line_to_index(line: usize) -> usize {
 
 /// Tokenizer type for token counting.
 ///
-/// Different embedding models use different tokenizers, which produce different
-/// token counts for the same text. This enum documents the available options
-/// and their characteristics.
+/// This enum configures which tokenizer is used for token counting operations.
+/// The default is `Qwen3`, which uses the native Qwen3-Embedding-0.6B tokenizer
+/// from HuggingFace, providing **exact parity with Python's token counting**.
 ///
-/// # Tokenizer Comparison
+/// # Tokenizer Options
 ///
-/// | Tokenizer | Model | Vocab Size | Notes |
-/// |-----------|-------|------------|-------|
-/// | `Cl100kBase` | GPT-4, ChatGPT | ~100K | Default for tiktoken in Rust |
-/// | `P50kBase` | GPT-3 | ~50K | Older OpenAI models |
-/// | `R50kBase` | Codex | ~50K | Code-optimized |
-/// | `Qwen3` | Qwen3-Embedding | Varies | Used by Python's semantic module |
-/// | `CharEstimate` | N/A | N/A | Character-based estimation for Python parity |
+/// | Tokenizer | Description |
+/// |-----------|-------------|
+/// | `Qwen3` (default) | Native Qwen3-Embedding-0.6B tokenizer - exact Python parity |
+/// | `Cl100kBase` | Legacy alias, now maps to Qwen3 for compatibility |
+/// | `P50kBase` | Legacy alias, now maps to Qwen3 for compatibility |
+/// | `R50kBase` | Legacy alias, now maps to Qwen3 for compatibility |
+/// | `CharEstimate` | Character-based estimation fallback |
 ///
-/// # Mismatch Warning (BUG-02)
+/// # Python Parity
 ///
-/// When using `Cl100kBase` (default), token counts may differ from Python's
-/// Qwen3-based counts by approximately 5-15%. For exact parity:
+/// All tokenizer types except `CharEstimate` now use the native Qwen3 tokenizer,
+/// which matches Python's implementation exactly:
 ///
-/// 1. **Use TEI Server** (recommended): Call [`count_tokens_tei`] for exact Qwen3 counts
-/// 2. **Use CharEstimate**: Call [`set_tokenizer_type(TokenizerType::CharEstimate)`]
-///    to use the same character-based estimation as Python's fallback
-/// 3. **Accept Variance**: For most use cases, ~10% variance is acceptable
+/// ```python
+/// from tokenizers import Tokenizer
+/// tokenizer = Tokenizer.from_pretrained("Qwen/Qwen3-Embedding-0.6B")
+/// len(tokenizer.encode(text, add_special_tokens=False).ids)
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenizerType {
-    /// GPT-4/ChatGPT tokenizer (tiktoken cl100k_base).
-    /// ~100K vocabulary, optimized for English text and code.
-    /// This is the default for local Rust token counting.
-    #[default]
+    /// Legacy OpenAI tokenizer name (now maps to Qwen3).
+    /// Kept for backward compatibility with existing configurations.
     Cl100kBase,
 
-    /// GPT-3 tokenizer (tiktoken p50k_base).
-    /// ~50K vocabulary, older OpenAI models.
+    /// Legacy OpenAI tokenizer name (now maps to Qwen3).
+    /// Kept for backward compatibility with existing configurations.
     P50kBase,
 
-    /// Codex tokenizer (tiktoken r50k_base).
-    /// ~50K vocabulary, code-optimized.
+    /// Legacy OpenAI tokenizer name (now maps to Qwen3).
+    /// Kept for backward compatibility with existing configurations.
     R50kBase,
 
-    /// Qwen3 tokenizer (via TEI server).
-    /// Used by Python's semantic module for Qwen3-Embedding-0.6B.
-    /// Requires TEI server connection for accurate counts.
+    /// Qwen3-Embedding tokenizer (native, exact Python parity).
     ///
-    /// **Note**: Local Rust code cannot use Qwen3 tokenizer directly.
-    /// When this is selected, [`count_tokens`] falls back to `CharEstimate`
-    /// for synchronous counting. Use [`count_tokens_tei`] for exact counts.
+    /// Uses the HuggingFace `tokenizers` crate to load Qwen/Qwen3-Embedding-0.6B
+    /// tokenizer directly, providing **exact same token counts as Python**.
+    ///
+    /// This is the default tokenizer for all token counting operations.
+    #[default]
     Qwen3,
 
     /// Character-based token estimation matching Python's fallback.
@@ -234,18 +220,19 @@ impl TokenizerType {
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Cl100kBase => "cl100k_base (GPT-4)",
-            Self::P50kBase => "p50k_base (GPT-3)",
-            Self::R50kBase => "r50k_base (Codex)",
-            Self::Qwen3 => "Qwen3 (TEI server)",
-            Self::CharEstimate => "CharEstimate (Python parity)",
+            Self::Cl100kBase | Self::P50kBase | Self::R50kBase | Self::Qwen3 => {
+                "Qwen3-Embedding-0.6B"
+            }
+            Self::CharEstimate => "CharEstimate (fallback)",
         }
     }
 
     /// Check if this tokenizer requires a TEI server connection.
+    ///
+    /// Returns `false` for all types now that Qwen3 has native support.
     #[must_use]
     pub fn requires_tei(&self) -> bool {
-        matches!(self, Self::Qwen3)
+        false // Native Qwen3 tokenizer - no TEI needed
     }
 
     /// Check if this tokenizer uses character-based estimation.
@@ -256,16 +243,14 @@ impl TokenizerType {
 
     /// Get the expected variance percentage compared to Qwen3.
     ///
-    /// Returns the approximate percentage difference in token counts
-    /// when using this tokenizer vs. the Qwen3 tokenizer.
+    /// Returns 0.0 for all tokenizer types since we now use native Qwen3.
+    /// Only CharEstimate has variance since it uses heuristics.
     #[must_use]
     pub fn variance_vs_qwen3(&self) -> f64 {
         match self {
-            Self::Cl100kBase => 0.10,   // ~10% variance
-            Self::P50kBase => 0.15,     // ~15% variance
-            Self::R50kBase => 0.12,     // ~12% variance
-            Self::Qwen3 => 0.0,         // Exact match
-            Self::CharEstimate => 0.05, // ~5% variance (uses same formula as Python fallback)
+            Self::CharEstimate => 0.05, // ~5% variance (heuristic estimation)
+            // All other types use native Qwen3 - exact match
+            _ => 0.0,
         }
     }
 }
@@ -397,7 +382,7 @@ impl ChunkConfig {
 /// Global tokenizer type for [`count_tokens`].
 ///
 /// Set via [`set_tokenizer_type`] before any token counting operations.
-/// If not set, defaults to `Cl100kBase`.
+/// If not set, defaults to `Qwen3`.
 static GLOBAL_TOKENIZER_TYPE: OnceLock<TokenizerType> = OnceLock::new();
 
 /// Set the global tokenizer type for [`count_tokens`].
@@ -436,7 +421,7 @@ pub fn set_tokenizer_type(tokenizer_type: TokenizerType) -> bool {
 /// Get the current global tokenizer type.
 ///
 /// Returns the tokenizer type set via [`set_tokenizer_type`], or
-/// `Cl100kBase` if no type has been set.
+/// `Qwen3` if no type has been set.
 ///
 /// # Example
 ///
@@ -451,48 +436,46 @@ pub fn get_tokenizer_type() -> TokenizerType {
     GLOBAL_TOKENIZER_TYPE
         .get()
         .copied()
-        .unwrap_or(TokenizerType::Cl100kBase)
+        .unwrap_or(TokenizerType::Qwen3)
 }
 
 // =============================================================================
 // Token Counting - Thread-Local for Zero Contention
 // =============================================================================
 
-thread_local! {
-    /// Thread-local tokenizer to eliminate lock contention under parallel processing.
-    ///
-    /// Each thread gets its own BPE tokenizer instance, avoiding cache-line contention
-    /// when using rayon's par_iter. Uses cl100k_base (GPT-4/ChatGPT tokenizer).
-    ///
-    /// Benefits over shared static:
-    /// - Zero synchronization overhead
-    /// - Better cache locality per thread
-    /// - No false sharing between CPU cores
-    static THREAD_TOKENIZER: RefCell<Option<CoreBPE>> = RefCell::new(
-        match tiktoken_rs::cl100k_base() {
-            Ok(bpe) => Some(bpe),
+/// Global Qwen3 tokenizer loaded once and shared across all threads.
+///
+/// The HuggingFace tokenizers crate provides a thread-safe Tokenizer that can be
+/// shared via Arc. We load it once from HuggingFace Hub and reuse it.
+///
+/// Model: Qwen/Qwen3-Embedding-0.6B - exact same tokenizer as Python's semantic module.
+static QWEN3_TOKENIZER: Lazy<Option<Tokenizer>> =
+    Lazy::new(
+        || match Tokenizer::from_pretrained("Qwen/Qwen3-Embedding-0.6B", None) {
+            Ok(tokenizer) => {
+                tracing::info!("Loaded Qwen3-Embedding-0.6B tokenizer from HuggingFace Hub");
+                Some(tokenizer)
+            }
             Err(e) => {
                 tracing::warn!(
-                    "Failed to initialize thread-local tokenizer: {}, falling back to estimation",
+                    "Failed to load Qwen3 tokenizer: {}, falling back to estimation",
                     e
                 );
                 None
             }
-        }
+        },
     );
-}
 
-/// Count tokens in a string using the configured tokenizer.
+/// Count tokens in a string using the Qwen3-Embedding tokenizer.
 ///
-/// The tokenizer used depends on the global setting from [`set_tokenizer_type`]:
+/// Uses the native HuggingFace tokenizer loaded from Qwen/Qwen3-Embedding-0.6B,
+/// providing **exact parity with Python's token counting**.
 ///
-/// - `Cl100kBase` (default): Uses tiktoken cl100k_base (GPT-4 tokenizer)
-/// - `CharEstimate`: Uses Unicode-aware character estimation matching Python
-/// - `Qwen3`: Falls back to `CharEstimate` (use [`count_tokens_tei`] for exact counts)
-/// - Other: Uses the corresponding tiktoken tokenizer
+/// The tokenizer behavior depends on the global setting from [`set_tokenizer_type`]:
 ///
-/// Uses a thread-local tokenizer to eliminate lock contention under parallel
-/// processing (e.g., rayon's par_iter).
+/// - `Qwen3` (default): Uses native Qwen3 tokenizer (exact Python parity)
+/// - `CharEstimate`: Uses Unicode-aware character estimation
+/// - Other types: Fall back to Qwen3 tokenizer
 ///
 /// # Arguments
 ///
@@ -500,21 +483,15 @@ thread_local! {
 ///
 /// # Returns
 ///
-/// Token count (exact or estimated depending on configured tokenizer).
+/// Token count (exact from Qwen3 tokenizer, or estimated if tokenizer unavailable).
 ///
-/// # BUG-02 Fix: Python Parity
-///
-/// To achieve exact parity with Python's token counting:
+/// # Example
 ///
 /// ```
-/// use go_brrr::semantic::chunker::{set_tokenizer_type, TokenizerType, count_tokens};
+/// use go_brrr::semantic::chunker::count_tokens;
 ///
-/// // Option 1: Use CharEstimate for same formula as Python fallback
-/// set_tokenizer_type(TokenizerType::CharEstimate);
 /// let tokens = count_tokens("def hello(): pass");
-///
-/// // Option 2: Use count_tokens_tei for exact Qwen3 tokenizer counts
-/// // (requires TEI server)
+/// assert!(tokens > 0);
 /// ```
 #[must_use]
 pub fn count_tokens(text: &str) -> usize {
@@ -525,15 +502,20 @@ pub fn count_tokens(text: &str) -> usize {
     match get_tokenizer_type() {
         // Character-based estimation matching Python's fallback
         TokenizerType::CharEstimate => estimate_tokens_unicode_aware(text),
-        // Qwen3 requires TEI server; fall back to char estimation for sync calls
-        TokenizerType::Qwen3 => estimate_tokens_unicode_aware(text),
-        // Use tiktoken for other types
-        TokenizerType::Cl100kBase | TokenizerType::P50kBase | TokenizerType::R50kBase => {
-            THREAD_TOKENIZER.with(|tokenizer| match tokenizer.borrow().as_ref() {
-                Some(bpe) => bpe.encode_ordinary(text).len(),
-                None => estimate_tokens_unicode_aware(text),
-            })
-        }
+        // All other types use native Qwen3 tokenizer
+        TokenizerType::Qwen3
+        | TokenizerType::Cl100kBase
+        | TokenizerType::P50kBase
+        | TokenizerType::R50kBase => match QWEN3_TOKENIZER.as_ref() {
+            Some(tokenizer) => {
+                // encode without adding special tokens (matches Python's add_special_tokens=False)
+                match tokenizer.encode(text, false) {
+                    Ok(encoding) => encoding.get_ids().len(),
+                    Err(_) => estimate_tokens_unicode_aware(text),
+                }
+            }
+            None => estimate_tokens_unicode_aware(text),
+        },
     }
 }
 
@@ -617,7 +599,7 @@ pub fn estimate_tokens_unicode_aware(text: &str) -> usize {
     let estimated = ascii_chars as f64 / 4.0      // ~4 ASCII chars per token
         + cjk_chars as f64 * 1.5                  // Each CJK char often = 1-2 tokens
         + emoji_chars as f64 * 3.0                // Emoji = 2-4 tokens each
-        + other_chars as f64 / 2.0;               // Other Unicode ~2 chars per token
+        + other_chars as f64 / 2.0; // Other Unicode ~2 chars per token
 
     // Return at least 1 for non-empty text
     (estimated as usize).max(1)
@@ -807,19 +789,18 @@ fn is_emoji_char(code: u32) -> bool {
 
 /// Count tokens using the TEI server's tokenizer.
 ///
-/// This function provides **exact parity with Python's semantic module** by using
-/// the actual embedding model's tokenizer (e.g., Qwen3) via the TEI gRPC server.
+/// This function queries the TEI (Text Embeddings Inference) server for token counts,
+/// useful when you want to ensure the count matches the exact model being used for
+/// embedding generation.
 ///
-/// # Why Use This?
+/// # When to Use This
 ///
-/// The local [`count_tokens`] function uses `cl100k_base` (GPT-4 tokenizer),
-/// which produces different token counts than Python's Qwen3-based tokenizer.
-/// This can cause **5-15% variance** in chunk boundaries between Rust and Python.
-///
-/// Use this function when exact parity with Python is required, such as:
-/// - Building indexes that will be queried by Python code
-/// - Comparing chunk boundaries across implementations
-/// - Testing tokenizer behavior
+/// The local [`count_tokens`] function uses the native Qwen3-Embedding tokenizer,
+/// which should match the TEI server when using the same model. Use this function
+/// when:
+/// - The TEI server uses a different model than Qwen3-Embedding
+/// - You want to verify local tokenizer accuracy
+/// - You need server-side token counting for consistency
 ///
 /// # Arguments
 ///
@@ -828,7 +809,7 @@ fn is_emoji_char(code: u32) -> bool {
 ///
 /// # Returns
 ///
-/// The exact token count as determined by the embedding model's tokenizer.
+/// The exact token count as determined by the TEI server's tokenizer.
 ///
 /// # Errors
 ///
@@ -845,13 +826,7 @@ fn is_emoji_char(code: u32) -> bool {
 ///     let code = "def process_data(items): return [x * 2 for x in items]";
 ///
 ///     let tokens = count_tokens_tei(code, &client).await?;
-///     println!("Token count (Qwen3): {}", tokens);
-///
-///     // Compare with local tokenizer
-///     let local_tokens = go_brrr::semantic::chunker::count_tokens(code);
-///     println!("Token count (cl100k_base): {}", local_tokens);
-///     println!("Variance: {:.1}%",
-///         (local_tokens as f64 - tokens as f64).abs() / tokens as f64 * 100.0);
+///     println!("Token count (TEI): {}", tokens);
 ///
 ///     Ok(())
 /// }
@@ -915,9 +890,9 @@ pub async fn count_tokens_batch_tei(
 
 /// Compare token counts between local and TEI tokenizers.
 ///
-/// Utility function to analyze the variance between local (cl100k_base) and
-/// TEI (Qwen3) tokenizers for a given text. Useful for debugging and
-/// understanding tokenizer behavior.
+/// Utility function to analyze the variance between local (Qwen3) and
+/// TEI server tokenizers for a given text. Useful for debugging and
+/// verifying tokenizer consistency.
 ///
 /// # Arguments
 ///
@@ -940,8 +915,8 @@ pub async fn count_tokens_batch_tei(
 ///     let code = "async def fetch_user(user_id: int) -> User: ...";
 ///
 ///     let (local, tei, variance) = compare_tokenizer_counts(code, &client).await?;
-///     println!("cl100k_base: {} tokens", local);
-///     println!("Qwen3: {} tokens", tei);
+///     println!("Local (Qwen3): {} tokens", local);
+///     println!("TEI server: {} tokens", tei);
 ///     println!("Variance: {:.1}%", variance);
 ///
 ///     Ok(())
@@ -1018,8 +993,15 @@ pub fn count_lines(content: &str) -> usize {
 
 /// Truncate text to fit within a token limit.
 ///
-/// Uses the thread-local tokenizer to find the maximum substring that fits
-/// within the token budget by encoding and decoding.
+/// Uses the Qwen3-Embedding tokenizer to find the maximum substring that fits
+/// within the token budget by encoding, truncating, and decoding.
+///
+/// This function provides exact parity with Python's `truncate_to_tokens`:
+/// ```python
+/// encoded = tokenizer.encode(text, add_special_tokens=False)
+/// truncated_ids = encoded.ids[:max_tokens]
+/// return tokenizer.decode(truncated_ids)
+/// ```
 ///
 /// # Arguments
 ///
@@ -1040,46 +1022,46 @@ pub fn truncate_to_tokens(text: &str, max_tokens: usize) -> String {
         return text.to_string();
     }
 
-    THREAD_TOKENIZER.with(|tokenizer| {
-        match tokenizer.borrow().as_ref() {
-            Some(bpe) => {
-                let tokens = bpe.encode_ordinary(text);
-                if tokens.len() <= max_tokens {
-                    return text.to_string();
-                }
-                let truncated_tokens = &tokens[..max_tokens];
-                bpe.decode(truncated_tokens.to_vec())
-                    .unwrap_or_else(|_| {
-                        // Fallback: estimate character count on decode failure
-                        let max_chars = max_tokens * 4;
-                        if text.len() <= max_chars {
-                            text.to_string()
-                        } else {
-                            // Find nearest word boundary for clean truncation
-                            let truncated = &text[..max_chars.min(text.len())];
-                            match truncated.rfind(char::is_whitespace) {
-                                Some(pos) => truncated[..pos].to_string(),
-                                None => truncated.to_string(),
-                            }
-                        }
-                    })
-            }
-            None => {
-                // Fallback: estimate ~4 chars per token
-                let max_chars = max_tokens * 4;
-                if text.len() <= max_chars {
-                    text.to_string()
-                } else {
-                    // Find nearest word boundary for clean truncation
-                    let truncated = &text[..max_chars];
-                    match truncated.rfind(char::is_whitespace) {
-                        Some(pos) => truncated[..pos].to_string(),
-                        None => truncated.to_string(),
+    // Use the Qwen3 tokenizer for precise truncation (matches Python exactly)
+    match QWEN3_TOKENIZER.as_ref() {
+        Some(tokenizer) => {
+            // encode without adding special tokens (matches Python's add_special_tokens=False)
+            match tokenizer.encode(text, false) {
+                Ok(encoding) => {
+                    let ids = encoding.get_ids();
+                    if ids.len() <= max_tokens {
+                        return text.to_string();
                     }
+                    // Truncate to max_tokens and decode back to text
+                    let truncated_ids: Vec<u32> = ids[..max_tokens].to_vec();
+                    tokenizer.decode(&truncated_ids, true).unwrap_or_else(|_| {
+                        // Fallback on decode error: estimate character count
+                        truncate_by_chars(text, max_tokens)
+                    })
                 }
+                Err(_) => truncate_by_chars(text, max_tokens),
             }
         }
-    })
+        None => truncate_by_chars(text, max_tokens),
+    }
+}
+
+/// Fallback character-based truncation when tokenizer unavailable.
+///
+/// Estimates ~4 characters per token and tries to find a clean word boundary.
+#[inline]
+fn truncate_by_chars(text: &str, max_tokens: usize) -> String {
+    let max_chars = max_tokens * 4;
+    if text.len() <= max_chars {
+        return text.to_string();
+    }
+
+    // Find nearest word boundary for clean truncation
+    let truncated = &text[..max_chars.min(text.len())];
+    match truncated.rfind(char::is_whitespace) {
+        Some(pos) => truncated[..pos].to_string(),
+        None => truncated.to_string(),
+    }
 }
 
 // =============================================================================
@@ -1905,7 +1887,7 @@ fn calculate_overlap(
     for line_idx in (chunk_start_line..split_line).rev() {
         let line = lines.get(line_idx).copied().unwrap_or("");
         // Add 1 token for the newline character to match the main chunking loop's accounting.
-        // Newlines typically encode as 1 token in most tokenizers (including cl100k_base).
+        // Newlines typically encode as 1 token in most tokenizers (including Qwen3-Embedding).
         // All lines in the overlap range have newlines since they're not the last line of the file.
         let line_tokens = count_tokens(line) + 1;
 
@@ -2213,18 +2195,18 @@ mod tests {
     #[test]
     fn test_count_lines_only_newlines() {
         // BUG-12: This was the main bug - "\n\n\n".lines().count() = 3, but should be 4
-        assert_eq!(count_lines("\n"), 2);      // 1 newline = 2 lines
-        assert_eq!(count_lines("\n\n"), 3);    // 2 newlines = 3 lines
-        assert_eq!(count_lines("\n\n\n"), 4);  // 3 newlines = 4 lines (the bug case!)
+        assert_eq!(count_lines("\n"), 2); // 1 newline = 2 lines
+        assert_eq!(count_lines("\n\n"), 3); // 2 newlines = 3 lines
+        assert_eq!(count_lines("\n\n\n"), 4); // 3 newlines = 4 lines (the bug case!)
         assert_eq!(count_lines("\n\n\n\n"), 5);
     }
 
     #[test]
     fn test_count_lines_mixed_empty_lines() {
         // Content with empty lines in the middle
-        assert_eq!(count_lines("a\n\nb"), 3);      // a, empty, b
-        assert_eq!(count_lines("a\n\n\nb"), 4);    // a, empty, empty, b
-        assert_eq!(count_lines("a\n\nb\n"), 4);    // a, empty, b, empty
+        assert_eq!(count_lines("a\n\nb"), 3); // a, empty, b
+        assert_eq!(count_lines("a\n\n\nb"), 4); // a, empty, empty, b
+        assert_eq!(count_lines("a\n\nb\n"), 4); // a, empty, b, empty
     }
 
     #[test]
@@ -2505,7 +2487,7 @@ def func3():
 
         // Should NOT match triple quotes (handled by ''' pattern)
         // Note: ''' is matched by the explicit ''' pattern, not by '
-        assert!(is_detected_as_comment("'''"));  // Matches as Python docstring
+        assert!(is_detected_as_comment("'''")); // Matches as Python docstring
     }
 
     #[test]
@@ -2675,14 +2657,23 @@ def func3():
         let content = "line1\nline2\nline3";
         let chunks = chunk_code(content, 1000);
         assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].start_line, 1, "start_line should be 1 (first line)");
-        assert_eq!(chunks[0].end_line, 3, "end_line should be 3 (last line, INCLUSIVE)");
+        assert_eq!(
+            chunks[0].start_line, 1,
+            "start_line should be 1 (first line)"
+        );
+        assert_eq!(
+            chunks[0].end_line, 3,
+            "end_line should be 3 (last line, INCLUSIVE)"
+        );
         assert_eq!(chunks[0].line_count(), 3, "line_count should be 3");
 
         // Verify contains_line works correctly
         assert!(chunks[0].contains_line(1), "Line 1 should be in chunk");
         assert!(chunks[0].contains_line(2), "Line 2 should be in chunk");
-        assert!(chunks[0].contains_line(3), "Line 3 should be in chunk (INCLUSIVE)");
+        assert!(
+            chunks[0].contains_line(3),
+            "Line 3 should be in chunk (INCLUSIVE)"
+        );
         assert!(!chunks[0].contains_line(0), "Line 0 should NOT be in chunk");
         assert!(!chunks[0].contains_line(4), "Line 4 should NOT be in chunk");
 
@@ -2803,19 +2794,25 @@ impl MyStruct {
 
         // Test case 3: impl with trait bound
         assert!(
-            patterns.class_start.is_match("impl<T: Clone> Foo<T> for Bar {"),
+            patterns
+                .class_start
+                .is_match("impl<T: Clone> Foo<T> for Bar {"),
             "impl<T: Clone> should match"
         );
 
         // Test case 4: impl with lifetime and complex bounds
         assert!(
-            patterns.class_start.is_match("impl<'a, T: 'a + Clone> Foo<'a, T> {"),
+            patterns
+                .class_start
+                .is_match("impl<'a, T: 'a + Clone> Foo<'a, T> {"),
             "impl with lifetime should match"
         );
 
         // Test case 5: impl with nested generics (one level)
         assert!(
-            patterns.class_start.is_match("impl<T: Iterator<Item=Foo>> Bar {"),
+            patterns
+                .class_start
+                .is_match("impl<T: Iterator<Item=Foo>> Bar {"),
             "impl with nested generics should match"
         );
 
@@ -2951,7 +2948,10 @@ class DataProcessor {
             assert!(
                 curr_start <= prev_end + 1,
                 "Chunk {} start ({}) should overlap with chunk {} end ({})",
-                i, curr_start, i - 1, prev_end
+                i,
+                curr_start,
+                i - 1,
+                prev_end
             );
         }
     }
@@ -3243,15 +3243,18 @@ class DataProcessor {
         // 4 Cyrillic chars -> 4/2 = 2 tokens
         let cyrillic = "\u{0410}\u{0411}\u{0412}\u{0413}"; // 4 Cyrillic chars
         let result = estimate_tokens_unicode_aware(cyrillic);
-        assert_eq!(result, 2, "Other Unicode should estimate ~2 chars per token");
+        assert_eq!(
+            result, 2,
+            "Other Unicode should estimate ~2 chars per token"
+        );
     }
 
     #[test]
     fn test_tokenizer_type_char_estimate_variant() {
-        // Test the new CharEstimate variant
+        // Test the CharEstimate variant - fallback for when tokenizer unavailable
         let char_estimate = TokenizerType::CharEstimate;
 
-        assert_eq!(char_estimate.name(), "CharEstimate (Python parity)");
+        assert_eq!(char_estimate.name(), "CharEstimate (fallback)");
         assert!(!char_estimate.requires_tei());
         assert!(char_estimate.is_estimation());
         assert_eq!(char_estimate.variance_vs_qwen3(), 0.05);
@@ -3285,7 +3288,7 @@ class DataProcessor {
         // Emoji
         assert!(is_emoji_char(0x1F600)); // Grinning face
         assert!(is_emoji_char(0x1F601)); // Beaming face
-        assert!(is_emoji_char(0x2600));  // Sun
+        assert!(is_emoji_char(0x2600)); // Sun
 
         // Non-emoji
         assert!(!is_emoji_char(0x0041)); // 'A'
@@ -3350,9 +3353,9 @@ class DataProcessor {
     fn test_count_ascii_bytes_simd_mixed() {
         // Mixed ASCII and non-ASCII
         let mixed: Vec<u8> = vec![
-            b'h', b'e', b'l', b'l', b'o',  // 5 ASCII
-            0xC3, 0xA9,                    // 2 non-ASCII (UTF-8 e-acute)
-            b'w', b'o', b'r', b'l', b'd',  // 5 ASCII
+            b'h', b'e', b'l', b'l', b'o', // 5 ASCII
+            0xC3, 0xA9, // 2 non-ASCII (UTF-8 e-acute)
+            b'w', b'o', b'r', b'l', b'd', // 5 ASCII
         ];
         assert_eq!(count_ascii_bytes_simd(&mixed), 10);
 
@@ -3379,14 +3382,14 @@ class DataProcessor {
     #[test]
     fn test_get_tokenizer_type_default() {
         // Note: This test may be affected by other tests that call set_tokenizer_type
-        // In a fresh process, the default should be Cl100kBase
+        // In a fresh process, the default should be Qwen3
         let current = get_tokenizer_type();
         // We can only assert it's one of the valid types
         matches!(
             current,
-            TokenizerType::Cl100kBase
+            TokenizerType::Qwen3
                 | TokenizerType::CharEstimate
-                | TokenizerType::Qwen3
+                | TokenizerType::Cl100kBase
                 | TokenizerType::P50kBase
                 | TokenizerType::R50kBase
         );
@@ -3442,10 +3445,7 @@ class DataProcessor {
         let chunks = chunk_code(content, 1000);
 
         assert_eq!(chunks.len(), 1, "Should produce single chunk");
-        assert_eq!(
-            chunks[0].start_line, 1,
-            "First line should be 1, not 0"
-        );
+        assert_eq!(chunks[0].start_line, 1, "First line should be 1, not 0");
         assert_eq!(
             chunks[0].end_line, 3,
             "Last line should be 3 (3 lines, 1-indexed inclusive)"
@@ -3465,7 +3465,10 @@ class DataProcessor {
 
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].start_line, 1, "Single line: start should be 1");
-        assert_eq!(chunks[0].end_line, 1, "Single line: end should be 1 (inclusive)");
+        assert_eq!(
+            chunks[0].end_line, 1,
+            "Single line: end should be 1 (inclusive)"
+        );
         assert_eq!(chunks[0].line_count(), 1, "Single line: count should be 1");
     }
 
@@ -3515,8 +3518,14 @@ class DataProcessor {
         assert!(chunk.contains_line(7), "Line 7 should be in chunk [5,7]");
 
         // Lines outside range should not be contained
-        assert!(!chunk.contains_line(4), "Line 4 should NOT be in chunk [5,7]");
-        assert!(!chunk.contains_line(8), "Line 8 should NOT be in chunk [5,7]");
+        assert!(
+            !chunk.contains_line(4),
+            "Line 4 should NOT be in chunk [5,7]"
+        );
+        assert!(
+            !chunk.contains_line(8),
+            "Line 8 should NOT be in chunk [5,7]"
+        );
 
         // Line 0 (invalid) should not be contained
         assert!(
@@ -3535,10 +3544,7 @@ class DataProcessor {
         // Internal range [0, 3) means indices 0, 1, 2 (3 lines)
         let chunk = create_chunk_from_range(code, &lines, &line_offsets, 0, 3);
 
-        assert_eq!(
-            chunk.start_line, 1,
-            "Internal index 0 should become line 1"
-        );
+        assert_eq!(chunk.start_line, 1, "Internal index 0 should become line 1");
         assert_eq!(
             chunk.end_line, 3,
             "Internal exclusive end 3 should become inclusive line 3"

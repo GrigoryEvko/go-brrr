@@ -23,9 +23,12 @@ use std::time::{Duration, Instant};
 use tracing_subscriber::EnvFilter;
 use which::which;
 
+mod analysis;
 mod ast;
 mod callgraph;
 mod cfg;
+mod coverage;
+mod dataflow;
 mod dfg;
 mod diagnostics;
 mod error;
@@ -37,8 +40,7 @@ mod util;
 
 // Import project root, language detection, and path validation utilities
 use util::path::{
-    detect_project_language, get_project_root,
-    require_directory, require_exists, require_file,
+    detect_project_language, get_project_root, require_directory, require_exists, require_file,
 };
 
 // =============================================================================
@@ -88,14 +90,20 @@ struct Cli {
     #[arg(long, global = true, value_enum, default_value = "json")]
     format: OutputFormat,
 
+    /// Output minified/compact JSON (default: pretty-printed)
+    #[arg(long, global = true)]
+    compact: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
 
-#[derive(Clone, Copy, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
 enum OutputFormat {
     #[default]
     Json,
+    /// JSON Lines - one object per line (for streaming/arrays)
+    Jsonl,
     Text,
     Mermaid,
     Dot,
@@ -698,7 +706,7 @@ enum Commands {
     },
 
     /// Security analysis subcommands
-    #[command(subcommand)]
+    #[command(subcommand, visible_alias = "sec")]
     Security(SecurityCommands),
 
     /// Code metrics analysis (use 'brrr metrics <path>' for full report)
@@ -730,6 +738,200 @@ enum Commands {
     /// Code quality analysis subcommands
     #[command(subcommand)]
     Quality(QualityCommands),
+
+    /// Data flow analysis subcommands
+    #[command(subcommand, visible_alias = "df")]
+    Dataflow(DataflowCommands),
+
+    /// Coverage analysis and CFG mapping
+    #[command(subcommand)]
+    Coverage(CoverageCommands),
+
+    /// Advanced code analysis subcommands
+    #[command(subcommand)]
+    Analyze(AnalyzeCommands),
+}
+
+// =============================================================================
+// COVERAGE SUBCOMMANDS
+// =============================================================================
+
+/// Coverage format argument
+#[derive(Clone, Copy, ValueEnum, Debug)]
+enum CoverageFormatArg {
+    /// LCOV format (lcov.info)
+    Lcov,
+    /// Cobertura XML format
+    Cobertura,
+    /// Python coverage.py JSON
+    CoverageJson,
+    /// JavaScript Istanbul JSON
+    Istanbul,
+    /// LLVM coverage JSON
+    Llvm,
+    /// GNU gcov format
+    Gcov,
+    /// Java JaCoCo XML
+    JaCoCo,
+}
+
+impl From<CoverageFormatArg> for coverage::CoverageFormat {
+    fn from(arg: CoverageFormatArg) -> Self {
+        match arg {
+            CoverageFormatArg::Lcov => Self::Lcov,
+            CoverageFormatArg::Cobertura => Self::Cobertura,
+            CoverageFormatArg::CoverageJson => Self::CoverageJson,
+            CoverageFormatArg::Istanbul => Self::Istanbul,
+            CoverageFormatArg::Llvm => Self::Llvm,
+            CoverageFormatArg::Gcov => Self::Gcov,
+            CoverageFormatArg::JaCoCo => Self::JaCoCo,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum CoverageCommands {
+    /// Map coverage data to CFG
+    #[command(
+        name = "map",
+        about = "Map coverage data to CFG for detailed analysis",
+        long_about = "Parse coverage data and map it to control flow graph.\n\n\
+            Supports multiple coverage formats:\n\
+            - lcov: Standard LCOV format (lcov.info)\n\
+            - cobertura: Cobertura XML format\n\
+            - coverage-json: Python coverage.py JSON\n\
+            - istanbul: JavaScript Istanbul/nyc JSON\n\
+            - llvm: LLVM coverage JSON export\n\
+            - gcov: GNU gcov text format\n\
+            - jacoco: Java JaCoCo XML\n\n\
+            Output includes:\n\
+            - Block and edge coverage\n\
+            - Uncovered branches\n\
+            - Path coverage analysis\n\
+            - Test suggestions"
+    )]
+    Map {
+        /// Coverage file to parse
+        coverage_file: PathBuf,
+
+        /// Source file to analyze
+        source_file: PathBuf,
+
+        /// Function name to analyze (for CFG extraction)
+        #[arg(long, short = 'f')]
+        function: String,
+
+        /// Coverage format (auto-detected if not specified)
+        #[arg(long, value_enum)]
+        format: Option<CoverageFormatArg>,
+
+        /// Language (auto-detected from extension if not specified)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Include test suggestions in output
+        #[arg(long)]
+        suggest_tests: bool,
+
+        /// Maximum path depth for path coverage analysis
+        #[arg(long, default_value = "1000")]
+        max_paths: usize,
+    },
+
+    /// Parse coverage file and show summary
+    #[command(
+        name = "parse",
+        about = "Parse coverage file and display summary",
+        long_about = "Parse a coverage file and display summary statistics.\n\n\
+            Shows:\n\
+            - Line coverage percentage\n\
+            - Branch coverage percentage\n\
+            - Function coverage percentage\n\
+            - Per-file breakdown"
+    )]
+    Parse {
+        /// Coverage file to parse
+        coverage_file: PathBuf,
+
+        /// Coverage format (auto-detected if not specified)
+        #[arg(long, value_enum)]
+        format: Option<CoverageFormatArg>,
+
+        /// Show per-file details
+        #[arg(long)]
+        details: bool,
+    },
+
+    /// Find uncovered branches in a function
+    #[command(
+        name = "uncovered",
+        about = "Find uncovered branches in a function",
+        long_about = "Analyze coverage and CFG to find specific uncovered branches.\n\n\
+            Useful for identifying which test cases need to be written.\n\
+            Branches are prioritized by importance:\n\
+            - Exception handlers (highest priority)\n\
+            - Conditional branches (true/false)\n\
+            - Error handling paths\n\
+            - Loop boundaries"
+    )]
+    Uncovered {
+        /// Coverage file to parse
+        coverage_file: PathBuf,
+
+        /// Source file to analyze
+        source_file: PathBuf,
+
+        /// Function name to analyze
+        #[arg(long, short = 'f')]
+        function: String,
+
+        /// Coverage format (auto-detected if not specified)
+        #[arg(long, value_enum)]
+        format: Option<CoverageFormatArg>,
+
+        /// Language (auto-detected from extension if not specified)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Minimum priority level (1-9, higher = more important)
+        #[arg(long, default_value = "1")]
+        min_priority: u8,
+    },
+
+    /// Suggest test cases for uncovered code
+    #[command(
+        name = "suggest",
+        about = "Suggest test cases for uncovered code",
+        long_about = "Analyze coverage gaps and suggest test cases.\n\n\
+            Suggestions include:\n\
+            - Description of what to test\n\
+            - Target lines to cover\n\
+            - Suggested test name\n\
+            - Priority level"
+    )]
+    Suggest {
+        /// Coverage file to parse
+        coverage_file: PathBuf,
+
+        /// Source file to analyze
+        source_file: PathBuf,
+
+        /// Function name to analyze
+        #[arg(long, short = 'f')]
+        function: String,
+
+        /// Coverage format (auto-detected if not specified)
+        #[arg(long, value_enum)]
+        format: Option<CoverageFormatArg>,
+
+        /// Language (auto-detected from extension if not specified)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Maximum number of suggestions
+        #[arg(long, default_value = "10")]
+        max: usize,
+    },
 }
 
 // =============================================================================
@@ -1338,8 +1540,8 @@ enum SecurityCommands {
         lang: Option<Language>,
 
         /// Output format (json, sarif, text)
-        #[arg(long, value_enum, default_value = "json")]
-        format: SecurityOutputFormat,
+        #[arg(long = "output", value_enum, default_value = "json")]
+        output_format: SecurityOutputFormat,
 
         /// Minimum severity to report (critical, high, medium, low, info)
         #[arg(long, default_value = "low")]
@@ -1730,6 +1932,509 @@ enum SecurityCommands {
         /// Minimum confidence level (high, medium, low)
         #[arg(long, default_value = "low")]
         min_confidence: String,
+    },
+
+    /// Scan for log injection vulnerabilities
+    #[command(
+        name = "log-injection",
+        about = "Scan for log injection vulnerabilities",
+        long_about = "Detect log injection vulnerabilities in source code.\n\n\
+            Log injection allows attackers to:\n\
+            - Forge log entries via newline injection\n\
+            - Perform CRLF injection in HTTP logs\n\
+            - Exploit log viewers with ANSI terminal escapes\n\
+            - Trigger format string attacks (Log4j-style ${jndi:...})\n\
+            - Inject HTML/XSS in web-based log viewers\n\n\
+            Detects dangerous patterns:\n\
+            - Python: logger.info(f'User: {user_input}')\n\
+            - TypeScript: console.log(`User: ${userInput}`)\n\
+            - Go: log.Printf('User: %s', userInput)\n\
+            - Rust: info!('User: {}', user_input)\n\
+            - Java: log.info('User: ' + userInput) (Log4j risk)\n\
+            - C/C++: printf(user_input) (format string risk)\n\n\
+            Safe patterns NOT flagged:\n\
+            - Structured logging: logger.info('event', extra={'user': user})\n\
+            - Sanitized: logger.info(sanitize(user_input))\n\
+            - Input.replace('\\n', '\\\\n') (newline escaped)\n\n\
+            CWE References:\n\
+            - CWE-117: Log Injection\n\
+            - CWE-134: Format String Vulnerability\n\
+            - CWE-93: CRLF Injection\n\n\
+            Supports: Python, TypeScript/JavaScript, Go, Rust, Java, C/C++"
+    )]
+    LogInjection {
+        /// Path to file or directory to scan
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Language filter (python, typescript, javascript, go, rust, java, c, cpp)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Minimum severity to report (critical, high, medium, low, info)
+        #[arg(long, default_value = "low")]
+        min_severity: String,
+
+        /// Minimum confidence level (high, medium, low)
+        #[arg(long, default_value = "low")]
+        min_confidence: String,
+    },
+
+    /// Scan for HTTP header injection vulnerabilities
+    #[command(
+        name = "header-injection",
+        about = "Scan for HTTP header injection vulnerabilities",
+        long_about = "Detect HTTP header injection vulnerabilities.\n\n\
+            Attacks: CRLF injection, open redirect, session fixation,\n\
+            cache poisoning, X-Forwarded-* bypass.\n\n\
+            Critical headers: Location, Set-Cookie, Content-Type,\n\
+            Content-Disposition, X-Forwarded-*\n\n\
+            CWE: 113 (Response Splitting), 601 (Redirect), 384 (Session Fix)"
+    )]
+    HeaderInjection {
+        /// Path to file or directory to scan
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Language filter
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Minimum severity to report
+        #[arg(long, default_value = "low")]
+        min_severity: String,
+
+        /// Minimum confidence level
+        #[arg(long, default_value = "low")]
+        min_confidence: String,
+    },
+
+    /// Scan for Server-Side Template Injection (SSTI) vulnerabilities
+    #[command(
+        name = "template-injection",
+        about = "Scan for template injection (SSTI) vulnerabilities",
+        long_about = "Detect Server-Side Template Injection vulnerabilities in source code.\n\n\
+            SSTI occurs when user input is embedded into template strings that are\n\
+            processed by a server-side template engine, potentially leading to RCE.\n\n\
+            Detects dangerous patterns:\n\n\
+            Python:\n\
+            - render_template_string(user_input) - Flask SSTI\n\
+            - Template(user_input).render() - Jinja2 direct\n\
+            - jinja2.from_string(user_input)\n\
+            - mako.template.Template(user_input) - Mako RCE\n\
+            - tornado.template.Template(user_input)\n\n\
+            JavaScript/TypeScript:\n\
+            - ejs.render(user_input) - EJS SSTI\n\
+            - Handlebars.compile(user_input)\n\
+            - pug.render(user_input) - Pug/Jade\n\
+            - nunjucks.renderString(user_input)\n\
+            - new Function('return `' + input + '`')\n\n\
+            Ruby:\n\
+            - ERB.new(user_input).result - Full Ruby execution\n\
+            - Liquid::Template.parse(user_input)\n\n\
+            Unsafe filter detection:\n\
+            - {{ var|safe }} - Disables escaping\n\
+            - {% autoescape false %}\n\
+            - mark_safe(user_input) - Django\n\n\
+            Safe patterns NOT flagged:\n\
+            - render_template('page.html', name=name) - Variables passed safely\n\
+            - SandboxedEnvironment().from_string(template) - Jinja2 sandbox\n\n\
+            CWE Reference: CWE-1336 (Template Injection)\n\n\
+            Supports: Python, TypeScript/JavaScript, Ruby"
+    )]
+    TemplateInjection {
+        /// Path to file or directory to scan
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Language filter (python, typescript, javascript, ruby)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Minimum severity to report (critical, high, medium, low, info)
+        #[arg(long, default_value = "low")]
+        min_severity: String,
+
+        /// Minimum confidence level (high, medium, low)
+        #[arg(long, default_value = "low")]
+        min_confidence: String,
+    },
+
+    /// Scan for Server-Side Request Forgery (SSRF) vulnerabilities
+    #[command(
+        name = "ssrf",
+        about = "Scan for SSRF vulnerabilities",
+        long_about = "Detect Server-Side Request Forgery (SSRF) vulnerabilities in source code.\n\n\
+            SSRF allows attackers to induce the server to make requests to unintended\n\
+            locations, potentially accessing internal services, cloud metadata, etc.\n\n\
+            Detects dangerous patterns:\n\
+            - Full URL control: requests.get(user_url)\n\
+            - Partial URL control: requests.get(f'http://{user_host}/api')\n\
+            - fetch(user_url) - JavaScript/TypeScript\n\
+            - axios.get(user_url) - Node.js\n\
+            - http.Get(url) - Go\n\
+            - reqwest::get(url) - Rust\n\
+            - URL.openConnection() - Java\n\n\
+            Cloud metadata detection:\n\
+            - AWS/GCP/Azure: 169.254.169.254\n\
+            - Alibaba Cloud: 100.100.100.200\n\
+            - GCP: metadata.google.internal\n\
+            - Internal networks: 10.x, 172.16.x, 192.168.x\n\n\
+            URL bypass detection:\n\
+            - user@host patterns (auth bypass)\n\
+            - Localhost variants: 127.0.0.1, 0.0.0.0, ::1\n\
+            - Encoded IPs: 0x7f000001, %31%36%39\n\n\
+            Safe patterns NOT flagged:\n\
+            - URL allowlist validation\n\
+            - Scheme/host validation before request\n\
+            - Hardcoded safe URLs\n\n\
+            Supports: Python, TypeScript/JavaScript, Go, Rust, Java"
+    )]
+    Ssrf {
+        /// Path to file or directory to scan
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Language filter (python, typescript, javascript, go, rust, java)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Minimum severity to report (critical, high, medium, low, info)
+        #[arg(long, default_value = "low")]
+        min_severity: String,
+
+        /// Minimum confidence level (high, medium, low)
+        #[arg(long, default_value = "low")]
+        min_confidence: String,
+    },
+
+    /// Scan for missing or weak input validation
+    #[command(
+        name = "input-validation",
+        about = "Scan for missing or weak input validation",
+        long_about = "Detect missing or weak input validation before data is used in sensitive operations.\n\n\
+            Tracks validation patterns:\n\
+            - Type check: isinstance(x, str), typeof x === 'string'\n\
+            - Length check: len(x) > 100, x.length <= max\n\
+            - Range check: 0 <= value <= 100\n\
+            - Format check: re.match(pattern, x), regex.test(x)\n\
+            - Allowlist check: x in ALLOWED_VALUES, allowlist.includes(x)\n\
+            - Sanitization: html.escape(x), encodeURIComponent(x)\n\
+            - Null check: if not x, if (x ?? default)\n\n\
+            Per-sink validation requirements:\n\
+            - Database queries: Need type check, length check\n\
+            - File operations: Need path validation, format check\n\
+            - System commands: Need sanitization, allowlist\n\
+            - Numeric operations: Need range check, type check\n\
+            - Serialization: Need type check\n\n\
+            The analyzer builds a validation graph that:\n\
+            - Tracks which validations apply to each variable\n\
+            - Propagates validation status through assignments\n\
+            - Checks at sink points for required validations\n\n\
+            Supports: Python, TypeScript/JavaScript"
+    )]
+    InputValidation {
+        /// Path to file or directory to scan
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Language filter (python, typescript, javascript)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Minimum severity to report (critical, high, medium, low, info)
+        #[arg(long, default_value = "low")]
+        min_severity: String,
+
+        /// Include recommended (not just required) validations
+        #[arg(long, default_value = "true")]
+        include_recommended: bool,
+
+        /// Maximum number of files to scan (0 = unlimited)
+        #[arg(long, default_value = "0")]
+        max_files: usize,
+    },
+
+    /// Scan for JavaScript Prototype Pollution vulnerabilities
+    #[command(
+        name = "prototype-pollution",
+        about = "Scan for prototype pollution vulnerabilities",
+        long_about = "Detect JavaScript Prototype Pollution vulnerabilities (CWE-1321).\n\n\
+            Prototype pollution allows attackers to modify JavaScript object prototypes,\n\
+            leading to property injection, security bypasses, or RCE via gadget chains.\n\n\
+            Dangerous patterns detected:\n\
+            - Direct: obj.__proto__.x = y, Object.prototype.x = y\n\
+            - Bracket: obj[userKey] = value (key could be '__proto__')\n\
+            - Deep merge: _.merge(target, userObj), $.extend(true, ...)\n\
+            - Recursive set: _.set(obj, userPath, value)\n\
+            - Object spread: {...userObj}\n\n\
+            Vulnerable functions:\n\
+            - lodash: merge, defaultsDeep, set, setWith\n\
+            - jQuery: $.extend(true, ...)\n\
+            - deepmerge, merge-deep, dot-prop\n\n\
+            Gadget chains (RCE potential):\n\
+            - child_process.spawn (env pollution)\n\
+            - require (mainModule pollution)\n\
+            - ejs.render (opts pollution)\n\
+            - handlebars.compile, pug.compile\n\n\
+            Safe patterns NOT flagged:\n\
+            - Object.create(null) as base\n\
+            - Map instead of object\n\
+            - hasOwnProperty check before assignment\n\
+            - Object.freeze on prototype\n\n\
+            Supports: JavaScript, TypeScript, JSX, TSX"
+    )]
+    PrototypePollution {
+        /// Path to file or directory to scan
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Language filter (javascript, typescript)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Minimum severity to report (critical, high, medium, low, info)
+        #[arg(long, default_value = "low")]
+        min_severity: String,
+
+        /// Minimum confidence level (high, medium, low)
+        #[arg(long, default_value = "low")]
+        min_confidence: String,
+    },
+}
+
+// =============================================================================
+// DATAFLOW SUBCOMMANDS
+// =============================================================================
+
+#[derive(Subcommand)]
+enum DataflowCommands {
+    /// Analyze live variables (backward data flow analysis)
+    #[command(
+        name = "live-vars",
+        about = "Analyze live variables in a function",
+        long_about = "Perform live variable analysis to find which variables are live at each program point.\n\n\
+            A variable is 'live' at a point if its value may be used before being redefined.\n\
+            This is a backward data flow analysis that flows from uses to definitions.\n\n\
+            Applications:\n\
+            - Dead store detection: x = 5; x = 10; (first assignment is dead)\n\
+            - Unused parameter detection\n\
+            - Register allocation hints (non-interfering vars can share registers)\n\
+            - Memory optimization (can free when not live)\n\n\
+            Data Flow Equations:\n\
+            - USE[B] = variables used in B before any definition\n\
+            - DEF[B] = variables defined in B\n\
+            - IN[B]  = USE[B] UNION (OUT[B] - DEF[B])\n\
+            - OUT[B] = UNION(IN[S]) for all successors S"
+    )]
+    LiveVars {
+        /// Source file to analyze
+        file: PathBuf,
+
+        /// Function name to analyze
+        function: String,
+
+        /// Language (auto-detected from extension if not specified)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Output format (json, text)
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Show interference graph (variables that are live at the same time)
+        #[arg(long)]
+        interference: bool,
+
+        /// Only show dead stores (suppress other output)
+        #[arg(long)]
+        dead_stores_only: bool,
+    },
+
+    /// Analyze reaching definitions (forward data flow analysis)
+    #[command(
+        name = "reaching-defs",
+        about = "Analyze reaching definitions in a function",
+        long_about = "Perform reaching definitions analysis to find which definitions reach each use.\n\n\
+            A definition 'reaches' a program point if there is a path from the definition\n\
+            to that point without any redefinition of the variable.\n\n\
+            Applications:\n\
+            - Uninitialized variable detection\n\
+            - Def-use chain construction\n\
+            - Copy propagation analysis\n\
+            - Dead code detection"
+    )]
+    ReachingDefs {
+        /// Source file to analyze
+        file: PathBuf,
+
+        /// Function name to analyze
+        function: String,
+
+        /// Language (auto-detected from extension if not specified)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Output format (json, text)
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Show def-use chains
+        #[arg(long)]
+        chains: bool,
+    },
+
+    /// Constant propagation analysis (forward data flow analysis)
+    #[command(
+        name = "constants",
+        about = "Analyze constant propagation in a function",
+        long_about = "Perform constant propagation analysis to find which variables have known constant values.\n\n\
+            Constant propagation tracks variables that hold constant values throughout execution.\n\
+            This is a forward data flow analysis that flows from definitions to uses.\n\n\
+            Lattice structure (per variable):\n\
+            - Bottom: undefined/unreachable\n\
+            - Constant(v): known constant value v\n\
+            - Top: unknown/not constant\n\n\
+            Applications:\n\
+            - Constant folding: x = 2 + 3 becomes x = 5\n\
+            - Dead branch elimination: if (true) always takes one branch\n\
+            - Optimization hints for the compiler"
+    )]
+    Constants {
+        /// Source file to analyze
+        file: PathBuf,
+
+        /// Function name to analyze
+        function: String,
+
+        /// Language (auto-detected from extension if not specified)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Output format (json, text)
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Only show folding opportunities and dead branches
+        #[arg(long)]
+        optimizations_only: bool,
+    },
+
+    /// Very busy expressions analysis (backward data flow with intersection)
+    #[command(
+        name = "very-busy",
+        about = "Analyze very busy (anticipable) expressions in a function",
+        long_about = "Perform very busy expressions analysis to find expressions that will definitely\n\
+            be computed on ALL paths from a program point before any operand is redefined.\n\n\
+            This is a backward data flow analysis with INTERSECTION at join points,\n\
+            making it stricter than live variable analysis.\n\n\
+            Key difference from live variables:\n\
+            - Live Variables: UNION at joins (may be used on some path)\n\
+            - Very Busy: INTERSECTION at joins (must be used on all paths)\n\n\
+            Data Flow Equations:\n\
+            - USE[B] = expressions computed in B before any operand is redefined\n\
+            - KILL[B] = expressions containing variables defined in B\n\
+            - OUT[B] = INTERSECTION(IN[S]) for all successors S\n\
+            - IN[B] = USE[B] UNION (OUT[B] - KILL[B])\n\n\
+            Applications:\n\
+            - Code hoisting: move common expressions before conditionals\n\
+            - Partial redundancy elimination (PRE)\n\
+            - Speculative computation optimization\n\n\
+            Example:\n\
+            if cond:           # a + b is very busy here\n\
+                x = a + b      # Can hoist to: t = a + b\n\
+            else:              # before the if statement\n\
+                y = a + b"
+    )]
+    VeryBusy {
+        /// Source file to analyze
+        file: PathBuf,
+
+        /// Function name to analyze
+        function: String,
+
+        /// Language (auto-detected from extension if not specified)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Output format (json, text)
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Only show hoisting opportunities (suppress full analysis output)
+        #[arg(long)]
+        hoisting_only: bool,
+    },
+
+    /// Available expressions analysis (forward data flow with intersection)
+    #[command(
+        name = "available-exprs",
+        about = "Analyze available expressions for CSE optimization",
+        long_about = "Perform available expressions analysis to find expressions that have been\n\
+            computed on ALL paths to each program point and whose operands have not been redefined.\n\n\
+            This is a FORWARD data flow analysis with INTERSECTION at join points,\n\
+            making it a must-analysis (unlike reaching definitions which is may-analysis).\n\n\
+            Key properties:\n\
+            - Forward flow: tracks what has been computed before this point\n\
+            - Intersection at joins: expression must be available on ALL paths\n\
+            - Killed by redefinition: if any variable in expression is modified\n\n\
+            Data Flow Equations:\n\
+            - GEN[B] = expressions computed in B (not later killed)\n\
+            - KILL[B] = expressions containing variables defined in B\n\
+            - IN[B] = INTERSECTION(OUT[P]) for all predecessors P\n\
+            - OUT[B] = GEN[B] UNION (IN[B] - KILL[B])\n\n\
+            Applications:\n\
+            - Common Subexpression Elimination (CSE): reuse previously computed values\n\
+            - Loop-invariant code motion: identify expressions that can be hoisted\n\
+            - Redundant computation detection: find unnecessary recalculations\n\n\
+            Example:\n\
+            x = a + b        # Expression a+b computed\n\
+            y = a + b        # a+b is AVAILABLE - CSE opportunity!\n\
+            a = 10           # Kills a+b\n\
+            z = a + b        # a+b NOT available (must recompute)"
+    )]
+    AvailableExprs {
+        /// Source file to analyze
+        file: PathBuf,
+
+        /// Function name to analyze
+        function: String,
+
+        /// Language (auto-detected from extension if not specified)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Output format (json, text)
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Only show CSE opportunities (suppress full analysis output)
+        #[arg(long)]
+        cse_only: bool,
     },
 }
 
@@ -2172,6 +2877,452 @@ enum QualityCommands {
         #[arg(long, default_value = "1048576")]
         max_file_size: u64,
     },
+
+    /// Analyze test quality metrics (assertion density, isolation, mutation score estimation)
+    #[command(
+        name = "test-quality",
+        about = "Analyze test quality metrics",
+        long_about = "Analyze test quality beyond coverage with assertion density and mutation score estimation.\n\n\
+            Metrics:\n\
+            - Assertion Density: Number of assertions per test function\n\
+            - Test Isolation: Detection of shared state and external dependencies\n\
+            - Boundary Testing: Detection of edge case coverage\n\
+            - Mutation Score Estimation: Heuristic likelihood of catching mutations\n\n\
+            Assertion Patterns by Language:\n\
+            - Python: assert, assertEqual, assertTrue, pytest.raises, mock.assert_*\n\
+            - JavaScript/TypeScript: expect().toBe(), assert.equal(), toThrow()\n\
+            - Rust: assert!, assert_eq!, assert_ne!, #[should_panic]\n\
+            - Go: t.Error, t.Errorf, t.Fatal, testify/assert\n\
+            - Java: assertEquals, assertTrue, assertThrows, verify()\n\n\
+            Quality Grades:\n\
+            - A: >= 4 assertions/test, comprehensive testing\n\
+            - B: 3 assertions/test, good coverage\n\
+            - C: 2 assertions/test, basic testing\n\
+            - D: 1 assertion/test, weak testing\n\
+            - F: 0 assertions, test does nothing\n\n\
+            Output includes:\n\
+            - Per-file and per-test metrics\n\
+            - Weak test identification with issues\n\
+            - Improvement suggestions sorted by priority"
+    )]
+    TestQuality {
+        /// Path to file or directory to scan
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Language filter (python, rust, typescript, etc.)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Use strict configuration (higher thresholds)
+        #[arg(long)]
+        strict: bool,
+
+        /// Use lenient configuration (lower thresholds)
+        #[arg(long)]
+        lenient: bool,
+
+        /// Minimum assertion density threshold (default: 2.0)
+        #[arg(long, default_value = "2.0")]
+        min_density: f64,
+
+        /// Flag tests with only one assertion
+        #[arg(long, default_value = "true")]
+        flag_single_assertion: bool,
+
+        /// Analyze mock usage
+        #[arg(long, default_value = "true")]
+        analyze_mocks: bool,
+
+        /// Check for boundary testing (edge cases)
+        #[arg(long, default_value = "true")]
+        check_boundaries: bool,
+
+        /// Estimate mutation score
+        #[arg(long, default_value = "true")]
+        estimate_mutations: bool,
+
+        /// Show weak tests only
+        #[arg(long)]
+        weak_only: bool,
+
+        /// Minimum grade to pass (A, B, C, D)
+        #[arg(long)]
+        min_grade: Option<char>,
+    },
+
+    /// Analyze documentation coverage
+    #[command(
+        name = "doc-coverage",
+        about = "Analyze documentation coverage and quality",
+        long_about = "Analyze documentation coverage for code quality assessment.\n\n\
+            Documentation Types Checked:\n\
+            - Module/file level docstrings\n\
+            - Class/struct docstrings\n\
+            - Function/method docstrings\n\
+            - Parameter documentation\n\
+            - Return value documentation\n\
+            - Exception/error documentation\n\
+            - Usage examples\n\n\
+            Quality Scoring (0-5):\n\
+            - 0: No documentation\n\
+            - 1: Has docstring but minimal (just name restatement)\n\
+            - 2: Documents purpose\n\
+            - 3: Documents parameters/returns\n\
+            - 4: Has usage examples\n\
+            - 5: Comprehensive (purpose + params + examples)\n\n\
+            Language Support:\n\
+            - Python: \"\"\"docstring\"\"\" with Google/NumPy/Sphinx formats\n\
+            - TypeScript/JavaScript: /** JSDoc */ comments\n\
+            - Rust: /// line doc or /** */ block doc\n\
+            - Go: // comment before function\n\
+            - Java: /** Javadoc */ comments\n\n\
+            Output includes:\n\
+            - Coverage rate by type (module, class, function, method)\n\
+            - List of undocumented public items\n\
+            - Quality score per file\n\
+            - Documentation TODOs sorted by priority"
+    )]
+    DocCoverage {
+        /// Path to file or directory to scan
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Language filter (python, rust, typescript, etc.)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Only analyze public items
+        #[arg(long)]
+        public_only: bool,
+
+        /// Minimum quality score for an item to be considered documented (0-5)
+        #[arg(long, default_value = "2")]
+        min_quality: u8,
+
+        /// Check for parameter documentation
+        #[arg(long, default_value = "true")]
+        check_params: bool,
+
+        /// Check for return value documentation
+        #[arg(long, default_value = "true")]
+        check_returns: bool,
+
+        /// Check for exception/error documentation
+        #[arg(long, default_value = "true")]
+        check_exceptions: bool,
+
+        /// Check for examples
+        #[arg(long, default_value = "true")]
+        check_examples: bool,
+
+        /// Flag docstrings that just restate function name
+        #[arg(long, default_value = "true")]
+        flag_restatement: bool,
+
+        /// Use strict configuration (public only, min score 3)
+        #[arg(long)]
+        strict: bool,
+
+        /// Use lenient configuration (public only, min score 1, no param checks)
+        #[arg(long)]
+        lenient: bool,
+
+        /// Minimum lines for a function to require documentation
+        #[arg(long, default_value = "3")]
+        min_lines: u32,
+    },
+
+    /// Detect semantically similar code (Type-4 clones)
+    #[command(
+        name = "semantic-clones",
+        about = "Detect semantically similar code using embedding-based analysis",
+        long_about = "Detect Type-4 (semantic) code clones using embedding-based similarity.\n\n\
+            Algorithm:\n\
+            - Extracts code units (functions, methods, classes)\n\
+            - Generates embeddings using TEI server (or placeholders for testing)\n\
+            - Computes cosine similarity between all unit pairs\n\
+            - Clusters similar units and suggests refactoring\n\n\
+            Similarity Thresholds:\n\
+            - Identical (>=98%): Semantically equivalent code\n\
+            - High (>=90%): Strong deduplication candidates\n\
+            - Medium (>=80%): Review for consolidation\n\
+            - Low (>=70%): Informational only\n\n\
+            Output Formats:\n\
+            - json: Full structured output with metadata\n\
+            - text: Human-readable summary with file:line references\n\
+            - dot: Graph format for visualization\n\n\
+            Examples:\n\
+            brrr quality semantic-clones ./src --threshold 0.85\n\
+            brrr quality semantic-clones ./src --cross-file-only --format text\n\
+            brrr quality semantic-clones ./src --suggest-refactor"
+    )]
+    SemanticClones {
+        /// Path to analyze
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Minimum similarity threshold (0.0-1.0)
+        #[arg(long, default_value = "0.80")]
+        threshold: f32,
+
+        /// Minimum lines for a unit to be considered
+        #[arg(long, default_value = "5")]
+        min_lines: usize,
+
+        /// Only compare across different files
+        #[arg(long)]
+        cross_file_only: bool,
+
+        /// Include test files
+        #[arg(long)]
+        include_tests: bool,
+
+        /// Output format (json, text, dot)
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Generate refactoring suggestions
+        #[arg(long)]
+        suggest_refactor: bool,
+
+        /// Maximum results to show
+        #[arg(long, default_value = "100")]
+        max_results: usize,
+
+        /// Language filter (python, rust, typescript, etc.)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// TEI server URL for embeddings
+        #[arg(long, default_value = "http://localhost:8080")]
+        tei_url: String,
+    },
+
+    /// Find code similar to a specific location
+    #[command(
+        name = "similar-to",
+        about = "Find code similar to a specific function or location",
+        long_about = "Find code units similar to a specific location using semantic analysis.\n\n\
+            Location Formats:\n\
+            - file.py:function_name - Find function by name\n\
+            - file.py:ClassName.method_name - Find method by class.method\n\
+            - file.py:42 - Find unit containing line 42\n\n\
+            Examples:\n\
+            brrr quality similar-to src/auth.py:authenticate --k 10\n\
+            brrr quality similar-to src/models.py:User.validate ./src"
+    )]
+    SimilarTo {
+        /// Location (file:function_name or file:line)
+        location: String,
+
+        /// Number of similar results
+        #[arg(long, short, default_value = "10")]
+        k: usize,
+
+        /// Path to search in
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Minimum similarity threshold (0.0-1.0)
+        #[arg(long, default_value = "0.70")]
+        threshold: f32,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Language filter
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// TEI server URL for embeddings
+        #[arg(long, default_value = "http://localhost:8080")]
+        tei_url: String,
+    },
+}
+
+// =============================================================================
+// ANALYZE SUBCOMMANDS
+// =============================================================================
+
+#[derive(Subcommand)]
+enum AnalyzeCommands {
+    /// Track resource lifecycle (acquire/release) to detect leaks
+    #[command(
+        name = "resource-flow",
+        about = "Analyze resource lifecycle to detect leaks and bugs",
+        long_about = "Track resource lifecycle (acquire/release) to detect:\n\n\
+            - Resource leaks (acquired but never released)\n\
+            - Double-free/double-close bugs\n\
+            - Use-after-release bugs\n\n\
+            Supported Resource Types:\n\
+            - File handles (open, File::open, os.Open)\n\
+            - Database connections (connect, Connection)\n\
+            - Network sockets\n\
+            - Locks/Mutexes (lock.acquire, Mutex::lock)\n\
+            - Memory allocations (malloc, new)\n\n\
+            Safe Patterns Detected:\n\
+            - Python: with statement (context managers)\n\
+            - Rust: RAII, Drop trait automatic release\n\
+            - Go: defer statement\n\
+            - Java: try-with-resources\n\
+            - C++: smart pointers (unique_ptr, shared_ptr)\n\n\
+            The analysis is path-sensitive, tracking resource state along\n\
+            control flow paths to detect leaks on exception paths."
+    )]
+    ResourceFlow {
+        /// Source file to analyze
+        file: PathBuf,
+
+        /// Function name to analyze
+        function: String,
+
+        /// Language (auto-detected from extension if not specified)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Output format (json, text)
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Only show issues (suppress safe patterns and stats)
+        #[arg(long)]
+        issues_only: bool,
+
+        /// Minimum severity to report (critical, high, medium, low)
+        #[arg(long, default_value = "low")]
+        min_severity: String,
+    },
+
+    /// Infer invariants (preconditions, postconditions, loop invariants)
+    #[command(
+        name = "invariants",
+        about = "Infer invariants from code (preconditions, postconditions, loop invariants)",
+        long_about = "Infer program invariants from source code:\n\n\
+            Preconditions (must hold before function execution):\n\
+            - Explicit assertions (assert x > 0)\n\
+            - Guard clauses (if x is None: raise)\n\
+            - Type checks (if not isinstance(x, int): raise)\n\
+            - Range checks (if x < 0: raise)\n\n\
+            Postconditions (must hold after function execution):\n\
+            - Return value assertions\n\
+            - Final assertions before return\n\
+            - Return type constraints\n\n\
+            Loop Invariants (hold at each iteration):\n\
+            - Variables not modified in loop body\n\
+            - Bounds on loop variables\n\
+            - Monotonicity (always increasing/decreasing)\n\n\
+            Each invariant has a confidence score (0.0-1.0):\n\
+            - 1.0: Explicit assertion\n\
+            - 0.9: Guard clause with raise/throw\n\
+            - 0.8: Type check\n\
+            - 0.7: Comparison check\n\
+            - 0.5-0.6: Inferred from patterns"
+    )]
+    Invariants {
+        /// Source file to analyze
+        file: PathBuf,
+
+        /// Function name to analyze (analyzes all if not specified)
+        #[arg(long)]
+        function: Option<String>,
+
+        /// Language (auto-detected from extension if not specified)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Output format (json, text)
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Only show preconditions
+        #[arg(long)]
+        preconditions_only: bool,
+
+        /// Only show postconditions
+        #[arg(long)]
+        postconditions_only: bool,
+
+        /// Only show loop invariants
+        #[arg(long)]
+        loop_invariants_only: bool,
+
+        /// Include suggested assertions
+        #[arg(long, default_value = "true")]
+        suggestions: bool,
+
+        /// Minimum confidence level for inferred invariants (0.0-1.0)
+        #[arg(long, default_value = "0.5")]
+        min_confidence: f64,
+    },
+
+    /// Extract implicit state machines from code
+    #[command(
+        name = "state-machine",
+        about = "Extract implicit state machines from code",
+        long_about = "Extract implicit finite state machines from code that manages state\n\
+            through variables, enums, or string comparisons.\n\n\
+            Detects patterns like:\n\
+            - Variables named `state`, `status`, `phase`, `mode`\n\
+            - String/enum comparisons in conditions\n\
+            - Variable set to string literals/enum values\n\
+            - Transitions guarded by current state\n\n\
+            Example:\n\
+            ```python\n\
+            class Connection:\n\
+                def __init__(self):\n\
+                    self.state = \"disconnected\"\n\n\
+                def connect(self):\n\
+                    if self.state == \"disconnected\":\n\
+                        self.state = \"connecting\"\n\
+                        # ... do connection\n\
+                        self.state = \"connected\"\n\
+            ```\n\n\
+            This extracts a state machine:\n\
+            disconnected -> connecting -> connected\n\n\
+            Output formats:\n\
+            - json: Structured data for tooling integration\n\
+            - text: Human-readable summary\n\
+            - mermaid: Mermaid diagram for documentation\n\
+            - dot: Graphviz DOT format for high-quality visualization"
+    )]
+    StateMachine {
+        /// Source file to analyze
+        file: PathBuf,
+
+        /// Function or class name to analyze (analyzes all if not specified)
+        #[arg(long)]
+        scope: Option<String>,
+
+        /// Language (auto-detected from extension if not specified)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Output format (json, text, mermaid, dot)
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+
+        /// Variable name pattern to track (default: state, status, phase, mode)
+        #[arg(long)]
+        var_pattern: Option<String>,
+
+        /// Minimum confidence for state detection (0.0-1.0)
+        #[arg(long, default_value = "0.5")]
+        min_confidence: f64,
+
+        /// Include validation issues in output
+        #[arg(long)]
+        validate: bool,
+    },
 }
 
 // =============================================================================
@@ -2194,7 +3345,7 @@ enum SemanticCommands {
         #[arg(long, value_enum, default_value = "all")]
         lang: WarmLanguage,
 
-        /// Embedding model: bge-large-en-v1.5 (1.3GB, default) or all-MiniLM-L6-v2 (80MB)
+        /// Embedding model: Qwen/Qwen3-Embedding-0.6B (default) or all-MiniLM-L6-v2 (80MB)
         #[arg(long)]
         model: Option<String>,
 
@@ -2366,6 +3517,24 @@ enum DaemonCommands {
 }
 
 // =============================================================================
+// JSON FORMATTING HELPER
+// =============================================================================
+
+use serde::Serialize;
+
+/// Format a value as JSON, optionally compact.
+///
+/// By default, outputs pretty-printed JSON for human readability.
+/// When `compact` is true, outputs minified JSON for token efficiency.
+fn format_json<T: Serialize>(value: &T, compact: bool) -> Result<String> {
+    if compact {
+        serde_json::to_string(value).context("Failed to serialize JSON")
+    } else {
+        serde_json::to_string_pretty(value).context("Failed to serialize JSON")
+    }
+}
+
+// =============================================================================
 // MAIN ENTRY POINT
 // =============================================================================
 
@@ -2426,7 +3595,14 @@ async fn main() -> Result<()> {
             filter_function,
             filter_method,
         } => {
-            cmd_extract(&file, base_path.as_ref(), filter_class, filter_function, filter_method)?;
+            cmd_extract(
+                &file,
+                base_path.as_ref(),
+                filter_class,
+                filter_function,
+                filter_method,
+                cli.compact,
+            )?;
         }
 
         Commands::Context {
@@ -2435,7 +3611,7 @@ async fn main() -> Result<()> {
             depth,
             lang,
         } => {
-            cmd_context(&entry, &project, depth, lang)?;
+            cmd_context(&entry, &project, depth, lang, cli.compact)?;
         }
 
         Commands::Cfg {
@@ -2444,7 +3620,7 @@ async fn main() -> Result<()> {
             lang,
             format,
         } => {
-            cmd_cfg(&file, &function, lang, format)?;
+            cmd_cfg(&file, &function, lang, format, cli.compact)?;
         }
 
         Commands::Dfg {
@@ -2452,7 +3628,7 @@ async fn main() -> Result<()> {
             function,
             lang,
         } => {
-            cmd_dfg(&file, &function, lang)?;
+            cmd_dfg(&file, &function, lang, cli.compact)?;
         }
 
         Commands::Slice {
@@ -2467,7 +3643,11 @@ async fn main() -> Result<()> {
             cmd_slice(&file, &function, line, direction, var, lang, extended)?;
         }
 
-        Commands::Calls { path, lang, extended } => {
+        Commands::Calls {
+            path,
+            lang,
+            extended,
+        } => {
             cmd_calls(&path, lang, extended, cli.no_ignore)?;
         }
 
@@ -2554,7 +3734,13 @@ async fn main() -> Result<()> {
             cmd_security(subcmd)?;
         }
 
-        Commands::Metrics { path, lang, format, fail_on, cmd } => {
+        Commands::Metrics {
+            path,
+            lang,
+            format,
+            fail_on,
+            cmd,
+        } => {
             match cmd {
                 Some(subcmd) => {
                     // Run specific metrics subcommand
@@ -2570,14 +3756,14 @@ async fn main() -> Result<()> {
                         &path,
                         lang,
                         format,
-                        "default", // threshold_preset
-                        None,      // sort_by
-                        false,     // issues_only
-                        false,     // skip_coupling
-                        fail_on.as_deref(),   // fail_on
-                        0,         // max_files (unlimited)
-                        50,        // top
-                        false,     // show_tokens
+                        "default",          // threshold_preset
+                        None,               // sort_by
+                        false,              // issues_only
+                        false,              // skip_coupling
+                        fail_on.as_deref(), // fail_on
+                        0,                  // max_files (unlimited)
+                        50,                 // top
+                        false,              // show_tokens
                     )?;
                     if exit_code != 0 {
                         std::process::exit(exit_code);
@@ -2588,6 +3774,222 @@ async fn main() -> Result<()> {
 
         Commands::Quality(subcmd) => {
             cmd_quality(subcmd)?;
+        }
+
+        Commands::Dataflow(subcmd) => {
+            cmd_dataflow(subcmd)?;
+        }
+
+        Commands::Coverage(subcmd) => {
+            cmd_coverage(subcmd)?;
+        }
+
+        Commands::Analyze(subcmd) => {
+            cmd_analyze(subcmd)?;
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// COVERAGE COMMAND HANDLER
+// =============================================================================
+
+fn cmd_coverage(cmd: CoverageCommands) -> Result<()> {
+    use coverage::mapping::find_uncovered_branches_with_cfg;
+
+    match cmd {
+        CoverageCommands::Map {
+            coverage_file,
+            source_file,
+            function,
+            format,
+            lang,
+            suggest_tests,
+            max_paths: _,
+        } => {
+            // Validate inputs
+            require_file(&coverage_file)?;
+            require_file(&source_file)?;
+
+            // Parse coverage data
+            let cov_format = format.map(coverage::CoverageFormat::from);
+            let cov_data = coverage::parse_coverage_file(&coverage_file, cov_format)
+                .context("Failed to parse coverage file")?;
+
+            // Extract CFG for the function
+            let lang_str = lang.map(|l| l.to_string());
+            let cfg_result = cfg::extract_with_language(
+                source_file.to_str().unwrap_or(""),
+                &function,
+                lang_str.as_deref(),
+            )
+            .context("Failed to extract CFG")?;
+
+            // Map coverage to CFG
+            let cfg_coverage = coverage::map_coverage_to_cfg(&cov_data, &cfg_result, &source_file)
+                .context("Failed to map coverage to CFG")?;
+
+            // Build output
+            let mut output = serde_json::json!({
+                "function": cfg_coverage.function_name,
+                "block_coverage": cfg_coverage.block_coverage,
+                "edge_coverage": cfg_coverage.edge_coverage,
+                "path_coverage": cfg_coverage.path_coverage,
+                "covered_blocks": cfg_coverage.covered_blocks.len(),
+                "uncovered_blocks": cfg_coverage.uncovered_blocks.len(),
+                "covered_edges": cfg_coverage.covered_edges.len(),
+                "uncovered_edges": cfg_coverage.uncovered_edges.len(),
+                "total_paths": cfg_coverage.total_paths,
+                "covered_paths": cfg_coverage.covered_paths,
+            });
+
+            // Add uncovered branches
+            let uncovered = find_uncovered_branches_with_cfg(&cfg_coverage, &cfg_result);
+            output["uncovered_branches"] = serde_json::to_value(&uncovered)?;
+
+            // Add test suggestions if requested
+            if suggest_tests {
+                let suggestions = coverage::generate_test_suggestions(&cfg_coverage, &cfg_result);
+                output["test_suggestions"] = serde_json::to_value(&suggestions)?;
+            }
+
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+
+        CoverageCommands::Parse {
+            coverage_file,
+            format,
+            details,
+        } => {
+            require_file(&coverage_file)?;
+
+            let cov_format = format.map(coverage::CoverageFormat::from);
+            let cov_data = coverage::parse_coverage_file(&coverage_file, cov_format)
+                .context("Failed to parse coverage file")?;
+
+            let summary = &cov_data.summary;
+
+            let mut output = serde_json::json!({
+                "format": cov_data.source_format.map(|f| f.to_string()),
+                "files_count": cov_data.files.len(),
+                "summary": {
+                    "line_rate": format!("{:.1}%", summary.line_rate * 100.0),
+                    "branch_rate": format!("{:.1}%", summary.branch_rate * 100.0),
+                    "function_rate": format!("{:.1}%", summary.function_rate * 100.0),
+                    "lines_covered": summary.lines_covered,
+                    "lines_total": summary.lines_total,
+                    "branches_covered": summary.branches_covered,
+                    "branches_total": summary.branches_total,
+                    "functions_covered": summary.functions_covered,
+                    "functions_total": summary.functions_total,
+                }
+            });
+
+            if details {
+                let mut files_detail = Vec::new();
+                for (path, file_cov) in &cov_data.files {
+                    files_detail.push(serde_json::json!({
+                        "path": path.to_string_lossy(),
+                        "line_rate": format!("{:.1}%", file_cov.line_rate() * 100.0),
+                        "branch_rate": format!("{:.1}%", file_cov.branch_rate() * 100.0),
+                        "lines_covered": file_cov.lines_covered.len(),
+                        "lines_not_covered": file_cov.lines_not_covered.len(),
+                        "branches": file_cov.branches.len(),
+                        "functions": file_cov.functions.len(),
+                    }));
+                }
+                output["files"] = serde_json::to_value(files_detail)?;
+            }
+
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+
+        CoverageCommands::Uncovered {
+            coverage_file,
+            source_file,
+            function,
+            format,
+            lang,
+            min_priority,
+        } => {
+            require_file(&coverage_file)?;
+            require_file(&source_file)?;
+
+            // Parse coverage
+            let cov_format = format.map(coverage::CoverageFormat::from);
+            let cov_data = coverage::parse_coverage_file(&coverage_file, cov_format)
+                .context("Failed to parse coverage file")?;
+
+            // Extract CFG
+            let lang_str = lang.map(|l| l.to_string());
+            let cfg_result = cfg::extract_with_language(
+                source_file.to_str().unwrap_or(""),
+                &function,
+                lang_str.as_deref(),
+            )
+            .context("Failed to extract CFG")?;
+
+            // Map coverage
+            let cfg_coverage = coverage::map_coverage_to_cfg(&cov_data, &cfg_result, &source_file)
+                .context("Failed to map coverage to CFG")?;
+
+            // Find uncovered branches
+            let uncovered: Vec<_> = find_uncovered_branches_with_cfg(&cfg_coverage, &cfg_result)
+                .into_iter()
+                .filter(|b| b.priority >= min_priority)
+                .collect();
+
+            let output = serde_json::json!({
+                "function": function,
+                "uncovered_count": uncovered.len(),
+                "branches": uncovered,
+            });
+
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+
+        CoverageCommands::Suggest {
+            coverage_file,
+            source_file,
+            function,
+            format,
+            lang,
+            max,
+        } => {
+            require_file(&coverage_file)?;
+            require_file(&source_file)?;
+
+            // Parse coverage
+            let cov_format = format.map(coverage::CoverageFormat::from);
+            let cov_data = coverage::parse_coverage_file(&coverage_file, cov_format)
+                .context("Failed to parse coverage file")?;
+
+            // Extract CFG
+            let lang_str = lang.map(|l| l.to_string());
+            let cfg_result = cfg::extract_with_language(
+                source_file.to_str().unwrap_or(""),
+                &function,
+                lang_str.as_deref(),
+            )
+            .context("Failed to extract CFG")?;
+
+            // Map coverage
+            let cfg_coverage = coverage::map_coverage_to_cfg(&cov_data, &cfg_result, &source_file)
+                .context("Failed to map coverage to CFG")?;
+
+            // Generate suggestions
+            let mut suggestions = coverage::generate_test_suggestions(&cfg_coverage, &cfg_result);
+            suggestions.truncate(max);
+
+            let output = serde_json::json!({
+                "function": function,
+                "suggestion_count": suggestions.len(),
+                "suggestions": suggestions,
+            });
+
+            println!("{}", serde_json::to_string_pretty(&output)?);
         }
     }
 
@@ -2628,12 +4030,24 @@ fn resolve_project_root(path: &Path) -> PathBuf {
 // COMMAND IMPLEMENTATIONS
 // =============================================================================
 
-fn cmd_tree(path: &PathBuf, ext: &[String], show_hidden: bool, no_ignore: bool, max_depth: Option<usize>) -> Result<()> {
+fn cmd_tree(
+    path: &PathBuf,
+    ext: &[String],
+    show_hidden: bool,
+    no_ignore: bool,
+    max_depth: Option<usize>,
+) -> Result<()> {
     // Validate path exists and is a directory
     require_directory(path)?;
 
-    let result = ast::file_tree(path.to_str().context("Invalid path")?, ext, show_hidden, no_ignore, max_depth)
-        .context("Failed to build file tree")?;
+    let result = ast::file_tree(
+        path.to_str().context("Invalid path")?,
+        ext,
+        show_hidden,
+        no_ignore,
+        max_depth,
+    )
+    .context("Failed to build file tree")?;
 
     println!(
         "{}",
@@ -2717,7 +4131,11 @@ fn cmd_search(
     let mut total_matches: usize = 0;
 
     // Effective max_results: 0 means unlimited
-    let effective_max_results = if max_results == 0 { usize::MAX } else { max_results };
+    let effective_max_results = if max_results == 0 {
+        usize::MAX
+    } else {
+        max_results
+    };
 
     for entry in walker_builder.build() {
         // Check file limit
@@ -2846,6 +4264,7 @@ fn cmd_extract(
     filter_class: Option<String>,
     filter_function: Option<String>,
     filter_method: Option<String>,
+    compact: bool,
 ) -> Result<()> {
     // Validate file exists and is a regular file
     require_file(file)?;
@@ -2853,8 +4272,8 @@ fn cmd_extract(
     let file_path = file.to_str().context("Invalid file path")?;
     let base_path_str = base_path.and_then(|p| p.to_str());
 
-    let mut module = ast::extract_file(file_path, base_path_str)
-        .context("Failed to extract file info")?;
+    let mut module =
+        ast::extract_file(file_path, base_path_str).context("Failed to extract file info")?;
 
     // Apply filters if specified
     if let Some(class_name) = &filter_class {
@@ -2880,10 +4299,7 @@ fn cmd_extract(
         module.classes.clear();
     }
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&module).context("Failed to serialize output")?
-    );
+    println!("{}", format_json(&module, compact)?);
     Ok(())
 }
 
@@ -2892,6 +4308,7 @@ fn cmd_context(
     project: &PathBuf,
     depth: usize,
     lang: Option<Language>,
+    compact: bool,
 ) -> Result<()> {
     // Resolve project root (walks up to find .git, Cargo.toml, etc.)
     let project_root = resolve_project_root(project);
@@ -2912,10 +4329,7 @@ fn cmd_context(
         println!("{}", text);
     } else {
         // Fallback to JSON if no LLM context available
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&result).context("Failed to serialize output")?
-        );
+        println!("{}", format_json(&result, compact)?);
     }
     Ok(())
 }
@@ -2925,6 +4339,7 @@ fn cmd_cfg(
     function: &str,
     lang: Option<Language>,
     format: OutputFormat,
+    compact: bool,
 ) -> Result<()> {
     // Validate file exists and is a regular file
     require_file(file)?;
@@ -2940,11 +4355,8 @@ fn cmd_cfg(
     .context("Failed to extract CFG")?;
 
     match format {
-        OutputFormat::Json => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&cfg_result).context("Failed to serialize output")?
-            );
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            println!("{}", format_json(&cfg_result, compact)?);
         }
         OutputFormat::Mermaid => {
             let mermaid = cfg::render::to_mermaid(&cfg_result);
@@ -2973,16 +4385,13 @@ fn cmd_cfg(
         }
         OutputFormat::Csv => {
             // CSV not supported for CFG - fall back to JSON
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&cfg_result).context("Failed to serialize output")?
-            );
+            println!("{}", format_json(&cfg_result, compact)?);
         }
     }
     Ok(())
 }
 
-fn cmd_dfg(file: &PathBuf, function: &str, lang: Option<Language>) -> Result<()> {
+fn cmd_dfg(file: &PathBuf, function: &str, lang: Option<Language>, compact: bool) -> Result<()> {
     // Validate file exists and is a regular file
     require_file(file)?;
 
@@ -2996,10 +4405,7 @@ fn cmd_dfg(file: &PathBuf, function: &str, lang: Option<Language>) -> Result<()>
     )
     .context("Failed to extract DFG")?;
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&result).context("Failed to serialize output")?
-    );
+    println!("{}", format_json(&result, compact)?);
     Ok(())
 }
 
@@ -3085,7 +4491,12 @@ fn cmd_slice(
     Ok(())
 }
 
-fn cmd_calls(path: &PathBuf, lang: Option<Language>, extended: bool, no_ignore: bool) -> Result<()> {
+fn cmd_calls(
+    path: &PathBuf,
+    lang: Option<Language>,
+    extended: bool,
+    no_ignore: bool,
+) -> Result<()> {
     // Validate path exists and is a directory
     require_directory(path)?;
 
@@ -3098,29 +4509,30 @@ fn cmd_calls(path: &PathBuf, lang: Option<Language>, extended: bool, no_ignore: 
         .unwrap_or_else(|| detect_project_language(&project_root));
 
     // Use cached graph with incremental updates, respecting no_ignore flag
-    let graph = callgraph::get_or_build_graph_with_config(
-        &project_root,
-        Some(&detected_lang),
-        no_ignore,
-    )
-    .context("Failed to build call graph")?;
+    let graph =
+        callgraph::get_or_build_graph_with_config(&project_root, Some(&detected_lang), no_ignore)
+            .context("Failed to build call graph")?;
 
     // Build edges with optional extended fields for Python compatibility
-    let edges: Vec<serde_json::Value> = graph.edges.iter().map(|e| {
-        let mut edge = serde_json::json!({
-            "from_file": e.caller.file,
-            "from_func": e.caller.name,
-            "to_file": e.callee.file,
-            "to_func": e.callee.name,
-        });
+    let edges: Vec<serde_json::Value> = graph
+        .edges
+        .iter()
+        .map(|e| {
+            let mut edge = serde_json::json!({
+                "from_file": e.caller.file,
+                "from_func": e.caller.name,
+                "to_file": e.callee.file,
+                "to_func": e.callee.name,
+            });
 
-        // Only include call_line when extended flag is set
-        if extended {
-            edge["call_line"] = serde_json::json!(e.call_line);
-        }
+            // Only include call_line when extended flag is set
+            if extended {
+                edge["call_line"] = serde_json::json!(e.call_line);
+            }
 
-        edge
-    }).collect();
+            edge
+        })
+        .collect();
 
     let result = serde_json::json!({
         "edges": edges,
@@ -3154,12 +4566,9 @@ fn cmd_impact(
         .unwrap_or_else(|| detect_project_language(&project_root));
 
     // Build graph with no_ignore support
-    let graph = callgraph::get_or_build_graph_with_config(
-        &project_root,
-        Some(&detected_lang),
-        no_ignore,
-    )
-    .context("Failed to build call graph")?;
+    let graph =
+        callgraph::get_or_build_graph_with_config(&project_root, Some(&detected_lang), no_ignore)
+            .context("Failed to build call graph")?;
 
     // Analyze impact using the graph
     let config = callgraph::ImpactConfig::new().with_depth(depth);
@@ -3223,12 +4632,9 @@ fn cmd_dead(
         .unwrap_or_else(|| detect_project_language(&project_root));
 
     // Build graph with no_ignore support
-    let mut graph = callgraph::get_or_build_graph_with_config(
-        &project_root,
-        Some(&detected_lang),
-        no_ignore,
-    )
-    .context("Failed to build call graph")?;
+    let mut graph =
+        callgraph::get_or_build_graph_with_config(&project_root, Some(&detected_lang), no_ignore)
+            .context("Failed to build call graph")?;
     graph.build_indexes();
 
     // Build configuration with user-provided entry points and language
@@ -3292,12 +4698,9 @@ fn cmd_arch(path: &PathBuf, lang: Option<Language>, no_ignore: bool) -> Result<(
         .unwrap_or_else(|| detect_project_language(&project_root));
 
     // Build graph with no_ignore support
-    let mut graph = callgraph::get_or_build_graph_with_config(
-        &project_root,
-        Some(&detected_lang),
-        no_ignore,
-    )
-    .context("Failed to build call graph")?;
+    let mut graph =
+        callgraph::get_or_build_graph_with_config(&project_root, Some(&detected_lang), no_ignore)
+            .context("Failed to build call graph")?;
     graph.build_indexes();
 
     // Analyze architecture using the modular arch module
@@ -3344,21 +4747,17 @@ fn cmd_imports(file: &PathBuf, lang: Option<Language>) -> Result<()> {
     let lang_handler = match lang {
         Some(lang_enum) => {
             let lang_name = lang_enum.to_string().to_lowercase();
-            registry.get_by_name(&lang_name).ok_or_else(|| {
-                anyhow::anyhow!("Unsupported language: {}", lang_name)
-            })?
+            registry
+                .get_by_name(&lang_name)
+                .ok_or_else(|| anyhow::anyhow!("Unsupported language: {}", lang_name))?
         }
-        None => registry.detect_language(path).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Could not detect language for: {}",
-                file.display()
-            )
-        })?,
+        None => registry
+            .detect_language(path)
+            .ok_or_else(|| anyhow::anyhow!("Could not detect language for: {}", file.display()))?,
     };
 
     // Use the existing extract_imports function from ast module
-    let imports = ast::extract_imports(path)
-        .context("Failed to extract imports")?;
+    let imports = ast::extract_imports(path).context("Failed to extract imports")?;
 
     // Convert imports to JSON output format matching Python CLI
     let imports_json: Vec<serde_json::Value> = imports
@@ -3756,10 +5155,7 @@ fn is_test_function_name(name: &str) -> bool {
 }
 
 /// Run affected tests using the appropriate test runner.
-fn run_affected_tests(
-    affected_tests: &[serde_json::Value],
-    project: &PathBuf,
-) -> Result<()> {
+fn run_affected_tests(affected_tests: &[serde_json::Value], project: &PathBuf) -> Result<()> {
     // Group tests by file for efficient execution
     let mut test_files: std::collections::HashSet<String> = std::collections::HashSet::new();
     for test in affected_tests {
@@ -3931,7 +5327,8 @@ fn cmd_change_impact(
 
             // Check each caller to see if it's a test
             for caller in &impact.callers {
-                let is_test = is_test_file_path(&caller.file) || is_test_function_name(&caller.name);
+                let is_test =
+                    is_test_file_path(&caller.file) || is_test_function_name(&caller.name);
 
                 if is_test {
                     let test_key = (caller.file.clone(), caller.name.clone());
@@ -3987,8 +5384,14 @@ fn cmd_change_impact(
     affected_tests.sort_by(|a, b| {
         let file_a = a.get("test_file").and_then(|f| f.as_str()).unwrap_or("");
         let file_b = b.get("test_file").and_then(|f| f.as_str()).unwrap_or("");
-        let name_a = a.get("test_function").and_then(|f| f.as_str()).unwrap_or("");
-        let name_b = b.get("test_function").and_then(|f| f.as_str()).unwrap_or("");
+        let name_a = a
+            .get("test_function")
+            .and_then(|f| f.as_str())
+            .unwrap_or("");
+        let name_b = b
+            .get("test_function")
+            .and_then(|f| f.as_str())
+            .unwrap_or("");
         (file_a, name_a).cmp(&(file_b, name_b))
     });
 
@@ -4054,7 +5457,7 @@ fn cmd_diagnostics(
 
     // Output based on format
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             let json_output = serde_json::json!({
                 "target": result.target,
                 "language": result.language,
@@ -4121,6 +5524,7 @@ async fn cmd_semantic_index(
 ) -> Result<()> {
     use go_brrr::embedding::{IndexConfig, Metric, TeiClient, TeiClientConfig, VectorIndex};
     use go_brrr::semantic::{build_embedding_text, extract_units};
+    use indicatif::{ProgressBar, ProgressStyle};
     use std::time::Instant;
 
     let start_time = Instant::now();
@@ -4131,14 +5535,27 @@ async fn cmd_semantic_index(
     let lang_str = lang.to_string();
 
     // Determine language filter
-    let language_filter = if lang_str == "all" { "python" } else { &lang_str };
+    let language_filter = if lang_str == "all" {
+        "python"
+    } else {
+        &lang_str
+    };
 
     eprintln!("Extracting semantic units from: {}", root_str);
 
     // Step 1: Extract semantic units from the codebase
     let units = if lang_str == "all" {
         // For "all" languages, extract from each supported language
-        let languages = ["python", "typescript", "javascript", "go", "rust", "java", "c", "cpp"];
+        let languages = [
+            "python",
+            "typescript",
+            "javascript",
+            "go",
+            "rust",
+            "java",
+            "c",
+            "cpp",
+        ];
         let mut all_units = Vec::new();
         for lang in &languages {
             match extract_units(&root_str, lang) {
@@ -4155,8 +5572,7 @@ async fn cmd_semantic_index(
         }
         all_units
     } else {
-        extract_units(&root_str, language_filter)
-            .context("Failed to extract semantic units")?
+        extract_units(&root_str, language_filter).context("Failed to extract semantic units")?
     };
 
     if units.is_empty() {
@@ -4183,7 +5599,8 @@ async fn cmd_semantic_index(
     eprintln!("Built embedding texts for {} units", texts.len());
 
     // Step 3: Get embeddings based on backend
-    let embeddings: Vec<Vec<f32>> = match backend {
+    // Returns (embeddings, actual_model_name) - model name from TEI server
+    let (embeddings, actual_model): (Vec<Vec<f32>>, String) = match backend {
         SemanticBackend::Tei | SemanticBackend::Auto => {
             // Try to connect to TEI server
             let tei_config = TeiClientConfig::from_env();
@@ -4204,14 +5621,15 @@ async fn cmd_semantic_index(
                                 "No embedding backend available. TEI server connection failed: {}. \
                                  Local sentence-transformers backend is not yet implemented in Rust CLI. \
                                  Please start a TEI server with: \
-                                 docker run --gpus all -p 18080:80 ghcr.io/huggingface/text-embeddings-inference:1.7 \
-                                 --model-id BAAI/bge-large-en-v1.5",
+                                 docker run --gpus all -p 18080:80 ghcr.io/huggingface/text-embeddings-inference:89-1.8-grpc \
+                                 --model-id Qwen/Qwen3-Embedding-0.6B --pooling last-token",
                                 e
                             ),
                         });
                         println!(
                             "{}",
-                            serde_json::to_string_pretty(&result).context("Failed to serialize output")?
+                            serde_json::to_string_pretty(&result)
+                                .context("Failed to serialize output")?
                         );
                         return Ok(());
                     } else {
@@ -4224,22 +5642,42 @@ async fn cmd_semantic_index(
                 }
             };
 
-            // Get server info for dimension detection
-            let server_info = client.info().await.context("Failed to get TEI server info")?;
+            // Get server info for dimension detection and actual model name
+            let server_info = client
+                .info()
+                .await
+                .context("Failed to get TEI server info")?;
+            let server_model = server_info.model_id.clone();
             eprintln!(
                 "Connected to TEI server: model={}, max_input_length={}",
-                server_info.model_id, server_info.max_input_length
+                server_model, server_info.max_input_length
             );
 
             // Embed texts in batches
             let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-            eprintln!("Generating embeddings for {} texts...", text_refs.len());
+
+            // Create spinner with elapsed time to show progress during embedding generation
+            let spinner = ProgressBar::new_spinner();
+            spinner.set_style(
+                ProgressStyle::default_spinner()
+                    .template("{spinner:.cyan} {msg} [{elapsed_precise}]")
+                    .expect("Invalid spinner template")
+                    .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
+            );
+            spinner.set_message(format!("Generating embeddings for {} texts...", text_refs.len()));
+            spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
             let mrl_dimension = dimension.map(|d| d as u32);
-            client
+            let emb = client
                 .embed_with_options(&text_refs, true, true, mrl_dimension)
                 .await
-                .context("Failed to generate embeddings")?
+                .context("Failed to generate embeddings")?;
+
+            spinner.finish_with_message(format!(
+                "Generated {} embeddings",
+                emb.len()
+            ));
+            (emb, server_model)
         }
         SemanticBackend::SentenceTransformers => {
             let result = serde_json::json!({
@@ -4305,17 +5743,16 @@ async fn cmd_semantic_index(
     // Step 5: Save metadata (units) as JSON
     let metadata = serde_json::json!({
         "version": "1.0",
-        "model": model_name,
+        "model": actual_model,
         "language": lang_str,
         "dimension": embedding_dim,
         "count": units.len(),
         "units": units,
     });
 
-    let metadata_file = std::fs::File::create(&metadata_path)
-        .context("Failed to create metadata file")?;
-    serde_json::to_writer_pretty(metadata_file, &metadata)
-        .context("Failed to write metadata")?;
+    let metadata_file =
+        std::fs::File::create(&metadata_path).context("Failed to create metadata file")?;
+    serde_json::to_writer_pretty(metadata_file, &metadata).context("Failed to write metadata")?;
 
     eprintln!("Saved metadata to: {}", metadata_path.display());
 
@@ -4326,7 +5763,7 @@ async fn cmd_semantic_index(
         "status": "complete",
         "root": root_str,
         "language": lang_str,
-        "model": model_name,
+        "model": actual_model,
         "units_indexed": units.len(),
         "dimension": embedding_dim,
         "index_path": index_path.display().to_string(),
@@ -4383,7 +5820,10 @@ async fn cmd_semantic_search(
     // This improves search relevance by signaling the embedding model's intended use case
     let query_for_embedding = if task != SearchTask::Default {
         let formatted = format!("Instruct: {}\nQuery: {}", task.as_task_string(), query);
-        eprintln!("Using task-aware query with instruction: {}", task.as_task_string());
+        eprintln!(
+            "Using task-aware query with instruction: {}",
+            task.as_task_string()
+        );
         formatted
     } else {
         query.to_string()
@@ -4821,7 +6261,9 @@ async fn cmd_semantic(subcmd: SemanticCommands, _no_ignore: bool) -> Result<()> 
 /// - Create path as `/tmp/brrr-{hash}.sock`
 fn get_daemon_socket_path(project: &Path) -> PathBuf {
     // Canonicalize the path to match Python's Path.resolve() behavior
-    let canonical = project.canonicalize().unwrap_or_else(|_| project.to_path_buf());
+    let canonical = project
+        .canonicalize()
+        .unwrap_or_else(|_| project.to_path_buf());
     let path_str = canonical.to_string_lossy();
 
     // Compute SHA256 hash (matches Python's hashlib.sha256)
@@ -4830,10 +6272,7 @@ fn get_daemon_socket_path(project: &Path) -> PathBuf {
     let result = hasher.finalize();
 
     // Take first 16 hex characters (8 bytes = 16 hex chars)
-    let hash_hex: String = result.iter()
-        .take(8)
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let hash_hex: String = result.iter().take(8).map(|b| format!("{b:02x}")).collect();
 
     PathBuf::from(format!("/tmp/brrr-{hash_hex}.sock"))
 }
@@ -4842,41 +6281,49 @@ fn get_daemon_socket_path(project: &Path) -> PathBuf {
 ///
 /// Returns Ok(response) if communication succeeded, Err if socket unreachable.
 #[cfg(unix)]
-fn send_daemon_command(socket_path: &Path, command: &serde_json::Value) -> Result<serde_json::Value> {
+fn send_daemon_command(
+    socket_path: &Path,
+    command: &serde_json::Value,
+) -> Result<serde_json::Value> {
     // Connect with a timeout
-    let mut stream = UnixStream::connect(socket_path)
-        .context("Failed to connect to daemon socket")?;
+    let mut stream =
+        UnixStream::connect(socket_path).context("Failed to connect to daemon socket")?;
 
     // Set read/write timeouts to prevent hanging
-    stream.set_read_timeout(Some(Duration::from_secs(5)))
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
         .context("Failed to set read timeout")?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
         .context("Failed to set write timeout")?;
 
     // Send command as JSON followed by newline
-    let cmd_str = serde_json::to_string(command)
-        .context("Failed to serialize command")?;
-    stream.write_all(cmd_str.as_bytes())
+    let cmd_str = serde_json::to_string(command).context("Failed to serialize command")?;
+    stream
+        .write_all(cmd_str.as_bytes())
         .context("Failed to write command to socket")?;
-    stream.write_all(b"\n")
+    stream
+        .write_all(b"\n")
         .context("Failed to write newline to socket")?;
-    stream.flush()
-        .context("Failed to flush socket")?;
+    stream.flush().context("Failed to flush socket")?;
 
     // Read response (daemon sends JSON followed by newline)
     let mut reader = BufReader::new(&stream);
     let mut response = String::new();
-    reader.read_line(&mut response)
+    reader
+        .read_line(&mut response)
         .context("Failed to read response from daemon")?;
 
     // Parse JSON response
-    serde_json::from_str(&response)
-        .context("Failed to parse daemon response as JSON")
+    serde_json::from_str(&response).context("Failed to parse daemon response as JSON")
 }
 
 /// Placeholder for non-Unix systems
 #[cfg(not(unix))]
-fn send_daemon_command(_socket_path: &Path, _command: &serde_json::Value) -> Result<serde_json::Value> {
+fn send_daemon_command(
+    _socket_path: &Path,
+    _command: &serde_json::Value,
+) -> Result<serde_json::Value> {
     anyhow::bail!("Daemon communication is only supported on Unix systems")
 }
 
@@ -4890,8 +6337,10 @@ async fn cmd_daemon(subcmd: DaemonCommands) -> Result<()> {
                     "project": project.display().to_string(),
                     "error": "Daemon is only supported on Unix systems"
                 });
-                println!("{}", serde_json::to_string_pretty(&result)
-                    .context("Failed to serialize output")?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result).context("Failed to serialize output")?
+                );
                 return Ok(());
             }
 
@@ -4912,8 +6361,11 @@ async fn cmd_daemon(subcmd: DaemonCommands) -> Result<()> {
                                 "socket": socket_path.display().to_string(),
                                 "message": "Daemon is already running for this project"
                             });
-                            println!("{}", serde_json::to_string_pretty(&result)
-                                .context("Failed to serialize output")?);
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&result)
+                                    .context("Failed to serialize output")?
+                            );
                             return Ok(());
                         }
                         Err(_) => {
@@ -4924,8 +6376,8 @@ async fn cmd_daemon(subcmd: DaemonCommands) -> Result<()> {
                 }
 
                 // Get current executable path
-                let exe = std::env::current_exe()
-                    .context("Failed to get current executable path")?;
+                let exe =
+                    std::env::current_exe().context("Failed to get current executable path")?;
 
                 // Spawn daemon process in background with detached stdio
                 let child = Command::new(&exe)
@@ -4959,8 +6411,10 @@ async fn cmd_daemon(subcmd: DaemonCommands) -> Result<()> {
                         "Daemon is starting (may take a moment to build call graph)"
                     }
                 });
-                println!("{}", serde_json::to_string_pretty(&result)
-                    .context("Failed to serialize output")?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result).context("Failed to serialize output")?
+                );
             }
         }
 
@@ -4975,8 +6429,10 @@ async fn cmd_daemon(subcmd: DaemonCommands) -> Result<()> {
                     "socket": socket_path.display().to_string(),
                     "message": "No daemon running for this project"
                 });
-                println!("{}", serde_json::to_string_pretty(&result)
-                    .context("Failed to serialize output")?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result).context("Failed to serialize output")?
+                );
                 return Ok(());
             }
 
@@ -4990,8 +6446,11 @@ async fn cmd_daemon(subcmd: DaemonCommands) -> Result<()> {
                         "daemon_response": response,
                         "message": "Daemon stopped successfully"
                     });
-                    println!("{}", serde_json::to_string_pretty(&result)
-                        .context("Failed to serialize output")?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result)
+                            .context("Failed to serialize output")?
+                    );
                 }
                 Err(_) => {
                     // Socket exists but daemon not responding - clean up stale socket
@@ -5002,8 +6461,11 @@ async fn cmd_daemon(subcmd: DaemonCommands) -> Result<()> {
                             "socket": socket_path.display().to_string(),
                             "error": format!("Failed to clean up stale socket: {}", e)
                         });
-                        println!("{}", serde_json::to_string_pretty(&result)
-                            .context("Failed to serialize output")?);
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&result)
+                                .context("Failed to serialize output")?
+                        );
                     } else {
                         let result = serde_json::json!({
                             "status": "cleaned",
@@ -5011,8 +6473,11 @@ async fn cmd_daemon(subcmd: DaemonCommands) -> Result<()> {
                             "socket": socket_path.display().to_string(),
                             "message": "Cleaned up stale socket (daemon was not responding)"
                         });
-                        println!("{}", serde_json::to_string_pretty(&result)
-                            .context("Failed to serialize output")?);
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&result)
+                                .context("Failed to serialize output")?
+                        );
                     }
                 }
             }
@@ -5028,8 +6493,10 @@ async fn cmd_daemon(subcmd: DaemonCommands) -> Result<()> {
                     "project": canonical.display().to_string(),
                     "socket": socket_path.display().to_string()
                 });
-                println!("{}", serde_json::to_string_pretty(&result)
-                    .context("Failed to serialize output")?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result).context("Failed to serialize output")?
+                );
                 return Ok(());
             }
 
@@ -5045,8 +6512,11 @@ async fn cmd_daemon(subcmd: DaemonCommands) -> Result<()> {
                         "cache_stats": status.get("cache"),
                         "daemon_status": status
                     });
-                    println!("{}", serde_json::to_string_pretty(&result)
-                        .context("Failed to serialize output")?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result)
+                            .context("Failed to serialize output")?
+                    );
                 }
                 Err(_) => {
                     // Socket exists but daemon dead or not responding
@@ -5057,8 +6527,11 @@ async fn cmd_daemon(subcmd: DaemonCommands) -> Result<()> {
                         "stale_socket": true,
                         "message": "Socket exists but daemon is not responding"
                     });
-                    println!("{}", serde_json::to_string_pretty(&result)
-                        .context("Failed to serialize output")?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result)
+                            .context("Failed to serialize output")?
+                    );
                 }
             }
         }
@@ -5074,8 +6547,10 @@ async fn cmd_daemon(subcmd: DaemonCommands) -> Result<()> {
                     "project": canonical.display().to_string(),
                     "error": "No daemon running for this project"
                 });
-                println!("{}", serde_json::to_string_pretty(&result)
-                    .context("Failed to serialize output")?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result).context("Failed to serialize output")?
+                );
                 return Ok(());
             }
 
@@ -5087,8 +6562,11 @@ async fn cmd_daemon(subcmd: DaemonCommands) -> Result<()> {
                         "project": canonical.display().to_string(),
                         "result": response
                     });
-                    println!("{}", serde_json::to_string_pretty(&result)
-                        .context("Failed to serialize output")?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result)
+                            .context("Failed to serialize output")?
+                    );
                 }
                 Err(e) => {
                     let result = serde_json::json!({
@@ -5097,8 +6575,11 @@ async fn cmd_daemon(subcmd: DaemonCommands) -> Result<()> {
                         "project": canonical.display().to_string(),
                         "error": format!("Failed to query daemon: {}", e)
                     });
-                    println!("{}", serde_json::to_string_pretty(&result)
-                        .context("Failed to serialize output")?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result)
+                            .context("Failed to serialize output")?
+                    );
                 }
             }
         }
@@ -5114,8 +6595,10 @@ async fn cmd_daemon(subcmd: DaemonCommands) -> Result<()> {
                     "project": canonical.display().to_string(),
                     "error": "No daemon running for this project"
                 });
-                println!("{}", serde_json::to_string_pretty(&result)
-                    .context("Failed to serialize output")?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result).context("Failed to serialize output")?
+                );
                 return Ok(());
             }
 
@@ -5132,8 +6615,11 @@ async fn cmd_daemon(subcmd: DaemonCommands) -> Result<()> {
                         "project": canonical.display().to_string(),
                         "result": response
                     });
-                    println!("{}", serde_json::to_string_pretty(&result)
-                        .context("Failed to serialize output")?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result)
+                            .context("Failed to serialize output")?
+                    );
                 }
                 Err(e) => {
                     let result = serde_json::json!({
@@ -5142,8 +6628,11 @@ async fn cmd_daemon(subcmd: DaemonCommands) -> Result<()> {
                         "project": canonical.display().to_string(),
                         "error": format!("Failed to notify daemon: {}", e)
                     });
-                    println!("{}", serde_json::to_string_pretty(&result)
-                        .context("Failed to serialize output")?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result)
+                            .context("Failed to serialize output")?
+                    );
                 }
             }
         }
@@ -5180,13 +6669,12 @@ async fn cmd_daemon_serve(project: PathBuf) -> Result<()> {
 
     // Remove existing socket if present (stale from previous run)
     if socket_path.exists() {
-        std::fs::remove_file(&socket_path)
-            .context("Failed to remove stale socket")?;
+        std::fs::remove_file(&socket_path).context("Failed to remove stale socket")?;
     }
 
     // Create Unix socket listener
-    let listener = UnixListener::bind(&socket_path)
-        .context("Failed to bind Unix socket for daemon")?;
+    let listener =
+        UnixListener::bind(&socket_path).context("Failed to bind Unix socket for daemon")?;
 
     // Set non-blocking for graceful shutdown handling
     listener
@@ -5319,17 +6807,18 @@ fn handle_daemon_request(
         .unwrap_or("");
 
     match cmd {
-        "ping" => {
-            serde_json::json!({
-                "status": "ok",
-                "pong": true
-            })
-            .to_string()
-        }
+        "ping" => serde_json::json!({
+            "status": "ok",
+            "pong": true
+        })
+        .to_string(),
 
         "status" => {
             let has_graph = graph.is_some();
-            let func_count = graph.as_ref().map(|g| (g.callers.len() + g.callees.len()) / 2).unwrap_or(0);
+            let func_count = graph
+                .as_ref()
+                .map(|g| (g.callers.len() + g.callees.len()) / 2)
+                .unwrap_or(0);
             let edge_count = graph.as_ref().map(|g| g.edges.len()).unwrap_or(0);
 
             serde_json::json!({
@@ -5386,10 +6875,7 @@ fn handle_daemon_request(
             }
 
             if let Some(ref g) = graph {
-                let depth = request
-                    .get("depth")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(3) as usize;
+                let depth = request.get("depth").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
 
                 let config = callgraph::ImpactConfig::new().with_depth(depth);
                 let result = callgraph::analyze_impact(g, func_name, config);
@@ -5439,14 +6925,12 @@ fn handle_daemon_request(
             }
         }
 
-        _ => {
-            serde_json::json!({
-                "status": "error",
-                "error": format!("Unknown command: {}", cmd),
-                "available_commands": ["ping", "status", "shutdown", "notify", "impact", "dead"]
-            })
-            .to_string()
-        }
+        _ => serde_json::json!({
+            "status": "error",
+            "error": format!("Unknown command: {}", cmd),
+            "available_commands": ["ping", "status", "shutdown", "notify", "impact", "dead"]
+        })
+        .to_string(),
     }
 }
 
@@ -5540,9 +7024,19 @@ fn cmd_doctor(install: Option<String>, json_output: bool) -> Result<()> {
         ToolInfo::new("mypy", "python", "type_checker", "pip install mypy"),
         ToolInfo::new("black", "python", "formatter", "pip install black"),
         // TypeScript/JavaScript tools
-        ToolInfo::new("tsc", "typescript", "type_checker", "npm install -g typescript"),
+        ToolInfo::new(
+            "tsc",
+            "typescript",
+            "type_checker",
+            "npm install -g typescript",
+        ),
         ToolInfo::new("eslint", "typescript", "linter", "npm install -g eslint"),
-        ToolInfo::new("prettier", "typescript", "formatter", "npm install -g prettier"),
+        ToolInfo::new(
+            "prettier",
+            "typescript",
+            "formatter",
+            "npm install -g prettier",
+        ),
         // Go tools
         ToolInfo::new("go", "go", "type_checker", "https://go.dev/dl/")
             .with_version_args(&["version"]),
@@ -5555,15 +7049,30 @@ fn cmd_doctor(install: Option<String>, json_output: bool) -> Result<()> {
         // Rust tools
         ToolInfo::new("rustc", "rust", "type_checker", "https://rustup.rs/"),
         ToolInfo::new("cargo", "rust", "build", "https://rustup.rs/"),
-        ToolInfo::new("clippy-driver", "rust", "linter", "rustup component add clippy")
-            .with_version_args(&["--version"]),
-        ToolInfo::new("rustfmt", "rust", "formatter", "rustup component add rustfmt"),
+        ToolInfo::new(
+            "clippy-driver",
+            "rust",
+            "linter",
+            "rustup component add clippy",
+        )
+        .with_version_args(&["--version"]),
+        ToolInfo::new(
+            "rustfmt",
+            "rust",
+            "formatter",
+            "rustup component add rustfmt",
+        ),
         // Java tools
         ToolInfo::new("javac", "java", "type_checker", "https://adoptium.net/"),
         // C/C++ tools
         ToolInfo::new("clang", "c", "type_checker", "https://releases.llvm.org/"),
         ToolInfo::new("clang-tidy", "c", "linter", "https://releases.llvm.org/"),
-        ToolInfo::new("clang-format", "c", "formatter", "https://releases.llvm.org/"),
+        ToolInfo::new(
+            "clang-format",
+            "c",
+            "formatter",
+            "https://releases.llvm.org/",
+        ),
     ];
 
     // Handle installation request
@@ -5600,7 +7109,9 @@ fn cmd_doctor(install: Option<String>, json_output: bool) -> Result<()> {
                                 get_tool_version(tool).unwrap_or_else(|| "unknown".to_string());
                             println!("    Successfully installed {}", version);
                         } else {
-                            println!("    Installation may have succeeded but tool not found in PATH");
+                            println!(
+                                "    Installation may have succeeded but tool not found in PATH"
+                            );
                         }
                     }
                     Err(e) => {
@@ -5718,10 +7229,7 @@ fn cmd_doctor(install: Option<String>, json_output: bool) -> Result<()> {
 
         println!();
         println!("{}", "-".repeat(60));
-        println!(
-            "Summary: {}/{} tools installed",
-            installed_count, total
-        );
+        println!("Summary: {}/{} tools installed", installed_count, total);
 
         if installed_count < total {
             println!();
@@ -5744,7 +7252,7 @@ fn cmd_security(subcmd: SecurityCommands) -> Result<()> {
         SecurityCommands::Scan {
             path,
             lang,
-            format,
+            output_format,
             severity,
             confidence,
             category,
@@ -5755,7 +7263,7 @@ fn cmd_security(subcmd: SecurityCommands) -> Result<()> {
             let exit_code = cmd_security_scan(
                 &path,
                 lang,
-                format,
+                output_format,
                 &severity,
                 &confidence,
                 category.as_deref(),
@@ -5810,7 +7318,14 @@ fn cmd_security(subcmd: SecurityCommands) -> Result<()> {
             min_confidence,
             include_entropy,
         } => {
-            cmd_secrets(&path, lang, format, &min_severity, &min_confidence, include_entropy)?;
+            cmd_secrets(
+                &path,
+                lang,
+                format,
+                &min_severity,
+                &min_confidence,
+                include_entropy,
+            )?;
         }
         SecurityCommands::Crypto {
             path,
@@ -5820,7 +7335,14 @@ fn cmd_security(subcmd: SecurityCommands) -> Result<()> {
             min_confidence,
             include_safe,
         } => {
-            cmd_crypto(&path, lang, format, &min_severity, &min_confidence, include_safe)?;
+            cmd_crypto(
+                &path,
+                lang,
+                format,
+                &min_severity,
+                &min_confidence,
+                include_safe,
+            )?;
         }
         SecurityCommands::Deserialization {
             path,
@@ -5830,7 +7352,14 @@ fn cmd_security(subcmd: SecurityCommands) -> Result<()> {
             min_confidence,
             include_safe,
         } => {
-            cmd_deserialization(&path, lang, format, &min_severity, &min_confidence, include_safe)?;
+            cmd_deserialization(
+                &path,
+                lang,
+                format,
+                &min_severity,
+                &min_confidence,
+                include_safe,
+            )?;
         }
         SecurityCommands::Redos {
             path,
@@ -5840,6 +7369,68 @@ fn cmd_security(subcmd: SecurityCommands) -> Result<()> {
             min_confidence,
         } => {
             cmd_redos(&path, lang, format, &min_severity, &min_confidence)?;
+        }
+        SecurityCommands::LogInjection {
+            path,
+            lang,
+            format,
+            min_severity,
+            min_confidence,
+        } => {
+            cmd_log_injection(&path, lang, format, &min_severity, &min_confidence)?;
+        }
+        SecurityCommands::HeaderInjection {
+            path,
+            lang,
+            format,
+            min_severity,
+            min_confidence,
+        } => {
+            cmd_header_injection(&path, lang, format, &min_severity, &min_confidence)?;
+        }
+        SecurityCommands::TemplateInjection {
+            path,
+            lang,
+            format,
+            min_severity,
+            min_confidence,
+        } => {
+            cmd_template_injection(&path, lang, format, &min_severity, &min_confidence)?;
+        }
+        SecurityCommands::Ssrf {
+            path,
+            lang,
+            format,
+            min_severity,
+            min_confidence,
+        } => {
+            cmd_ssrf(&path, lang, format, &min_severity, &min_confidence)?;
+        }
+        SecurityCommands::InputValidation {
+            path,
+            lang,
+            format,
+            min_severity,
+            include_recommended,
+            max_files,
+        } => {
+            cmd_input_validation(
+                &path,
+                lang,
+                format,
+                &min_severity,
+                include_recommended,
+                max_files,
+            )?;
+        }
+        SecurityCommands::PrototypePollution {
+            path,
+            lang,
+            format,
+            min_severity,
+            min_confidence,
+        } => {
+            cmd_prototype_pollution(&path, lang, format, &min_severity, &min_confidence)?;
         }
     }
     Ok(())
@@ -5851,7 +7442,7 @@ fn cmd_sql_injection(
     format: OutputFormat,
     min_severity: &str,
 ) -> Result<()> {
-    use security::injection::sql::{SqlInjectionDetector, Severity};
+    use security::injection::sql::{Severity, SqlInjectionDetector};
 
     // Validate path exists
     require_exists(path)?;
@@ -5864,7 +7455,7 @@ fn cmd_sql_injection(
             .scan_file(path.to_str().context("Invalid path")?)
             .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
 
-        let mut severity_counts = std::collections::HashMap::new();
+        let mut severity_counts = rustc_hash::FxHashMap::default();
         for finding in &findings {
             *severity_counts
                 .entry(finding.severity.to_string())
@@ -5921,7 +7512,7 @@ fn cmd_sql_injection(
     };
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&filtered_result)
@@ -5941,12 +7532,24 @@ fn cmd_sql_injection(
                 println!("No SQL injection vulnerabilities detected.");
             } else {
                 for (i, finding) in filtered_result.findings.iter().enumerate() {
-                    println!("{}. [{}] {}:{}", i + 1, finding.severity, finding.location.file, finding.location.line);
+                    println!(
+                        "{}. [{}] {}:{}",
+                        i + 1,
+                        finding.severity,
+                        finding.location.file,
+                        finding.location.line
+                    );
                     println!("   Pattern: {}", finding.pattern);
                     println!("   Sink: {}", finding.sink_expression);
-                    println!("   Code: {}", finding.code_snippet.lines().next().unwrap_or(""));
+                    println!(
+                        "   Code: {}",
+                        finding.code_snippet.lines().next().unwrap_or("")
+                    );
                     println!("   Description: {}", finding.description);
-                    println!("   Remediation: {}", finding.remediation.lines().next().unwrap_or(""));
+                    println!(
+                        "   Remediation: {}",
+                        finding.remediation.lines().next().unwrap_or("")
+                    );
                     println!();
                 }
 
@@ -5969,7 +7572,9 @@ fn cmd_command_injection(
     min_severity: &str,
     min_confidence: &str,
 ) -> Result<()> {
-    use security::injection::command::{scan_command_injection, scan_file_command_injection, Severity, Confidence};
+    use security::injection::command::{
+        scan_command_injection, scan_file_command_injection, Confidence, Severity,
+    };
 
     // Validate path exists
     require_exists(path)?;
@@ -6008,9 +7613,12 @@ fn cmd_command_injection(
         .collect();
 
     // Count by severity
-    let mut severity_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut severity_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for finding in &filtered_findings {
-        *severity_counts.entry(finding.severity.to_string()).or_insert(0) += 1;
+        *severity_counts
+            .entry(finding.severity.to_string())
+            .or_insert(0) += 1;
     }
 
     // Build result structure
@@ -6030,7 +7638,7 @@ fn cmd_command_injection(
     });
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&result).context("Failed to serialize output")?
@@ -6063,7 +7671,10 @@ fn cmd_command_injection(
                         let first_line = snippet.lines().next().unwrap_or("");
                         println!("   Code: {}", first_line);
                     }
-                    println!("   Remediation: {}", finding.remediation.lines().next().unwrap_or(""));
+                    println!(
+                        "   Remediation: {}",
+                        finding.remediation.lines().next().unwrap_or("")
+                    );
                     println!();
                 }
 
@@ -6086,7 +7697,7 @@ fn cmd_xss(
     min_severity: &str,
     min_confidence: &str,
 ) -> Result<()> {
-    use security::injection::xss::{scan_xss, Severity, Confidence};
+    use security::injection::xss::{scan_xss, Confidence, Severity};
 
     // Validate path exists
     require_exists(path)?;
@@ -6094,8 +7705,8 @@ fn cmd_xss(
     let lang_str = lang.map(|l| l.to_string());
 
     // Scan for XSS vulnerabilities
-    let result = scan_xss(path, lang_str.as_deref())
-        .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
+    let result =
+        scan_xss(path, lang_str.as_deref()).map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
 
     // Parse minimum severity
     let min_sev = match min_severity.to_lowercase().as_str() {
@@ -6121,9 +7732,12 @@ fn cmd_xss(
         .collect();
 
     // Count by severity
-    let mut severity_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut severity_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for finding in &filtered_findings {
-        *severity_counts.entry(finding.severity.to_string()).or_insert(0) += 1;
+        *severity_counts
+            .entry(finding.severity.to_string())
+            .or_insert(0) += 1;
     }
 
     // Build result structure
@@ -6136,10 +7750,11 @@ fn cmd_xss(
     });
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output_result).context("Failed to serialize output")?
+                serde_json::to_string_pretty(&output_result)
+                    .context("Failed to serialize output")?
             );
         }
         OutputFormat::Text | OutputFormat::Mermaid | OutputFormat::Dot | OutputFormat::Csv => {
@@ -6165,16 +7780,28 @@ fn cmd_xss(
                     );
                     println!("   Sink Type: {}", finding.sink_type);
                     println!("   Context: {}", finding.context);
-                    println!("   Sink: {}", finding.sink_expression.chars().take(80).collect::<String>());
+                    println!(
+                        "   Sink: {}",
+                        finding.sink_expression.chars().take(80).collect::<String>()
+                    );
                     if !finding.tainted_variables.is_empty() {
-                        println!("   Tainted Variables: {}", finding.tainted_variables.join(", "));
+                        println!(
+                            "   Tainted Variables: {}",
+                            finding.tainted_variables.join(", ")
+                        );
                     }
                     if let Some(ref snippet) = finding.code_snippet {
                         let first_line = snippet.lines().next().unwrap_or("");
                         println!("   Code: {}", first_line);
                     }
-                    println!("   Description: {}", finding.description.lines().next().unwrap_or(""));
-                    println!("   Remediation: {}", finding.remediation.lines().next().unwrap_or(""));
+                    println!(
+                        "   Description: {}",
+                        finding.description.lines().next().unwrap_or("")
+                    );
+                    println!(
+                        "   Remediation: {}",
+                        finding.remediation.lines().next().unwrap_or("")
+                    );
                     println!();
                 }
 
@@ -6197,7 +7824,9 @@ fn cmd_path_traversal(
     min_severity: &str,
     min_confidence: &str,
 ) -> Result<()> {
-    use security::injection::path_traversal::{scan_path_traversal, scan_file_path_traversal, Severity, Confidence};
+    use security::injection::path_traversal::{
+        scan_file_path_traversal, scan_path_traversal, Confidence, Severity,
+    };
 
     // Validate path exists
     require_exists(path)?;
@@ -6236,16 +7865,17 @@ fn cmd_path_traversal(
         .collect();
 
     // Count by severity
-    let mut severity_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut severity_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for finding in &filtered_findings {
-        *severity_counts.entry(finding.severity.to_string()).or_insert(0) += 1;
+        *severity_counts
+            .entry(finding.severity.to_string())
+            .or_insert(0) += 1;
     }
 
     // Count files with vulnerabilities
-    let files_with_vulns: std::collections::HashSet<_> = filtered_findings
-        .iter()
-        .map(|f| &f.location.file)
-        .collect();
+    let files_with_vulns: std::collections::HashSet<_> =
+        filtered_findings.iter().map(|f| &f.location.file).collect();
 
     // Build result structure
     let result = serde_json::json!({
@@ -6257,7 +7887,7 @@ fn cmd_path_traversal(
     });
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&result).context("Failed to serialize output")?
@@ -6286,8 +7916,10 @@ fn cmd_path_traversal(
                     println!("   Sink: {}", finding.sink_function);
                     println!("   Operation: {}", finding.operation_type);
                     println!("   Pattern: {}", finding.pattern);
-                    println!("   Path Expression: {}",
-                        finding.path_expression.chars().take(60).collect::<String>());
+                    println!(
+                        "   Path Expression: {}",
+                        finding.path_expression.chars().take(60).collect::<String>()
+                    );
                     if !finding.involved_variables.is_empty() {
                         println!("   Variables: {}", finding.involved_variables.join(", "));
                     }
@@ -6298,8 +7930,14 @@ fn cmd_path_traversal(
                         let first_line = snippet.lines().next().unwrap_or("");
                         println!("   Code: {}", first_line);
                     }
-                    println!("   Description: {}", finding.description.lines().next().unwrap_or(""));
-                    println!("   Remediation: {}", finding.remediation.lines().next().unwrap_or(""));
+                    println!(
+                        "   Description: {}",
+                        finding.description.lines().next().unwrap_or("")
+                    );
+                    println!(
+                        "   Remediation: {}",
+                        finding.remediation.lines().next().unwrap_or("")
+                    );
                     println!();
                 }
 
@@ -6313,7 +7951,10 @@ fn cmd_path_traversal(
                 let symlink_count = filtered_findings.iter().filter(|f| f.symlink_risk).count();
                 if symlink_count > 0 {
                     println!();
-                    println!("WARNING: {} findings may also be vulnerable to symlink attacks.", symlink_count);
+                    println!(
+                        "WARNING: {} findings may also be vulnerable to symlink attacks.",
+                        symlink_count
+                    );
                     println!("Consider using O_NOFOLLOW flag or equivalent protections.");
                 }
             }
@@ -6331,7 +7972,7 @@ fn cmd_secrets(
     min_confidence: &str,
     include_entropy: bool,
 ) -> Result<()> {
-    use security::secrets::{SecretsDetector, Severity, Confidence};
+    use security::secrets::{Confidence, SecretsDetector, Severity};
 
     // Validate path exists
     require_exists(path)?;
@@ -6339,8 +7980,7 @@ fn cmd_secrets(
     let lang_str = lang.map(|l| l.to_string());
 
     // Create detector with configuration
-    let detector = SecretsDetector::new()
-        .include_entropy(include_entropy);
+    let detector = SecretsDetector::new().include_entropy(include_entropy);
 
     // Scan for secrets
     let result = if path.is_file() {
@@ -6348,12 +7988,18 @@ fn cmd_secrets(
             .scan_file(path.to_str().context("Invalid path")?)
             .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
 
-        let mut type_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let mut severity_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut type_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut severity_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         for finding in &findings {
-            *type_counts.entry(finding.secret_type.to_string()).or_insert(0) += 1;
-            *severity_counts.entry(finding.severity.to_string()).or_insert(0) += 1;
+            *type_counts
+                .entry(finding.secret_type.to_string())
+                .or_insert(0) += 1;
+            *severity_counts
+                .entry(finding.severity.to_string())
+                .or_insert(0) += 1;
         }
 
         security::secrets::ScanResult {
@@ -6392,12 +8038,18 @@ fn cmd_secrets(
         .collect();
 
     // Recalculate counts after filtering
-    let mut type_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut severity_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut type_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut severity_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     for finding in &filtered_findings {
-        *type_counts.entry(finding.secret_type.to_string()).or_insert(0) += 1;
-        *severity_counts.entry(finding.severity.to_string()).or_insert(0) += 1;
+        *type_counts
+            .entry(finding.secret_type.to_string())
+            .or_insert(0) += 1;
+        *severity_counts
+            .entry(finding.severity.to_string())
+            .or_insert(0) += 1;
     }
 
     let filtered_result = security::secrets::ScanResult {
@@ -6408,10 +8060,11 @@ fn cmd_secrets(
     };
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&filtered_result).context("Failed to serialize output")?
+                serde_json::to_string_pretty(&filtered_result)
+                    .context("Failed to serialize output")?
             );
         }
         OutputFormat::Text | OutputFormat::Mermaid | OutputFormat::Dot | OutputFormat::Csv => {
@@ -6447,7 +8100,10 @@ fn cmd_secrets(
                         println!("   Test file: Yes (reduced severity)");
                     }
                     println!("   Description: {}", finding.description);
-                    println!("   Remediation: {}", finding.remediation.lines().next().unwrap_or(""));
+                    println!(
+                        "   Remediation: {}",
+                        finding.remediation.lines().next().unwrap_or("")
+                    );
                     println!();
                 }
 
@@ -6467,10 +8123,16 @@ fn cmd_secrets(
                 }
 
                 // Critical findings warning
-                let critical_count = filtered_findings.iter().filter(|f| f.severity == Severity::Critical).count();
+                let critical_count = filtered_findings
+                    .iter()
+                    .filter(|f| f.severity == Severity::Critical)
+                    .count();
                 if critical_count > 0 {
                     println!();
-                    println!("CRITICAL: {} secrets require immediate attention!", critical_count);
+                    println!(
+                        "CRITICAL: {} secrets require immediate attention!",
+                        critical_count
+                    );
                     println!("Rotate credentials and remove from source control.");
                 }
             }
@@ -6488,7 +8150,7 @@ fn cmd_crypto(
     min_confidence: &str,
     include_safe: bool,
 ) -> Result<()> {
-    use security::crypto::{WeakCryptoDetector, Severity, Confidence};
+    use security::crypto::{Confidence, Severity, WeakCryptoDetector};
 
     // Validate path exists
     require_exists(path)?;
@@ -6496,8 +8158,7 @@ fn cmd_crypto(
     let lang_str = lang.map(|l| l.to_string());
 
     // Create detector with configuration
-    let detector = WeakCryptoDetector::new()
-        .include_safe_patterns(include_safe);
+    let detector = WeakCryptoDetector::new().include_safe_patterns(include_safe);
 
     // Scan for weak cryptography
     let result = if path.is_file() {
@@ -6505,14 +8166,23 @@ fn cmd_crypto(
             .scan_file(path.to_str().context("Invalid path")?)
             .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
 
-        let mut issue_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let mut severity_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let mut algorithm_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut issue_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut severity_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut algorithm_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         for finding in &findings {
-            *issue_counts.entry(finding.issue_type.to_string()).or_insert(0) += 1;
-            *severity_counts.entry(finding.severity.to_string()).or_insert(0) += 1;
-            *algorithm_counts.entry(finding.algorithm.to_string()).or_insert(0) += 1;
+            *issue_counts
+                .entry(finding.issue_type.to_string())
+                .or_insert(0) += 1;
+            *severity_counts
+                .entry(finding.severity.to_string())
+                .or_insert(0) += 1;
+            *algorithm_counts
+                .entry(finding.algorithm.to_string())
+                .or_insert(0) += 1;
         }
 
         security::crypto::ScanResult {
@@ -6552,14 +8222,23 @@ fn cmd_crypto(
         .collect();
 
     // Recalculate counts after filtering
-    let mut issue_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut severity_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut algorithm_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut issue_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut severity_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut algorithm_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     for finding in &filtered_findings {
-        *issue_counts.entry(finding.issue_type.to_string()).or_insert(0) += 1;
-        *severity_counts.entry(finding.severity.to_string()).or_insert(0) += 1;
-        *algorithm_counts.entry(finding.algorithm.to_string()).or_insert(0) += 1;
+        *issue_counts
+            .entry(finding.issue_type.to_string())
+            .or_insert(0) += 1;
+        *severity_counts
+            .entry(finding.severity.to_string())
+            .or_insert(0) += 1;
+        *algorithm_counts
+            .entry(finding.algorithm.to_string())
+            .or_insert(0) += 1;
     }
 
     let filtered_result = security::crypto::ScanResult {
@@ -6571,10 +8250,11 @@ fn cmd_crypto(
     };
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&filtered_result).context("Failed to serialize output")?
+                serde_json::to_string_pretty(&filtered_result)
+                    .context("Failed to serialize output")?
             );
         }
         OutputFormat::Text | OutputFormat::Mermaid | OutputFormat::Dot | OutputFormat::Csv => {
@@ -6608,7 +8288,10 @@ fn cmd_crypto(
                         println!("   Test file: Yes (reduced severity)");
                     }
                     println!("   Description: {}", finding.description);
-                    println!("   Remediation: {}", finding.remediation.lines().next().unwrap_or(""));
+                    println!(
+                        "   Remediation: {}",
+                        finding.remediation.lines().next().unwrap_or("")
+                    );
                     println!();
                 }
 
@@ -6637,10 +8320,16 @@ fn cmd_crypto(
                 }
 
                 // Critical findings warning
-                let critical_count = filtered_findings.iter().filter(|f| f.severity == Severity::Critical).count();
+                let critical_count = filtered_findings
+                    .iter()
+                    .filter(|f| f.severity == Severity::Critical)
+                    .count();
                 if critical_count > 0 {
                     println!();
-                    println!("CRITICAL: {} cryptographic issues require immediate attention!", critical_count);
+                    println!(
+                        "CRITICAL: {} cryptographic issues require immediate attention!",
+                        critical_count
+                    );
                     println!("Review hardcoded keys and weak algorithms.");
                 }
             }
@@ -6658,7 +8347,9 @@ fn cmd_deserialization(
     min_confidence: &str,
     include_safe: bool,
 ) -> Result<()> {
-    use security::deserialization::{scan_deserialization, scan_file_deserialization, Severity, Confidence};
+    use security::deserialization::{
+        scan_deserialization, scan_file_deserialization, Confidence, Severity,
+    };
 
     // Validate path exists
     require_exists(path)?;
@@ -6694,21 +8385,26 @@ fn cmd_deserialization(
     let filtered_findings: Vec<_> = findings
         .into_iter()
         .filter(|f| {
-            f.severity >= min_sev &&
-            f.confidence >= min_conf &&
-            (include_safe || !f.possibly_safe)
+            f.severity >= min_sev && f.confidence >= min_conf && (include_safe || !f.possibly_safe)
         })
         .collect();
 
     // Count by severity and method
-    let mut severity_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut method_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut source_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut severity_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut method_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut source_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     for finding in &filtered_findings {
-        *severity_counts.entry(finding.severity.to_string()).or_insert(0) += 1;
+        *severity_counts
+            .entry(finding.severity.to_string())
+            .or_insert(0) += 1;
         *method_counts.entry(finding.method.to_string()).or_insert(0) += 1;
-        *source_counts.entry(finding.input_source.to_string()).or_insert(0) += 1;
+        *source_counts
+            .entry(finding.input_source.to_string())
+            .or_insert(0) += 1;
     }
 
     let files_scanned = if path.is_file() {
@@ -6733,7 +8429,7 @@ fn cmd_deserialization(
     });
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&result).context("Failed to serialize output")?
@@ -6793,10 +8489,16 @@ fn cmd_deserialization(
                 }
 
                 // Critical findings warning
-                let critical_count = filtered_findings.iter().filter(|f| f.severity == Severity::Critical).count();
+                let critical_count = filtered_findings
+                    .iter()
+                    .filter(|f| f.severity == Severity::Critical)
+                    .count();
                 if critical_count > 0 {
                     println!();
-                    println!("CRITICAL: {} deserialization vulnerabilities allow RCE!", critical_count);
+                    println!(
+                        "CRITICAL: {} deserialization vulnerabilities allow RCE!",
+                        critical_count
+                    );
                     println!("These issues can execute arbitrary code without obvious sinks.");
                     println!("Review immediately and replace with safe alternatives.");
                 }
@@ -6819,7 +8521,7 @@ fn cmd_security_scan(
     include_suppressed: bool,
     max_files: usize,
 ) -> Result<i32> {
-    use security::{scan_security, SecurityConfig, Severity, Confidence};
+    use security::{scan_security, Confidence, SecurityConfig, Severity};
 
     // Validate path exists
     require_exists(path)?;
@@ -6846,11 +8548,7 @@ fn cmd_security_scan(
 
     // Parse categories
     if let Some(cats) = categories {
-        config.categories = Some(
-            cats.split(',')
-                .map(|s| s.trim().to_lowercase())
-                .collect()
-        );
+        config.categories = Some(cats.split(',').map(|s| s.trim().to_lowercase()).collect());
     }
 
     config.include_suppressed = include_suppressed;
@@ -6858,8 +8556,8 @@ fn cmd_security_scan(
     config.deduplicate = true;
 
     // Run unified scan
-    let report = scan_security(path, &config)
-        .map_err(|e| anyhow::anyhow!("Security scan failed: {}", e))?;
+    let report =
+        scan_security(path, &config).map_err(|e| anyhow::anyhow!("Security scan failed: {}", e))?;
 
     // Output based on format
     match format {
@@ -6887,11 +8585,26 @@ fn cmd_security_scan(
 
             // Summary by severity
             println!("By Severity:");
-            println!("  Critical: {}", report.summary.by_severity.get("Critical").unwrap_or(&0));
-            println!("  High: {}", report.summary.by_severity.get("High").unwrap_or(&0));
-            println!("  Medium: {}", report.summary.by_severity.get("Medium").unwrap_or(&0));
-            println!("  Low: {}", report.summary.by_severity.get("Low").unwrap_or(&0));
-            println!("  Info: {}", report.summary.by_severity.get("Info").unwrap_or(&0));
+            println!(
+                "  Critical: {}",
+                report.summary.by_severity.get("Critical").unwrap_or(&0)
+            );
+            println!(
+                "  High: {}",
+                report.summary.by_severity.get("High").unwrap_or(&0)
+            );
+            println!(
+                "  Medium: {}",
+                report.summary.by_severity.get("Medium").unwrap_or(&0)
+            );
+            println!(
+                "  Low: {}",
+                report.summary.by_severity.get("Low").unwrap_or(&0)
+            );
+            println!(
+                "  Info: {}",
+                report.summary.by_severity.get("Info").unwrap_or(&0)
+            );
             println!();
 
             // Summary by category
@@ -6910,7 +8623,11 @@ fn cmd_security_scan(
                 println!("Findings:");
                 println!("---------");
                 for (i, finding) in report.findings.iter().enumerate() {
-                    let suppressed_marker = if finding.suppressed { " [SUPPRESSED]" } else { "" };
+                    let suppressed_marker = if finding.suppressed {
+                        " [SUPPRESSED]"
+                    } else {
+                        ""
+                    };
                     println!(
                         "{}. [{}] [{}] {}{}",
                         i + 1,
@@ -6921,7 +8638,9 @@ fn cmd_security_scan(
                     );
                     println!(
                         "   Location: {}:{}:{}",
-                        finding.location.file, finding.location.start_line, finding.location.start_column
+                        finding.location.file,
+                        finding.location.start_line,
+                        finding.location.start_column
                     );
                     println!("   Category: {}", finding.category);
                     println!("   Confidence: {}", finding.confidence);
@@ -6956,9 +8675,10 @@ fn cmd_security_scan(
         _ => Severity::High,
     };
 
-    let has_severe_finding = report.findings.iter().any(|f| {
-        !f.suppressed && f.severity >= fail_severity
-    });
+    let has_severe_finding = report
+        .findings
+        .iter()
+        .any(|f| !f.suppressed && f.severity >= fail_severity);
 
     Ok(if has_severe_finding { 1 } else { 0 })
 }
@@ -6970,7 +8690,7 @@ fn cmd_redos(
     min_severity: &str,
     min_confidence: &str,
 ) -> Result<()> {
-    use security::redos::{scan_redos, Severity, Confidence};
+    use security::redos::{scan_redos, Confidence, Severity};
 
     // Validate path exists
     require_exists(path)?;
@@ -6978,10 +8698,8 @@ fn cmd_redos(
     let lang_str = lang.map(|l| l.to_string());
 
     // Scan for ReDoS vulnerabilities
-    let result = scan_redos(
-        path.to_string_lossy().as_ref(),
-        lang_str.as_deref(),
-    ).map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
+    let result = scan_redos(path.to_string_lossy().as_ref(), lang_str.as_deref())
+        .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
 
     // Parse minimum severity
     let min_sev = match min_severity.to_lowercase().as_str() {
@@ -7007,12 +8725,18 @@ fn cmd_redos(
         .collect();
 
     // Count by severity
-    let mut severity_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut vuln_type_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut severity_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut vuln_type_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     for finding in &filtered_findings {
-        *severity_counts.entry(finding.severity.to_string()).or_insert(0) += 1;
-        *vuln_type_counts.entry(finding.vulnerability_type.to_string()).or_insert(0) += 1;
+        *severity_counts
+            .entry(finding.severity.to_string())
+            .or_insert(0) += 1;
+        *vuln_type_counts
+            .entry(finding.vulnerability_type.to_string())
+            .or_insert(0) += 1;
     }
 
     let output_result = serde_json::json!({
@@ -7025,10 +8749,11 @@ fn cmd_redos(
     });
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output_result).context("Failed to serialize output")?
+                serde_json::to_string_pretty(&output_result)
+                    .context("Failed to serialize output")?
             );
         }
         OutputFormat::Text | OutputFormat::Mermaid | OutputFormat::Dot | OutputFormat::Csv => {
@@ -7082,6 +8807,832 @@ fn cmd_redos(
     Ok(())
 }
 
+fn cmd_log_injection(
+    path: &PathBuf,
+    lang: Option<Language>,
+    format: OutputFormat,
+    min_severity: &str,
+    min_confidence: &str,
+) -> Result<()> {
+    use security::injection::log_injection::{
+        scan_file_log_injection, scan_log_injection, Confidence, Severity,
+    };
+
+    // Validate path exists
+    require_exists(path)?;
+
+    let lang_str = lang.map(|l| l.to_string());
+
+    // Scan for log injection vulnerabilities
+    let result = if path.is_file() {
+        let findings = scan_file_log_injection(path, lang_str.as_deref())
+            .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
+
+        // Build type and severity counts
+        let mut type_counts = rustc_hash::FxHashMap::default();
+        let mut severity_counts = rustc_hash::FxHashMap::default();
+        for finding in &findings {
+            *type_counts
+                .entry(finding.injection_type.to_string())
+                .or_insert(0) += 1;
+            *severity_counts
+                .entry(finding.severity.to_string())
+                .or_insert(0) += 1;
+        }
+
+        security::injection::log_injection::ScanResult {
+            findings,
+            files_scanned: 1,
+            type_counts,
+            severity_counts,
+        }
+    } else {
+        scan_log_injection(path, lang_str.as_deref())
+            .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?
+    };
+
+    // Parse minimum severity
+    let min_sev = match min_severity.to_lowercase().as_str() {
+        "critical" => Severity::Critical,
+        "high" => Severity::High,
+        "medium" => Severity::Medium,
+        "low" => Severity::Low,
+        _ => Severity::Info,
+    };
+
+    // Parse minimum confidence
+    let min_conf = match min_confidence.to_lowercase().as_str() {
+        "high" => Confidence::High,
+        "medium" => Confidence::Medium,
+        _ => Confidence::Low,
+    };
+
+    // Filter by minimum severity and confidence
+    let filtered_findings: Vec<_> = result
+        .findings
+        .into_iter()
+        .filter(|f| f.severity >= min_sev && f.confidence >= min_conf)
+        .collect();
+
+    // Count by severity and injection type
+    let mut severity_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut type_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
+    for finding in &filtered_findings {
+        *severity_counts
+            .entry(finding.severity.to_string())
+            .or_insert(0) += 1;
+        *type_counts
+            .entry(finding.injection_type.to_string())
+            .or_insert(0) += 1;
+    }
+
+    let output_result = serde_json::json!({
+        "findings": filtered_findings,
+        "files_scanned": result.files_scanned,
+        "vulnerabilities_found": filtered_findings.len(),
+        "severity_counts": severity_counts,
+        "injection_type_counts": type_counts,
+        "language": lang_str.unwrap_or_else(|| "all".to_string()),
+    });
+
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output_result)
+                    .context("Failed to serialize output")?
+            );
+        }
+        OutputFormat::Text | OutputFormat::Mermaid | OutputFormat::Dot | OutputFormat::Csv => {
+            println!("Log Injection Scan Results");
+            println!("==========================");
+            println!();
+            println!("Files scanned: {}", result.files_scanned);
+            println!("Vulnerabilities found: {}", filtered_findings.len());
+            println!();
+
+            if filtered_findings.is_empty() {
+                println!("No log injection vulnerabilities detected.");
+            } else {
+                for (i, finding) in filtered_findings.iter().enumerate() {
+                    println!(
+                        "{}. [{}] [{}] {}:{}",
+                        i + 1,
+                        finding.severity,
+                        finding.confidence,
+                        finding.location.file,
+                        finding.location.line
+                    );
+                    println!("   Type: {}", finding.injection_type);
+                    println!("   Function: {}", finding.log_function);
+                    println!("   Tainted Data: {}", finding.tainted_data);
+                    println!("   CWE: CWE-{}", finding.cwe_id);
+                    if finding.uses_structured_logging {
+                        println!("   Note: Uses structured logging (safer pattern)");
+                    }
+                    if let Some(ref snippet) = finding.code_snippet {
+                        println!("   Code:");
+                        for line in snippet.lines() {
+                            println!("     {}", line);
+                        }
+                    }
+                    println!("   Remediation: {}", finding.remediation);
+                    println!();
+                }
+
+                // Summary
+                println!("Summary by Injection Type:");
+                let mut type_vec: Vec<_> = type_counts.iter().collect();
+                type_vec.sort_by(|a, b| b.1.cmp(a.1));
+                for (inj_type, count) in type_vec {
+                    println!("  {}: {}", inj_type, count);
+                }
+                println!();
+
+                println!("Summary by Severity:");
+                for (severity, count) in &severity_counts {
+                    println!("  {}: {}", severity, count);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_header_injection(
+    path: &PathBuf,
+    lang: Option<Language>,
+    format: OutputFormat,
+    min_severity: &str,
+    min_confidence: &str,
+) -> Result<()> {
+    use security::injection::header_injection::{
+        scan_file_header_injection, scan_header_injection, Confidence, Severity,
+    };
+
+    require_exists(path)?;
+    let lang_str = lang.map(|l| l.to_string());
+
+    let result = if path.is_file() {
+        let findings = scan_file_header_injection(path, lang_str.as_deref())
+            .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
+        let mut type_counts = rustc_hash::FxHashMap::default();
+        let mut severity_counts = rustc_hash::FxHashMap::default();
+        for finding in &findings {
+            *type_counts
+                .entry(finding.injection_type.to_string())
+                .or_insert(0) += 1;
+            *severity_counts
+                .entry(finding.severity.to_string())
+                .or_insert(0) += 1;
+        }
+        security::injection::header_injection::ScanResult {
+            findings,
+            files_scanned: 1,
+            type_counts,
+            severity_counts,
+        }
+    } else {
+        scan_header_injection(path, lang_str.as_deref())
+            .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?
+    };
+
+    let min_sev = match min_severity.to_lowercase().as_str() {
+        "critical" => Severity::Critical,
+        "high" => Severity::High,
+        "medium" => Severity::Medium,
+        "low" => Severity::Low,
+        _ => Severity::Info,
+    };
+    let min_conf = match min_confidence.to_lowercase().as_str() {
+        "high" => Confidence::High,
+        "medium" => Confidence::Medium,
+        _ => Confidence::Low,
+    };
+
+    let filtered_findings: Vec<_> = result
+        .findings
+        .into_iter()
+        .filter(|f| f.severity >= min_sev && f.confidence >= min_conf)
+        .collect();
+
+    let mut severity_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut type_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for finding in &filtered_findings {
+        *severity_counts
+            .entry(finding.severity.to_string())
+            .or_insert(0) += 1;
+        *type_counts
+            .entry(finding.injection_type.to_string())
+            .or_insert(0) += 1;
+    }
+
+    let output_result = serde_json::json!({
+        "findings": filtered_findings, "files_scanned": result.files_scanned,
+        "vulnerabilities_found": filtered_findings.len(),
+        "severity_counts": severity_counts, "injection_type_counts": type_counts,
+        "language": lang_str.unwrap_or_else(|| "all".to_string()),
+    });
+
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output_result).context("Serialize failed")?
+            );
+        }
+        OutputFormat::Text | OutputFormat::Mermaid | OutputFormat::Dot | OutputFormat::Csv => {
+            println!("Header Injection Scan Results\n==============================\n");
+            println!(
+                "Files scanned: {}\nVulnerabilities found: {}\n",
+                result.files_scanned,
+                filtered_findings.len()
+            );
+            if filtered_findings.is_empty() {
+                println!("No header injection vulnerabilities detected.");
+            } else {
+                for (i, f) in filtered_findings.iter().enumerate() {
+                    println!(
+                        "{}. [{}] [{}] {}:{}",
+                        i + 1,
+                        f.severity,
+                        f.confidence,
+                        f.location.file,
+                        f.location.line
+                    );
+                    println!(
+                        "   Type: {}\n   Header: {}\n   Sink: {}",
+                        f.injection_type, f.header_name, f.sink_function
+                    );
+                    println!("   CWE: CWE-{}", f.cwe_id);
+                    if f.framework_protected {
+                        println!("   Note: Framework may auto-sanitize");
+                    }
+                    if let Some(ref s) = f.code_snippet {
+                        println!("   Code:\n     {}", s.replace('\n', "\n     "));
+                    }
+                    println!("   Remediation: {}\n", f.remediation);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_template_injection(
+    path: &PathBuf,
+    lang: Option<Language>,
+    format: OutputFormat,
+    min_severity: &str,
+    min_confidence: &str,
+) -> Result<()> {
+    use security::injection::template_injection::{
+        scan_file_template_injection, scan_template_injection, Confidence, Severity,
+    };
+
+    require_exists(path)?;
+    let lang_str = lang.map(|l| l.to_string());
+
+    let result = if path.is_file() {
+        scan_file_template_injection(path, lang_str.as_deref())
+            .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?
+    } else {
+        scan_template_injection(path, lang_str.as_deref())
+            .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?
+    };
+
+    let min_sev = match min_severity.to_lowercase().as_str() {
+        "critical" => Severity::Critical,
+        "high" => Severity::High,
+        "medium" => Severity::Medium,
+        "low" => Severity::Low,
+        _ => Severity::Info,
+    };
+
+    let min_conf = match min_confidence.to_lowercase().as_str() {
+        "high" => Confidence::High,
+        "medium" => Confidence::Medium,
+        _ => Confidence::Low,
+    };
+
+    let filtered_findings: Vec<_> = result
+        .findings
+        .into_iter()
+        .filter(|f| f.severity >= min_sev && f.confidence >= min_conf)
+        .collect();
+
+    let mut severity_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut engine_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
+    for finding in &filtered_findings {
+        *severity_counts
+            .entry(finding.severity.to_string())
+            .or_insert(0) += 1;
+        *engine_counts
+            .entry(finding.template_engine.to_string())
+            .or_insert(0) += 1;
+    }
+
+    let output_result = serde_json::json!({
+        "findings": filtered_findings,
+        "files_scanned": result.files_scanned,
+        "vulnerabilities_found": filtered_findings.len(),
+        "severity_counts": severity_counts,
+        "engine_counts": engine_counts,
+        "language": lang_str.unwrap_or_else(|| "all".to_string()),
+    });
+
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output_result)
+                    .context("Failed to serialize output")?
+            );
+        }
+        OutputFormat::Text | OutputFormat::Mermaid | OutputFormat::Dot | OutputFormat::Csv => {
+            println!("Template Injection (SSTI) Scan Results");
+            println!("========================================\n");
+            println!("Files scanned: {}", result.files_scanned);
+            println!("Vulnerabilities found: {}\n", filtered_findings.len());
+
+            if filtered_findings.is_empty() {
+                println!("No template injection vulnerabilities detected.");
+            } else {
+                for (i, finding) in filtered_findings.iter().enumerate() {
+                    println!(
+                        "{}. [{}] [{}] {}:{}",
+                        i + 1,
+                        finding.severity,
+                        finding.confidence,
+                        finding.location.file,
+                        finding.location.line
+                    );
+                    println!("   Engine: {}", finding.template_engine);
+                    println!("   Type: {}", finding.injection_type);
+                    println!("   Sink: {}", finding.sink_function);
+                    println!("   CWE: CWE-{}", finding.cwe_id);
+                    if let Some(ref snippet) = finding.code_snippet {
+                        println!("   Code:");
+                        for line in snippet.lines() {
+                            println!("     {}", line);
+                        }
+                    }
+                    println!("   Remediation: {}\n", finding.remediation);
+                }
+
+                println!("Summary by Template Engine:");
+                for (engine, count) in &engine_counts {
+                    println!("  {}: {}", engine, count);
+                }
+                println!("\nSummary by Severity:");
+                for (severity, count) in &severity_counts {
+                    println!("  {}: {}", severity, count);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_ssrf(
+    path: &PathBuf,
+    lang: Option<Language>,
+    format: OutputFormat,
+    min_severity: &str,
+    min_confidence: &str,
+) -> Result<()> {
+    use security::ssrf::{scan_ssrf, Confidence, Severity};
+
+    // Validate path exists
+    require_exists(path)?;
+
+    let lang_str = lang.map(|l| l.to_string());
+
+    // Scan for SSRF vulnerabilities
+    let result = scan_ssrf(path.to_string_lossy().as_ref(), lang_str.as_deref())
+        .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
+
+    // Parse minimum severity
+    let min_sev = match min_severity.to_lowercase().as_str() {
+        "critical" => Severity::Critical,
+        "high" => Severity::High,
+        "medium" => Severity::Medium,
+        "low" => Severity::Low,
+        _ => Severity::Info,
+    };
+
+    // Parse minimum confidence
+    let min_conf = match min_confidence.to_lowercase().as_str() {
+        "high" => Confidence::High,
+        "medium" => Confidence::Medium,
+        _ => Confidence::Low,
+    };
+
+    // Filter by minimum severity and confidence
+    let filtered_findings: Vec<_> = result
+        .findings
+        .into_iter()
+        .filter(|f| f.severity >= min_sev && f.confidence >= min_conf)
+        .collect();
+
+    // Count by severity and SSRF type
+    let mut severity_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut ssrf_type_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
+    for finding in &filtered_findings {
+        *severity_counts
+            .entry(finding.severity.to_string())
+            .or_insert(0) += 1;
+        *ssrf_type_counts
+            .entry(finding.ssrf_type.to_string())
+            .or_insert(0) += 1;
+    }
+
+    let output_result = serde_json::json!({
+        "findings": filtered_findings,
+        "files_scanned": result.files_scanned,
+        "vulnerabilities_found": filtered_findings.len(),
+        "severity_counts": severity_counts,
+        "ssrf_type_counts": ssrf_type_counts,
+        "language": lang_str.unwrap_or_else(|| "all".to_string()),
+        "duration_ms": result.duration_ms,
+    });
+
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output_result)
+                    .context("Failed to serialize output")?
+            );
+        }
+        OutputFormat::Text | OutputFormat::Mermaid | OutputFormat::Dot | OutputFormat::Csv => {
+            println!("SSRF (Server-Side Request Forgery) Scan Results");
+            println!("================================================");
+            println!();
+            println!("Files scanned: {}", result.files_scanned);
+            println!("Vulnerabilities found: {}", filtered_findings.len());
+            if let Some(ms) = result.duration_ms {
+                println!("Duration: {}ms", ms);
+            }
+            println!();
+
+            if filtered_findings.is_empty() {
+                println!("No SSRF vulnerabilities detected.");
+            } else {
+                for (i, finding) in filtered_findings.iter().enumerate() {
+                    println!(
+                        "{}. [{}] [{}] {}:{}",
+                        i + 1,
+                        finding.severity,
+                        finding.confidence,
+                        finding.location.file,
+                        finding.location.line
+                    );
+                    println!("   Type: {}", finding.ssrf_type);
+                    println!("   Sink: {}", finding.sink_function);
+                    println!("   Tainted URL: {}", finding.tainted_url);
+                    if !finding.potential_targets.is_empty() {
+                        println!(
+                            "   Potential Targets: {}",
+                            finding.potential_targets.join(", ")
+                        );
+                    }
+                    println!("   Description: {}", finding.description);
+                    if let Some(ref snippet) = finding.code_snippet {
+                        println!("   Code:");
+                        for line in snippet.lines() {
+                            println!("      {}", line);
+                        }
+                    }
+                    println!();
+                }
+
+                // Summary by SSRF type
+                println!("Summary by SSRF Type:");
+                let mut type_vec: Vec<_> = ssrf_type_counts.iter().collect();
+                type_vec.sort_by(|a, b| b.1.cmp(a.1));
+                for (ssrf_type, count) in type_vec {
+                    println!("  {}: {}", ssrf_type, count);
+                }
+                println!();
+
+                // Summary by severity
+                println!("Summary by Severity:");
+                for (severity, count) in &severity_counts {
+                    println!("  {}: {}", severity, count);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_input_validation(
+    path: &PathBuf,
+    lang: Option<Language>,
+    format: OutputFormat,
+    min_severity: &str,
+    include_recommended: bool,
+    max_files: usize,
+) -> Result<()> {
+    use security::input_validation::{scan_input_validation, InputValidationConfig};
+    use security::types::Severity;
+
+    require_exists(path)?;
+
+    let lang_str = lang.map(|l| l.to_string());
+
+    let min_sev = match min_severity.to_lowercase().as_str() {
+        "critical" => Severity::Critical,
+        "high" => Severity::High,
+        "medium" => Severity::Medium,
+        "low" => Severity::Low,
+        _ => Severity::Info,
+    };
+
+    let config = InputValidationConfig {
+        min_severity: min_sev,
+        include_recommended,
+        analyze_framework_validation: true,
+        max_files,
+        language: lang_str.clone(),
+    };
+
+    let result =
+        scan_input_validation(path, config).map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
+
+    let mut severity_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut sink_type_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut validation_type_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
+    for finding in &result.findings {
+        *severity_counts
+            .entry(finding.severity.to_string())
+            .or_insert(0) += 1;
+        *sink_type_counts
+            .entry(finding.sink_type.to_string())
+            .or_insert(0) += 1;
+        for val_type in &finding.missing_validation {
+            *validation_type_counts
+                .entry(val_type.to_string())
+                .or_insert(0) += 1;
+        }
+    }
+
+    let output_result = serde_json::json!({
+        "findings": result.findings,
+        "files_scanned": result.files_scanned,
+        "files_with_findings": result.files_with_findings,
+        "total_findings": result.findings.len(),
+        "severity_counts": severity_counts,
+        "sink_type_counts": sink_type_counts,
+        "missing_validation_counts": validation_type_counts,
+        "language": lang_str.unwrap_or_else(|| "all".to_string()),
+    });
+
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output_result).context("Failed to serialize")?
+            );
+        }
+        OutputFormat::Text | OutputFormat::Mermaid | OutputFormat::Dot | OutputFormat::Csv => {
+            println!("Input Validation Analysis Results");
+            println!("==================================");
+            println!();
+            println!("Files scanned: {}", result.files_scanned);
+            println!("Files with findings: {}", result.files_with_findings);
+            println!("Total findings: {}", result.findings.len());
+            println!();
+
+            if result.findings.is_empty() {
+                println!("No input validation issues detected.");
+            } else {
+                for (i, finding) in result.findings.iter().enumerate() {
+                    let marker = if finding.is_required {
+                        "[REQUIRED]"
+                    } else {
+                        "[RECOMMENDED]"
+                    };
+                    println!(
+                        "{}. [{}] {} {}:{}",
+                        i + 1,
+                        finding.severity,
+                        marker,
+                        finding.location.file,
+                        finding.location.start_line
+                    );
+                    println!("   Input: {}", finding.input_source);
+                    println!("   Sink: {} ({})", finding.sink, finding.sink_type);
+                    println!("   Variable: {}", finding.variable);
+                    println!("   Missing validations:");
+                    for val_type in &finding.missing_validation {
+                        println!("     - {}", val_type.description());
+                    }
+                    if !finding.applied_validation.is_empty() {
+                        println!("   Applied validations:");
+                        for val_type in &finding.applied_validation {
+                            println!("     + {}", val_type.description());
+                        }
+                    }
+                    if !finding.code_snippet.is_empty() {
+                        println!("   Code: {}", finding.code_snippet);
+                    }
+                    println!("   Recommendation:");
+                    for line in finding.recommendation.lines() {
+                        println!("     {}", line);
+                    }
+                    println!();
+                }
+
+                println!("Summary by Sink Type:");
+                let mut sink_vec: Vec<_> = sink_type_counts.iter().collect();
+                sink_vec.sort_by(|a, b| b.1.cmp(a.1));
+                for (sink_type, count) in sink_vec {
+                    println!("  {}: {}", sink_type, count);
+                }
+                println!();
+
+                println!("Summary by Missing Validation:");
+                let mut val_vec: Vec<_> = validation_type_counts.iter().collect();
+                val_vec.sort_by(|a, b| b.1.cmp(a.1));
+                for (val_type, count) in val_vec {
+                    println!("  {}: {}", val_type, count);
+                }
+                println!();
+
+                println!("Summary by Severity:");
+                for (severity, count) in &severity_counts {
+                    println!("  {}: {}", severity, count);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Scan for JavaScript prototype pollution vulnerabilities.
+fn cmd_prototype_pollution(
+    path: &PathBuf,
+    lang: Option<Language>,
+    format: OutputFormat,
+    min_severity: &str,
+    min_confidence: &str,
+) -> Result<()> {
+    use security::prototype_pollution::{scan_prototype_pollution, Confidence, Severity};
+
+    require_exists(path)?;
+
+    let lang_str = lang.map(|l| l.to_string());
+
+    let result = scan_prototype_pollution(path, lang_str.as_deref())
+        .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
+
+    // Parse severity/confidence filters
+    let min_sev = match min_severity.to_lowercase().as_str() {
+        "critical" => Severity::Critical,
+        "high" => Severity::High,
+        "medium" => Severity::Medium,
+        "low" => Severity::Low,
+        _ => Severity::Info,
+    };
+
+    let min_conf = match min_confidence.to_lowercase().as_str() {
+        "high" => Confidence::High,
+        "medium" => Confidence::Medium,
+        _ => Confidence::Low,
+    };
+
+    // Filter findings
+    let filtered_findings: Vec<_> = result
+        .findings
+        .into_iter()
+        .filter(|f| f.severity >= min_sev && f.confidence >= min_conf)
+        .collect();
+
+    // Rebuild counts from filtered findings
+    let mut type_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut severity_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut rce_count = 0;
+
+    for finding in &filtered_findings {
+        *type_counts
+            .entry(finding.pollution_type.to_string())
+            .or_insert(0) += 1;
+        *severity_counts
+            .entry(finding.severity.to_string())
+            .or_insert(0) += 1;
+        if finding.potential_rce {
+            rce_count += 1;
+        }
+    }
+
+    let output = serde_json::json!({
+        "findings": filtered_findings,
+        "files_scanned": result.files_scanned,
+        "total_findings": filtered_findings.len(),
+        "type_counts": type_counts,
+        "severity_counts": severity_counts,
+        "rce_potential_count": rce_count,
+    });
+
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).context("Failed to serialize")?
+            );
+        }
+        OutputFormat::Text | OutputFormat::Mermaid | OutputFormat::Dot | OutputFormat::Csv => {
+            println!("Prototype Pollution Scan Results");
+            println!("=================================");
+            println!();
+            println!("Files scanned: {}", result.files_scanned);
+            println!("Total findings: {}", filtered_findings.len());
+            println!("RCE potential: {} findings", rce_count);
+            println!();
+
+            if filtered_findings.is_empty() {
+                println!("No prototype pollution vulnerabilities detected.");
+            } else {
+                println!("Findings:");
+                println!("---------");
+                for (i, finding) in filtered_findings.iter().enumerate() {
+                    let rce_marker = if finding.potential_rce {
+                        " [RCE RISK]"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "{}. [{}] [{}]{} - {}:{}",
+                        i + 1,
+                        finding.severity,
+                        finding.pollution_type,
+                        rce_marker,
+                        finding.location.file,
+                        finding.location.line
+                    );
+                    println!("   Sink: {}", finding.sink_function);
+                    println!("   Path: {}", finding.tainted_path);
+                    println!("   Confidence: {}", finding.confidence);
+                    println!("   CWE: CWE-{}", finding.cwe_id);
+                    println!("   Description: {}", finding.description);
+                    if let Some(ref snippet) = finding.code_snippet {
+                        println!("   Code:");
+                        for line in snippet.lines() {
+                            println!("     | {}", line);
+                        }
+                    }
+                    println!("   Remediation: {}", finding.remediation);
+                    if !finding.gadget_chains.is_empty() {
+                        println!("   Gadget Chains:");
+                        for gadget in &finding.gadget_chains {
+                            println!("     - {}", gadget);
+                        }
+                    }
+                    println!();
+                }
+
+                println!("Summary by Pollution Type:");
+                let mut type_vec: Vec<_> = type_counts.iter().collect();
+                type_vec.sort_by(|a, b| b.1.cmp(a.1));
+                for (ptype, count) in type_vec {
+                    println!("  {}: {}", ptype, count);
+                }
+                println!();
+
+                println!("Summary by Severity:");
+                for (severity, count) in &severity_counts {
+                    println!("  {}: {}", severity, count);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // =============================================================================
 // METRICS COMMANDS
 // =============================================================================
@@ -7107,7 +9658,15 @@ fn cmd_metrics(subcmd: MetricsCommands) -> Result<()> {
             violations_only,
             breakdown,
         } => {
-            cmd_cognitive(&path, lang, format, threshold, sort, violations_only, breakdown)?;
+            cmd_cognitive(
+                &path,
+                lang,
+                format,
+                threshold,
+                sort,
+                violations_only,
+                breakdown,
+            )?;
         }
         MetricsCommands::Halstead {
             path,
@@ -7128,7 +9687,15 @@ fn cmd_metrics(subcmd: MetricsCommands) -> Result<()> {
             violations_only,
             include_comments,
         } => {
-            cmd_maintainability(&path, lang, format, threshold, sort, violations_only, include_comments)?;
+            cmd_maintainability(
+                &path,
+                lang,
+                format,
+                threshold,
+                sort,
+                violations_only,
+                include_comments,
+            )?;
         }
         MetricsCommands::Loc {
             path,
@@ -7140,7 +9707,16 @@ fn cmd_metrics(subcmd: MetricsCommands) -> Result<()> {
             violations_only,
             top,
         } => {
-            cmd_loc(&path, lang, format, by_language, sort, function_threshold, violations_only, top)?;
+            cmd_loc(
+                &path,
+                lang,
+                format,
+                by_language,
+                sort,
+                function_threshold,
+                violations_only,
+                top,
+            )?;
         }
         MetricsCommands::Nesting {
             path,
@@ -7151,7 +9727,15 @@ fn cmd_metrics(subcmd: MetricsCommands) -> Result<()> {
             violations_only,
             details,
         } => {
-            cmd_nesting(&path, lang, format, threshold, sort, violations_only, details)?;
+            cmd_nesting(
+                &path,
+                lang,
+                format,
+                threshold,
+                sort,
+                violations_only,
+                details,
+            )?;
         }
         MetricsCommands::Functions {
             path,
@@ -7188,7 +9772,16 @@ fn cmd_metrics(subcmd: MetricsCommands) -> Result<()> {
             show_cycles,
             show_edges,
         } => {
-            cmd_coupling(&path, lang, format, level, sort, threshold, show_cycles, show_edges)?;
+            cmd_coupling(
+                &path,
+                lang,
+                format,
+                level,
+                sort,
+                threshold,
+                show_cycles,
+                show_edges,
+            )?;
         }
         MetricsCommands::Cohesion {
             path,
@@ -7199,7 +9792,15 @@ fn cmd_metrics(subcmd: MetricsCommands) -> Result<()> {
             violations_only,
             show_components,
         } => {
-            cmd_cohesion(&path, lang, format, threshold, sort, violations_only, show_components)?;
+            cmd_cohesion(
+                &path,
+                lang,
+                format,
+                threshold,
+                sort,
+                violations_only,
+                show_components,
+            )?;
         }
         MetricsCommands::Report {
             path,
@@ -7243,7 +9844,7 @@ fn cmd_complexity(
     sort: bool,
     violations_only: bool,
 ) -> Result<()> {
-    use metrics::{analyze_complexity, ComplexityAnalysis, RiskLevel};
+    use metrics::{analyze_complexity, RiskLevel};
 
     // Validate path exists
     require_exists(path)?;
@@ -7255,7 +9856,9 @@ fn cmd_complexity(
 
     // Sort by complexity if requested
     if sort {
-        result.functions.sort_by(|a, b| b.complexity.cmp(&a.complexity));
+        result
+            .functions
+            .sort_by(|a, b| b.complexity.cmp(&a.complexity));
         if let Some(ref mut violations) = result.violations {
             violations.sort_by(|a, b| b.complexity.cmp(&a.complexity));
         }
@@ -7275,7 +9878,7 @@ fn cmd_complexity(
     };
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&output).context("Failed to serialize output")?
@@ -7293,7 +9896,10 @@ fn cmd_complexity(
             // Statistics
             println!("Statistics:");
             println!("  Total functions: {}", result.stats.total_functions);
-            println!("  Average complexity: {:.2}", result.stats.average_complexity);
+            println!(
+                "  Average complexity: {:.2}",
+                result.stats.average_complexity
+            );
             println!("  Min complexity: {}", result.stats.min_complexity);
             println!("  Max complexity: {}", result.stats.max_complexity);
             println!("  Median complexity: {}", result.stats.median_complexity);
@@ -7346,7 +9952,13 @@ fn cmd_complexity(
             if !result.stats.histogram.is_empty() {
                 println!();
                 println!("Complexity Histogram:");
-                let max_count = result.stats.histogram.iter().map(|b| b.count).max().unwrap_or(1);
+                let max_count = result
+                    .stats
+                    .histogram
+                    .iter()
+                    .map(|b| b.count)
+                    .max()
+                    .unwrap_or(1);
                 for bucket in &result.stats.histogram {
                     if bucket.count > 0 {
                         let bar_len = (bucket.count as f64 / max_count as f64 * 40.0) as usize;
@@ -7403,7 +10015,9 @@ fn cmd_cognitive(
 
     // Sort by complexity if requested
     if sort {
-        result.functions.sort_by(|a, b| b.complexity.cmp(&a.complexity));
+        result
+            .functions
+            .sort_by(|a, b| b.complexity.cmp(&a.complexity));
         if let Some(ref mut violations) = result.violations {
             violations.sort_by(|a, b| b.complexity.cmp(&a.complexity));
         }
@@ -7423,7 +10037,7 @@ fn cmd_cognitive(
     };
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&output).context("Failed to serialize output")?
@@ -7441,12 +10055,21 @@ fn cmd_cognitive(
             // Statistics
             println!("Statistics:");
             println!("  Total functions: {}", result.stats.total_functions);
-            println!("  Average complexity: {:.2}", result.stats.average_complexity);
+            println!(
+                "  Average complexity: {:.2}",
+                result.stats.average_complexity
+            );
             println!("  Min complexity: {}", result.stats.min_complexity);
             println!("  Max complexity: {}", result.stats.max_complexity);
             println!("  Median complexity: {}", result.stats.median_complexity);
-            println!("  Average max nesting: {:.2}", result.stats.average_max_nesting);
-            println!("  Functions with recursion: {}", result.stats.functions_with_recursion);
+            println!(
+                "  Average max nesting: {:.2}",
+                result.stats.average_max_nesting
+            );
+            println!(
+                "  Functions with recursion: {}",
+                result.stats.functions_with_recursion
+            );
             println!();
 
             // Risk distribution
@@ -7495,15 +10118,16 @@ fn cmd_cognitive(
                     if show_breakdown && !func.breakdown.is_empty() {
                         for contrib in &func.breakdown {
                             let increment_desc = if contrib.nesting_increment > 0 {
-                                format!("+{} (base) +{} (nesting)", contrib.base_increment, contrib.nesting_increment)
+                                format!(
+                                    "+{} (base) +{} (nesting)",
+                                    contrib.base_increment, contrib.nesting_increment
+                                )
                             } else {
                                 format!("+{}", contrib.base_increment)
                             };
                             println!(
                                 "      L{}: {} {}",
-                                contrib.line,
-                                contrib.construct,
-                                increment_desc
+                                contrib.line, contrib.construct, increment_desc
                             );
                         }
                     }
@@ -7558,13 +10182,15 @@ fn cmd_halstead(
     if sort || sort_by_difficulty {
         if sort_by_difficulty {
             result.functions.sort_by(|a, b| {
-                b.metrics.difficulty
+                b.metrics
+                    .difficulty
                     .partial_cmp(&a.metrics.difficulty)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
         } else {
             result.functions.sort_by(|a, b| {
-                b.metrics.volume
+                b.metrics
+                    .volume
                     .partial_cmp(&a.metrics.volume)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
@@ -7572,7 +10198,7 @@ fn cmd_halstead(
     }
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             let output = serde_json::to_value(&result).context("Failed to serialize result")?;
             println!(
                 "{}",
@@ -7596,7 +10222,8 @@ fn cmd_halstead(
             println!("  Average difficulty: {:.1}", result.stats.avg_difficulty);
             println!("  Max difficulty: {:.1}", result.stats.max_difficulty);
             println!("  Total estimated bugs: {:.2}", result.stats.total_bugs);
-            println!("  Total estimated time: {:.0}s ({:.1}h)",
+            println!(
+                "  Total estimated time: {:.0}s ({:.1}h)",
                 result.stats.total_time_seconds,
                 result.stats.total_time_seconds / 3600.0
             );
@@ -7678,8 +10305,15 @@ fn cmd_halstead(
     }
 
     // Print warning if there are high-complexity functions
-    let high_complexity_count = result.functions.iter()
-        .filter(|f| matches!(f.quality.difficulty_level, QualityLevel::High | QualityLevel::VeryHigh))
+    let high_complexity_count = result
+        .functions
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.quality.difficulty_level,
+                QualityLevel::High | QualityLevel::VeryHigh
+            )
+        })
         .count();
 
     if high_complexity_count > 0 {
@@ -7709,19 +10343,22 @@ fn cmd_maintainability(
 
     let lang_str = lang.map(|l| l.to_string());
 
-    let mut result = analyze_maintainability(path, lang_str.as_deref(), threshold, include_comments)
-        .map_err(|e| anyhow::anyhow!("Maintainability analysis failed: {}", e))?;
+    let mut result =
+        analyze_maintainability(path, lang_str.as_deref(), threshold, include_comments)
+            .map_err(|e| anyhow::anyhow!("Maintainability analysis failed: {}", e))?;
 
     // Sort by MI score (lowest first - worst maintainability)
     if sort {
         result.functions.sort_by(|a, b| {
-            a.index.score
+            a.index
+                .score
                 .partial_cmp(&b.index.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         if let Some(ref mut violations) = result.violations {
             violations.sort_by(|a, b| {
-                a.index.score
+                a.index
+                    .score
                     .partial_cmp(&b.index.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
@@ -7743,7 +10380,7 @@ fn cmd_maintainability(
     };
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&output).context("Failed to serialize output")?
@@ -7771,10 +10408,22 @@ fn cmd_maintainability(
             println!("  Max MI: {:.1}", result.stats.max_mi);
             println!("  Median MI: {:.1}", result.stats.median_mi);
             println!("  Total SLOC: {}", result.stats.total_sloc);
-            println!("  Total comment lines: {}", result.stats.total_comment_lines);
-            println!("  Overall comment %: {:.1}%", result.stats.overall_comment_percentage);
-            println!("  Average Halstead Volume: {:.1}", result.stats.average_volume);
-            println!("  Average Cyclomatic Complexity: {:.1}", result.stats.average_cc);
+            println!(
+                "  Total comment lines: {}",
+                result.stats.total_comment_lines
+            );
+            println!(
+                "  Overall comment %: {:.1}%",
+                result.stats.overall_comment_percentage
+            );
+            println!(
+                "  Average Halstead Volume: {:.1}",
+                result.stats.average_volume
+            );
+            println!(
+                "  Average Cyclomatic Complexity: {:.1}",
+                result.stats.average_cc
+            );
             println!();
 
             // Risk distribution
@@ -7861,7 +10510,9 @@ fn cmd_maintainability(
     }
 
     // Always warn about critical functions
-    let critical_count = result.functions.iter()
+    let critical_count = result
+        .functions
+        .iter()
         .filter(|f| matches!(f.index.risk_level, MaintainabilityRiskLevel::Critical))
         .count();
 
@@ -7886,7 +10537,7 @@ fn cmd_loc(
     violations_only: bool,
     top: usize,
 ) -> Result<()> {
-    use metrics::{analyze_loc, LOCAnalysis};
+    use metrics::analyze_loc;
 
     // Validate path exists
     require_exists(path)?;
@@ -7898,7 +10549,9 @@ fn cmd_loc(
 
     // Sort files by SLOC if requested
     if sort {
-        result.files.sort_by(|a, b| b.metrics.source.cmp(&a.metrics.source));
+        result
+            .files
+            .sort_by(|a, b| b.metrics.source.cmp(&a.metrics.source));
     }
 
     // Filter to violations only if requested
@@ -7924,7 +10577,7 @@ fn cmd_loc(
     };
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&output).context("Failed to serialize output")?
@@ -7946,7 +10599,10 @@ fn cmd_loc(
             println!("  Total logical lines: {}", result.stats.total_logical);
             println!("  Comment lines: {}", result.stats.total_comment);
             println!("  Blank lines: {}", result.stats.total_blank);
-            println!("  Code-to-comment ratio: {:.2}", result.stats.code_to_comment_ratio);
+            println!(
+                "  Code-to-comment ratio: {:.2}",
+                result.stats.code_to_comment_ratio
+            );
             println!("  Blank ratio: {:.1}%", result.stats.blank_ratio);
             println!("  Files analyzed: {}", result.files.len());
             println!("  Average SLOC/file: {:.1}", result.stats.avg_sloc_per_file);
@@ -7958,9 +10614,14 @@ fn cmd_loc(
             // Function statistics
             println!("Function Statistics:");
             println!("  Total functions: {}", result.stats.total_functions);
-            println!("  Average function size: {:.1} SLOC", result.stats.avg_function_size);
-            println!("  Oversized functions (>{} SLOC): {}",
-                function_threshold, result.stats.oversized_function_count);
+            println!(
+                "  Average function size: {:.1} SLOC",
+                result.stats.avg_function_size
+            );
+            println!(
+                "  Oversized functions (>{} SLOC): {}",
+                function_threshold, result.stats.oversized_function_count
+            );
             println!();
 
             // By language if requested
@@ -7980,7 +10641,10 @@ fn cmd_loc(
 
             // Largest files
             if !result.largest_files.is_empty() {
-                println!("Largest Files (top {}):", top.min(result.largest_files.len()));
+                println!(
+                    "Largest Files (top {}):",
+                    top.min(result.largest_files.len())
+                );
                 for (i, file) in result.largest_files.iter().take(top).enumerate() {
                     println!(
                         "  {}. {} - {} SLOC ({:.1}%)",
@@ -8059,7 +10723,9 @@ fn cmd_nesting(
 
     // Sort by depth if requested
     if sort {
-        result.functions.sort_by(|a, b| b.max_depth.cmp(&a.max_depth));
+        result
+            .functions
+            .sort_by(|a, b| b.max_depth.cmp(&a.max_depth));
         if let Some(ref mut violations) = result.violations {
             violations.sort_by(|a, b| b.max_depth.cmp(&a.max_depth));
         }
@@ -8079,7 +10745,7 @@ fn cmd_nesting(
     };
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&output).context("Failed to serialize output")?
@@ -8233,10 +10899,7 @@ fn cmd_function_size(
     params_critical: u32,
     details: bool,
 ) -> Result<()> {
-    use metrics::{
-        analyze_function_size, SizeThresholds, SizeSortBy,
-        sort_functions,
-    };
+    use metrics::{analyze_function_size, sort_size_functions, SizeSortBy, SizeThresholds};
 
     // Validate path exists
     require_exists(path)?;
@@ -8258,8 +10921,8 @@ fn cmd_function_size(
     // Sort if requested
     if let Some(ref sort_field) = sort_by {
         let sort_option = sort_field.parse::<SizeSortBy>().unwrap_or(SizeSortBy::Sloc);
-        sort_functions(&mut result.functions, sort_option, true); // descending
-        sort_functions(&mut result.violations, sort_option, true);
+        sort_size_functions(&mut result.functions, sort_option, true); // descending
+        sort_size_functions(&mut result.violations, sort_option, true);
     }
 
     // Filter to violations only if requested
@@ -8276,7 +10939,7 @@ fn cmd_function_size(
     };
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&output).context("Failed to serialize output")?
@@ -8298,19 +10961,14 @@ fn cmd_function_size(
                 "  Functions with issues: {} ({:.1}%)",
                 result.stats.functions_with_issues,
                 if result.stats.total_functions > 0 {
-                    result.stats.functions_with_issues as f64 / result.stats.total_functions as f64 * 100.0
+                    result.stats.functions_with_issues as f64 / result.stats.total_functions as f64
+                        * 100.0
                 } else {
                     0.0
                 }
             );
-            println!(
-                "  Critical issues: {}",
-                result.stats.critical_issues
-            );
-            println!(
-                "  Warning issues: {}",
-                result.stats.warning_issues
-            );
+            println!("  Critical issues: {}", result.stats.critical_issues);
+            println!("  Warning issues: {}", result.stats.warning_issues);
             println!("  Average SLOC: {:.1}", result.stats.avg_sloc);
             println!("  Max SLOC: {}", result.stats.max_sloc);
             println!("  Average parameters: {:.1}", result.stats.avg_parameters);
@@ -8369,9 +11027,7 @@ fn cmd_function_size(
 
                 for func in functions_to_show {
                     let severity = func.max_severity();
-                    let color = severity
-                        .map(|s| s.color_code())
-                        .unwrap_or("\x1b[32m"); // Green if no issues
+                    let color = severity.map(|s| s.color_code()).unwrap_or("\x1b[32m"); // Green if no issues
 
                     let issue_indicator = if func.issues.is_empty() {
                         "OK".to_string()
@@ -8440,8 +11096,7 @@ fn cmd_function_size(
         eprintln!();
         eprintln!(
             "WARNING: {} function(s) with {} issue(s) detected (consider refactoring)",
-            result.stats.functions_with_issues,
-            total_issues
+            result.stats.functions_with_issues, total_issues
         );
         if result.stats.critical_issues > 0 {
             eprintln!(
@@ -8504,7 +11159,7 @@ fn cmd_coupling(
     }
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&output).context("Failed to serialize output")?
@@ -8526,7 +11181,10 @@ fn cmd_coupling(
             println!("  Total dependencies: {}", result.stats.total_dependencies);
             println!("  Average afferent (Ca): {:.2}", result.stats.avg_afferent);
             println!("  Average efferent (Ce): {:.2}", result.stats.avg_efferent);
-            println!("  Average instability (I): {:.2}", result.stats.avg_instability);
+            println!(
+                "  Average instability (I): {:.2}",
+                result.stats.avg_instability
+            );
             println!("  Average distance (D): {:.2}", result.stats.avg_distance);
             println!();
 
@@ -8583,7 +11241,12 @@ fn cmd_coupling(
             if show_cycles && !result.circular_dependencies.is_empty() {
                 println!("\x1b[31mCircular Dependencies Detected:\x1b[0m");
                 for (i, cycle) in result.circular_dependencies.iter().enumerate() {
-                    println!("  {}. {} -> {}", i + 1, cycle.join(" -> "), cycle.first().unwrap_or(&String::new()));
+                    println!(
+                        "  {}. {} -> {}",
+                        i + 1,
+                        cycle.join(" -> "),
+                        cycle.first().unwrap_or(&String::new())
+                    );
                 }
                 println!();
             }
@@ -8652,22 +11315,30 @@ fn cmd_coupling(
                     CouplingRisk::High => "fill:#FFA07A",     // Light salmon
                     CouplingRisk::Critical => "fill:#FF6B6B", // Red
                 };
-                let node_id = module.module.replace('.', "_").replace('/', "_").replace(':', "_");
+                let node_id = module
+                    .module
+                    .replace('.', "_")
+                    .replace('/', "_")
+                    .replace(':', "_");
                 println!(
                     "    {}[\"{}<br/>Ca={} Ce={} I={:.2}\"]",
-                    node_id,
-                    module.module,
-                    module.afferent,
-                    module.efferent,
-                    module.instability
+                    node_id, module.module, module.afferent, module.efferent, module.instability
                 );
                 println!("    style {} {}", node_id, style);
             }
 
             // Add edges
             for edge in &result.edges {
-                let from_id = edge.from.replace('.', "_").replace('/', "_").replace(':', "_");
-                let to_id = edge.to.replace('.', "_").replace('/', "_").replace(':', "_");
+                let from_id = edge
+                    .from
+                    .replace('.', "_")
+                    .replace('/', "_")
+                    .replace(':', "_");
+                let to_id = edge
+                    .to
+                    .replace('.', "_")
+                    .replace('/', "_")
+                    .replace(':', "_");
                 println!("    {} --> {}", from_id, to_id);
             }
         }
@@ -8688,7 +11359,11 @@ fn cmd_coupling(
                     CouplingRisk::High => "lightsalmon",
                     CouplingRisk::Critical => "lightcoral",
                 };
-                let node_id = module.module.replace('.', "_").replace('/', "_").replace(':', "_");
+                let node_id = module
+                    .module
+                    .replace('.', "_")
+                    .replace('/', "_")
+                    .replace(':', "_");
                 println!(
                     "    {} [label=\"{}\\nCa={} Ce={}\\nI={:.2} D={:.2}\" fillcolor={} style=filled];",
                     node_id,
@@ -8705,8 +11380,16 @@ fn cmd_coupling(
 
             // Add edges
             for edge in &result.edges {
-                let from_id = edge.from.replace('.', "_").replace('/', "_").replace(':', "_");
-                let to_id = edge.to.replace('.', "_").replace('/', "_").replace(':', "_");
+                let from_id = edge
+                    .from
+                    .replace('.', "_")
+                    .replace('/', "_")
+                    .replace(':', "_");
+                let to_id = edge
+                    .to
+                    .replace('.', "_")
+                    .replace('/', "_")
+                    .replace(':', "_");
                 let style = match edge.dependency_type {
                     metrics::DependencyType::Import => "solid",
                     metrics::DependencyType::Call => "dashed",
@@ -8807,7 +11490,7 @@ fn cmd_cohesion(
     };
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&output).context("Failed to serialize output")?
@@ -8826,11 +11509,17 @@ fn cmd_cohesion(
             println!("Statistics:");
             println!("  Total classes: {}", result.stats.total_classes);
             println!("  Cohesive (LCOM3=1): {}", result.stats.cohesive_classes);
-            println!("  Low cohesion (LCOM3>1): {}", result.stats.low_cohesion_classes);
+            println!(
+                "  Low cohesion (LCOM3>1): {}",
+                result.stats.low_cohesion_classes
+            );
             println!("  Average LCOM3: {:.2}", result.stats.average_lcom3);
             println!("  Max LCOM3: {}", result.stats.max_lcom3);
             println!("  Average methods: {:.1}", result.stats.average_methods);
-            println!("  Average attributes: {:.1}", result.stats.average_attributes);
+            println!(
+                "  Average attributes: {:.1}",
+                result.stats.average_attributes
+            );
             println!();
 
             // Distribution
@@ -8844,7 +11533,11 @@ fn cmd_cohesion(
 
             // Classes
             let classes_to_show = if violations_only {
-                result.violations.as_ref().map(|v| v.as_slice()).unwrap_or(&[])
+                result
+                    .violations
+                    .as_ref()
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[])
             } else {
                 &result.classes
             };
@@ -8923,8 +11616,8 @@ fn cmd_metrics_report(
     show_tokens: bool,
 ) -> Result<i32> {
     use metrics::{
-        analyze_all_metrics, MetricsConfig, MetricThresholds, QualityGate,
-        FunctionSortBy, IssueSeverity, sort_unified_functions,
+        analyze_all_metrics, sort_unified_functions, FunctionSortBy, IssueSeverity,
+        MetricThresholds, MetricsConfig, QualityGate,
     };
 
     // Validate path exists
@@ -8965,15 +11658,17 @@ fn cmd_metrics_report(
 
     // Filter to issues only if requested
     let functions_to_show = if issues_only {
-        report.function_metrics.iter()
+        report
+            .function_metrics
+            .iter()
             .filter(|f| {
-                !f.size_issues.is_empty() ||
-                f.cyclomatic_risk == metrics::RiskLevel::High ||
-                f.cyclomatic_risk == metrics::RiskLevel::Critical ||
-                f.cognitive_risk == metrics::CognitiveRiskLevel::High ||
-                f.cognitive_risk == metrics::CognitiveRiskLevel::Critical ||
-                f.maintainability_risk == metrics::MaintainabilityRiskLevel::High ||
-                f.maintainability_risk == metrics::MaintainabilityRiskLevel::Critical
+                !f.size_issues.is_empty()
+                    || f.cyclomatic_risk == metrics::RiskLevel::High
+                    || f.cyclomatic_risk == metrics::RiskLevel::Critical
+                    || f.cognitive_risk == metrics::CognitiveRiskLevel::High
+                    || f.cognitive_risk == metrics::CognitiveRiskLevel::Critical
+                    || f.maintainability_risk == metrics::MaintainabilityRiskLevel::High
+                    || f.maintainability_risk == metrics::MaintainabilityRiskLevel::Critical
             })
             .take(top)
             .cloned()
@@ -8986,7 +11681,7 @@ fn cmd_metrics_report(
     eprintln!("Analysis completed in {:.2}s", elapsed.as_secs_f64());
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             // Build filtered output
             let output = if issues_only {
                 serde_json::json!({
@@ -9008,9 +11703,13 @@ fn cmd_metrics_report(
             );
         }
         OutputFormat::Text => {
-            println!("================================================================================");
+            println!(
+                "================================================================================"
+            );
             println!("                      UNIFIED METRICS REPORT");
-            println!("================================================================================");
+            println!(
+                "================================================================================"
+            );
             println!();
             println!("Path: {}", report.path.display());
             if let Some(ref lang) = report.language {
@@ -9028,26 +11727,62 @@ fn cmd_metrics_report(
             println!("  Classes: {}", report.project_summary.total_classes);
             println!();
             println!("  Lines of Code:");
-            println!("    Physical: {}", report.project_summary.total_loc.physical);
-            println!("    Source (SLOC): {}", report.project_summary.total_loc.source);
+            println!(
+                "    Physical: {}",
+                report.project_summary.total_loc.physical
+            );
+            println!(
+                "    Source (SLOC): {}",
+                report.project_summary.total_loc.source
+            );
             println!("    Logical: {}", report.project_summary.total_loc.logical);
             println!("    Comment: {}", report.project_summary.total_loc.comment);
             println!();
             println!("  Averages:");
-            println!("    Cyclomatic complexity: {:.2}", report.project_summary.avg_cyclomatic);
-            println!("    Cognitive complexity: {:.2}", report.project_summary.avg_cognitive);
-            println!("    Maintainability Index: {:.2}", report.project_summary.avg_maintainability);
-            println!("    Nesting depth: {:.2}", report.project_summary.avg_nesting);
-            println!("    Function size (SLOC): {:.2}", report.project_summary.avg_function_size);
+            println!(
+                "    Cyclomatic complexity: {:.2}",
+                report.project_summary.avg_cyclomatic
+            );
+            println!(
+                "    Cognitive complexity: {:.2}",
+                report.project_summary.avg_cognitive
+            );
+            println!(
+                "    Maintainability Index: {:.2}",
+                report.project_summary.avg_maintainability
+            );
+            println!(
+                "    Nesting depth: {:.2}",
+                report.project_summary.avg_nesting
+            );
+            println!(
+                "    Function size (SLOC): {:.2}",
+                report.project_summary.avg_function_size
+            );
             println!();
             println!("  Halstead Estimates:");
-            println!("    Estimated bugs: {:.2}", report.project_summary.total_estimated_bugs);
-            println!("    Estimated hours: {:.1}", report.project_summary.total_estimated_hours);
+            println!(
+                "    Estimated bugs: {:.2}",
+                report.project_summary.total_estimated_bugs
+            );
+            println!(
+                "    Estimated hours: {:.1}",
+                report.project_summary.total_estimated_hours
+            );
             println!();
             println!("  Quality Indicators:");
-            println!("    Files with critical issues: {}", report.project_summary.files_with_critical_issues);
-            println!("    Complex functions: {}", report.project_summary.complex_functions);
-            println!("    Low cohesion classes: {}", report.project_summary.low_cohesion_classes);
+            println!(
+                "    Files with critical issues: {}",
+                report.project_summary.files_with_critical_issues
+            );
+            println!(
+                "    Complex functions: {}",
+                report.project_summary.complex_functions
+            );
+            println!(
+                "    Low cohesion classes: {}",
+                report.project_summary.low_cohesion_classes
+            );
             println!();
 
             // Issue Summary
@@ -9071,7 +11806,9 @@ fn cmd_metrics_report(
 
             // Top Issues
             if !report.issues.is_empty() {
-                let critical_issues: Vec<_> = report.issues.iter()
+                let critical_issues: Vec<_> = report
+                    .issues
+                    .iter()
                     .filter(|i| i.severity == IssueSeverity::Critical)
                     .take(10)
                     .collect();
@@ -9141,7 +11878,9 @@ fn cmd_metrics_report(
 
             // Class Cohesion (if analyzed)
             if !report.class_metrics.is_empty() {
-                let low_cohesion: Vec<_> = report.class_metrics.iter()
+                let low_cohesion: Vec<_> = report
+                    .class_metrics
+                    .iter()
                     .filter(|c| c.is_low_cohesion)
                     .take(10)
                     .collect();
@@ -9167,7 +11906,9 @@ fn cmd_metrics_report(
                 }
             }
 
-            println!("================================================================================");
+            println!(
+                "================================================================================"
+            );
         }
         OutputFormat::Csv => {
             // CSV output - function metrics by default
@@ -9179,7 +11920,7 @@ fn cmd_metrics_report(
                 print!("{}", metrics::format_functions_csv(&functions_to_show));
             }
         }
-        OutputFormat::Mermaid | OutputFormat::Dot | OutputFormat::Csv => {
+        OutputFormat::Mermaid | OutputFormat::Dot => {
             // Not applicable for metrics report - output JSON
             let output = serde_json::to_value(&report).context("Failed to serialize report")?;
             println!(
@@ -9201,7 +11942,10 @@ fn cmd_metrics_report(
             },
             "critical" => QualityGate::default(),
             _ => {
-                eprintln!("Unknown fail-on level: {}. Use 'warning' or 'critical'", fail_level);
+                eprintln!(
+                    "Unknown fail-on level: {}. Use 'warning' or 'critical'",
+                    fail_level
+                );
                 QualityGate::default()
             }
         };
@@ -9228,11 +11972,647 @@ fn cmd_metrics_report(
 }
 
 // =============================================================================
+// DATAFLOW COMMANDS
+// =============================================================================
+
+fn cmd_dataflow(subcmd: DataflowCommands) -> Result<()> {
+    match subcmd {
+        DataflowCommands::LiveVars {
+            file,
+            function,
+            lang,
+            format,
+            interference,
+            dead_stores_only,
+        } => {
+            cmd_live_vars(
+                &file,
+                &function,
+                lang,
+                format,
+                interference,
+                dead_stores_only,
+            )?;
+        }
+        DataflowCommands::ReachingDefs {
+            file,
+            function,
+            lang,
+            format,
+            chains,
+        } => {
+            cmd_reaching_defs(&file, &function, lang, format, chains)?;
+        }
+        DataflowCommands::Constants {
+            file,
+            function,
+            lang,
+            format,
+            optimizations_only,
+        } => {
+            cmd_constants(&file, &function, lang, format, optimizations_only)?;
+        }
+        DataflowCommands::VeryBusy {
+            file,
+            function,
+            lang,
+            format,
+            hoisting_only,
+        } => {
+            cmd_very_busy(&file, &function, lang, format, hoisting_only)?;
+        }
+        DataflowCommands::AvailableExprs {
+            file,
+            function,
+            lang,
+            format,
+            cse_only,
+        } => {
+            cmd_available_exprs(&file, &function, lang, format, cse_only)?;
+        }
+    }
+    Ok(())
+}
+
+fn cmd_live_vars(
+    file: &PathBuf,
+    function: &str,
+    lang: Option<Language>,
+    format: OutputFormat,
+    show_interference: bool,
+    dead_stores_only: bool,
+) -> Result<()> {
+    use dataflow::live_variables;
+
+    // Validate file exists
+    require_file(file)?;
+
+    let file_str = file.to_str().context("Invalid file path")?;
+    let lang_str = lang.map(|l| l.to_string());
+
+    // Run live variable analysis
+    let result =
+        live_variables::analyze_file_with_language(file_str, function, lang_str.as_deref())
+            .context("Failed to analyze live variables")?;
+
+    // Output based on format and options
+    if dead_stores_only {
+        // Only show dead stores
+        let dead_stores_output = serde_json::json!({
+            "function_name": result.function_name,
+            "dead_stores": result.dead_stores.iter().map(|ds| {
+                serde_json::json!({
+                    "variable": ds.variable,
+                    "line": ds.location.line,
+                    "reason": format!("{:?}", ds.reason),
+                    "severity": format!("{:?}", ds.severity),
+                    "suggestion": ds.suggestion,
+                })
+            }).collect::<Vec<_>>(),
+            "unused_parameters": result.unused_parameters,
+            "summary": {
+                "dead_store_count": result.metrics.dead_store_count,
+                "unused_param_count": result.metrics.unused_param_count,
+            }
+        });
+
+        match format {
+            OutputFormat::Text => {
+                println!("Dead Stores in {}:", result.function_name);
+                if result.dead_stores.is_empty() && result.unused_parameters.is_empty() {
+                    println!("  No dead stores or unused parameters found.");
+                } else {
+                    for ds in &result.dead_stores {
+                        println!(
+                            "  Line {}: '{}' - {} [{:?}]",
+                            ds.location.line, ds.variable, ds.reason, ds.severity
+                        );
+                        if let Some(ref suggestion) = ds.suggestion {
+                            println!("    Suggestion: {}", suggestion);
+                        }
+                    }
+                    for param in &result.unused_parameters {
+                        println!("  Unused parameter: '{}'", param);
+                    }
+                }
+            }
+            _ => {
+                println!("{}", serde_json::to_string_pretty(&dead_stores_output)?);
+            }
+        }
+    } else if show_interference {
+        // Show interference graph
+        let interference = live_variables::compute_interference(&result);
+        let output = serde_json::json!({
+            "function_name": result.function_name,
+            "interference": interference.iter().map(|(var, interferes)| {
+                (var.clone(), interferes.iter().cloned().collect::<Vec<_>>())
+            }).collect::<std::collections::HashMap<_, _>>(),
+            "variable_count": interference.len(),
+        });
+
+        match format {
+            OutputFormat::Text => {
+                println!("Interference Graph for {}:", result.function_name);
+                let mut vars: Vec<_> = interference.keys().collect();
+                vars.sort();
+                for var in vars {
+                    if let Some(interferes) = interference.get(var) {
+                        let mut ilist: Vec<_> = interferes.iter().collect();
+                        ilist.sort();
+                        println!("  {} interferes with: {:?}", var, ilist);
+                    }
+                }
+            }
+            _ => {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+        }
+    } else {
+        // Full output
+        match format {
+            OutputFormat::Text => {
+                println!("{}", result.to_text());
+            }
+            _ => {
+                println!("{}", serde_json::to_string_pretty(&result.to_json())?);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_reaching_defs(
+    file: &PathBuf,
+    function: &str,
+    lang: Option<Language>,
+    format: OutputFormat,
+    show_chains: bool,
+) -> Result<()> {
+    use dataflow::reaching_definitions;
+
+    // Validate file exists
+    require_file(file)?;
+
+    let file_str = file.to_str().context("Invalid file path")?;
+    let lang_str = lang.map(|l| l.to_string());
+
+    // Run reaching definitions analysis
+    let result = reaching_definitions::analyze_reaching_definitions_with_language(
+        file_str,
+        function,
+        lang_str.as_deref(),
+    )
+    .context("Failed to analyze reaching definitions")?;
+
+    // Output based on format
+    match format {
+        OutputFormat::Text => {
+            println!("Reaching Definitions Analysis: {}", result.function_name);
+            println!("{}", "=".repeat(50));
+
+            println!("\nDefinitions:");
+            for def in &result.definitions {
+                println!(
+                    "  D{}: {} at line {} ({:?})",
+                    def.def_id.0, def.variable, def.location.line, def.kind
+                );
+            }
+
+            if show_chains {
+                println!("\nDef-Use Chains:");
+                for chain in &result.def_use_chains {
+                    println!("  D{} -> lines {:?}", chain.definition.0, chain.uses);
+                }
+            }
+
+            if !result.issues.is_empty() {
+                println!("\nIssues:");
+                for issue in &result.issues {
+                    println!(
+                        "  Line {}: {:?} - {}",
+                        issue.location.line, issue.kind, issue.message
+                    );
+                }
+            }
+
+            println!(
+                "\nMetrics: {} definitions, {} def-use chains, {} issues",
+                result.definitions.len(),
+                result.def_use_chains.len(),
+                result.issues.len()
+            );
+        }
+        _ => {
+            let output = serde_json::json!({
+                "function_name": result.function_name,
+                "definitions": result.definitions.iter().map(|d| {
+                    serde_json::json!({
+                        "id": d.def_id.0,
+                        "variable": d.variable,
+                        "line": d.location.line,
+                        "kind": format!("{:?}", d.kind),
+                    })
+                }).collect::<Vec<_>>(),
+                "def_use_chains": if show_chains {
+                    Some(result.def_use_chains.iter().map(|c| {
+                        serde_json::json!({
+                            "definition": c.definition.0,
+                            "uses": c.uses,
+                        })
+                    }).collect::<Vec<_>>())
+                } else {
+                    None
+                },
+                "issues": result.issues.iter().map(|i| {
+                    serde_json::json!({
+                        "line": i.location.line,
+                        "kind": format!("{:?}", i.kind),
+                        "message": i.message,
+                    })
+                }).collect::<Vec<_>>(),
+                "summary": {
+                    "definition_count": result.definitions.len(),
+                    "chain_count": result.def_use_chains.len(),
+                    "issue_count": result.issues.len(),
+                }
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_constants(
+    file: &PathBuf,
+    function: &str,
+    lang: Option<Language>,
+    format: OutputFormat,
+    optimizations_only: bool,
+) -> Result<()> {
+    use dataflow::constant_propagation;
+
+    // Validate file exists
+    require_file(file)?;
+
+    let file_str = file.to_str().context("Invalid file path")?;
+    let lang_str = lang.map(|l| l.to_string());
+
+    // Run constant propagation analysis
+    let result = constant_propagation::analyze_constants_with_language(
+        file_str,
+        function,
+        lang_str.as_deref(),
+    )
+    .context("Failed to analyze constant propagation")?;
+
+    // Output based on format
+    match format {
+        OutputFormat::Text => {
+            println!("Constant Propagation Analysis: {}", result.function_name);
+            println!("{}", "=".repeat(50));
+
+            if !optimizations_only {
+                println!("\nConstants at program points:");
+                let mut points: Vec<_> = result.constants_at_point.iter().collect();
+                points.sort_by_key(|(k, _)| *k);
+                for ((block_id, stmt_idx), constants) in points {
+                    if !constants.is_empty() {
+                        let constants_str: Vec<_> = constants
+                            .iter()
+                            .map(|(var, val)| format!("{} = {}", var, val))
+                            .collect();
+                        println!(
+                            "  Block {} stmt {}: {}",
+                            block_id,
+                            stmt_idx,
+                            constants_str.join(", ")
+                        );
+                    }
+                }
+            }
+
+            if !result.folded_expressions.is_empty() {
+                println!("\nConstant Folding Opportunities:");
+                for folded in &result.folded_expressions {
+                    println!(
+                        "  Line {}: {} can be folded to {}",
+                        folded.location.line, folded.original, folded.folded_value
+                    );
+                }
+            }
+
+            if !result.dead_branches.is_empty() {
+                println!("\nDead Branches:");
+                for dead in &result.dead_branches {
+                    println!(
+                        "  Line {}: {} is always {}",
+                        dead.location.line, dead.condition, dead.always_value
+                    );
+                    if !dead.unreachable_lines.is_empty() {
+                        println!("    Unreachable lines: {:?}", dead.unreachable_lines);
+                    }
+                }
+            }
+
+            println!(
+                "\nSummary: {} iterations, {} folding opportunities, {} dead branches",
+                result.iterations,
+                result.folded_expressions.len(),
+                result.dead_branches.len()
+            );
+        }
+        _ => {
+            let output = if optimizations_only {
+                serde_json::json!({
+                    "function_name": result.function_name,
+                    "folded_expressions": result.folded_expressions.iter().map(|f| {
+                        serde_json::json!({
+                            "line": f.location.line,
+                            "original": f.original,
+                            "folded_value": format!("{}", f.folded_value),
+                        })
+                    }).collect::<Vec<_>>(),
+                    "dead_branches": result.dead_branches.iter().map(|d| {
+                        serde_json::json!({
+                            "line": d.location.line,
+                            "condition": d.condition,
+                            "always_value": d.always_value,
+                            "unreachable_lines": d.unreachable_lines,
+                        })
+                    }).collect::<Vec<_>>(),
+                    "summary": {
+                        "iterations": result.iterations,
+                        "converged": result.converged,
+                        "folding_opportunities": result.folded_expressions.len(),
+                        "dead_branches": result.dead_branches.len(),
+                    }
+                })
+            } else {
+                serde_json::json!({
+                    "function_name": result.function_name,
+                    "constants_at_point": result.constants_at_point.iter().map(|((block, stmt), constants)| {
+                        serde_json::json!({
+                            "block_id": block,
+                            "stmt_index": stmt,
+                            "constants": constants.iter().map(|(var, val)| {
+                                serde_json::json!({
+                                    "variable": var,
+                                    "value": format!("{}", val),
+                                })
+                            }).collect::<Vec<_>>(),
+                        })
+                    }).collect::<Vec<_>>(),
+                    "folded_expressions": result.folded_expressions.iter().map(|f| {
+                        serde_json::json!({
+                            "line": f.location.line,
+                            "original": f.original,
+                            "folded_value": format!("{}", f.folded_value),
+                        })
+                    }).collect::<Vec<_>>(),
+                    "dead_branches": result.dead_branches.iter().map(|d| {
+                        serde_json::json!({
+                            "line": d.location.line,
+                            "condition": d.condition,
+                            "always_value": d.always_value,
+                            "unreachable_lines": d.unreachable_lines,
+                        })
+                    }).collect::<Vec<_>>(),
+                    "summary": {
+                        "iterations": result.iterations,
+                        "converged": result.converged,
+                        "folding_opportunities": result.folded_expressions.len(),
+                        "dead_branches": result.dead_branches.len(),
+                    }
+                })
+            };
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_very_busy(
+    file: &PathBuf,
+    function: &str,
+    lang: Option<Language>,
+    format: OutputFormat,
+    hoisting_only: bool,
+) -> Result<()> {
+    use dataflow::very_busy_expressions;
+
+    // Validate file exists
+    require_file(file)?;
+
+    let file_str = file.to_str().context("Invalid file path")?;
+    let lang_str = lang.map(|l| l.to_string());
+
+    // Run very busy expressions analysis
+    let result = very_busy_expressions::analyze_very_busy_expressions_with_language(
+        file_str,
+        function,
+        lang_str.as_deref(),
+    )
+    .context("Failed to analyze very busy expressions")?;
+
+    // Output based on format
+    match format {
+        OutputFormat::Text => {
+            if hoisting_only {
+                println!("Hoisting Opportunities: {}", result.function_name);
+                println!("{}", "=".repeat(50));
+
+                if result.hoisting_opportunities.is_empty() {
+                    println!("\nNo hoisting opportunities detected.");
+                } else {
+                    for opp in &result.hoisting_opportunities {
+                        let current_lines: Vec<_> =
+                            opp.current_locations.iter().map(|l| l.line).collect();
+                        println!("\n  Expression: {}", opp.expression.to_string_repr());
+                        println!("  Current locations: lines {:?}", current_lines);
+                        println!("  Can hoist to: line {}", opp.hoist_to.line);
+                        println!("  Benefit: {}", opp.benefit);
+                        println!("  Occurrences saved: {}", opp.occurrences_saved);
+                        for note in &opp.safety_notes {
+                            println!("  Note: {}", note);
+                        }
+                    }
+                }
+                println!(
+                    "\nSummary: {} hoisting opportunities found",
+                    result.hoisting_opportunities.len()
+                );
+            } else {
+                println!("{}", result.to_text());
+            }
+        }
+        _ => {
+            let output = if hoisting_only {
+                serde_json::json!({
+                    "function_name": result.function_name,
+                    "hoisting_opportunities": result.hoisting_opportunities.iter().map(|opp| {
+                        serde_json::json!({
+                            "expression": opp.expression.to_string_repr(),
+                            "current_locations": opp.current_locations.iter().map(|loc| {
+                                serde_json::json!({
+                                    "line": loc.line,
+                                    "block": loc.block_id.0,
+                                })
+                            }).collect::<Vec<_>>(),
+                            "hoist_to": {
+                                "line": opp.hoist_to.line,
+                                "block": opp.hoist_to.block_id.0,
+                            },
+                            "benefit": opp.benefit.to_string(),
+                            "occurrences_saved": opp.occurrences_saved,
+                            "safety_notes": opp.safety_notes,
+                        })
+                    }).collect::<Vec<_>>(),
+                    "summary": {
+                        "hoisting_count": result.hoisting_opportunities.len(),
+                    }
+                })
+            } else {
+                result.to_json()
+            };
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_available_exprs(
+    file: &PathBuf,
+    function: &str,
+    lang: Option<Language>,
+    format: OutputFormat,
+    cse_only: bool,
+) -> Result<()> {
+    use dataflow::available_expressions;
+
+    // Validate file exists
+    require_file(file)?;
+
+    let file_str = file.to_str().context("Invalid file path")?;
+    let lang_str = lang.map(|l| l.to_string());
+
+    // Run available expressions analysis
+    let result = available_expressions::analyze_available_expressions_with_language(
+        file_str,
+        function,
+        lang_str.as_deref(),
+    )
+    .context("Failed to analyze available expressions")?;
+
+    // Output based on format
+    match format {
+        OutputFormat::Text => {
+            if cse_only {
+                println!("CSE Opportunities: {}", result.function_name);
+                println!("{}", "=".repeat(50));
+
+                if result.cse_opportunities.is_empty() {
+                    println!("\nNo CSE opportunities detected.");
+                } else {
+                    for cse in &result.cse_opportunities {
+                        println!("\n  Expression: {}", cse.expression.text);
+                        println!("    First computed at line {}", cse.first_computation.line);
+                        for redundant in &cse.redundant_computations {
+                            println!("    Redundant at line {} (can reuse)", redundant.line);
+                        }
+                        println!("    Suggested temp: {}", cse.suggested_temp_name);
+                        println!(
+                            "    Estimated savings: {} computation(s)",
+                            cse.estimated_savings
+                        );
+                        let safety = if cse.is_safe { "safe" } else { "unsafe" };
+                        println!("    Safety: {}", safety);
+                    }
+                }
+
+                // Also show loop invariants
+                if !result.loop_invariants.is_empty() {
+                    println!("\nLoop Invariants (can be hoisted):");
+                    for inv in &result.loop_invariants {
+                        let safety = if inv.is_safe_to_hoist {
+                            "safe"
+                        } else {
+                            "unsafe"
+                        };
+                        println!(
+                            "  {} at loop {} ({})",
+                            inv.expression.text, inv.loop_header.0, safety
+                        );
+                    }
+                }
+
+                println!(
+                    "\nSummary: {} CSE opportunities, {} loop invariants",
+                    result.cse_opportunities.len(),
+                    result.loop_invariants.len()
+                );
+            } else {
+                println!("{}", result.to_text());
+            }
+        }
+        _ => {
+            let output = if cse_only {
+                serde_json::json!({
+                    "function_name": result.function_name,
+                    "cse_opportunities": result.cse_opportunities.iter().map(|cse| {
+                        serde_json::json!({
+                            "expression": cse.expression.text,
+                            "first_computation": {
+                                "line": cse.first_computation.line,
+                                "block": cse.first_computation.block_id.0,
+                            },
+                            "redundant_computations": cse.redundant_computations.iter().map(|loc| {
+                                serde_json::json!({
+                                    "line": loc.line,
+                                    "block": loc.block_id.0,
+                                })
+                            }).collect::<Vec<_>>(),
+                            "suggested_temp_name": cse.suggested_temp_name,
+                            "estimated_savings": cse.estimated_savings,
+                            "is_safe": cse.is_safe,
+                        })
+                    }).collect::<Vec<_>>(),
+                    "loop_invariants": result.loop_invariants.iter().map(|inv| {
+                        serde_json::json!({
+                            "expression": inv.expression.text,
+                            "loop_header": inv.loop_header.0,
+                            "is_safe_to_hoist": inv.is_safe_to_hoist,
+                        })
+                    }).collect::<Vec<_>>(),
+                    "summary": {
+                        "cse_count": result.cse_opportunities.len(),
+                        "loop_invariant_count": result.loop_invariants.len(),
+                        "estimated_savings": result.metrics.estimated_savings,
+                    }
+                })
+            } else {
+                result.to_json()
+            };
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
 // QUALITY COMMANDS
 // =============================================================================
 
-mod quality;
 mod patterns;
+// Import quality from the library crate (go_brrr) rather than including it as a bin module.
+// This avoids duplicate compilation and ensures crate:: references in quality files
+// resolve correctly to the library crate's modules (embedding, semantic, etc.).
+use go_brrr::quality;
 
 fn cmd_quality(subcmd: QualityCommands) -> Result<()> {
     match subcmd {
@@ -9402,7 +12782,359 @@ fn cmd_quality(subcmd: QualityCommands) -> Result<()> {
                 max_file_size,
             )?;
         }
+        QualityCommands::TestQuality {
+            path,
+            lang,
+            format,
+            strict,
+            lenient,
+            min_density,
+            flag_single_assertion,
+            analyze_mocks,
+            check_boundaries,
+            estimate_mutations,
+            weak_only,
+            min_grade,
+        } => {
+            cmd_test_quality(
+                &path,
+                lang,
+                format,
+                strict,
+                lenient,
+                min_density,
+                flag_single_assertion,
+                analyze_mocks,
+                check_boundaries,
+                estimate_mutations,
+                weak_only,
+                min_grade,
+            )?;
+        }
+        QualityCommands::DocCoverage {
+            path,
+            lang,
+            format,
+            public_only,
+            min_quality,
+            check_params,
+            check_returns,
+            check_exceptions,
+            check_examples,
+            flag_restatement,
+            strict,
+            lenient,
+            min_lines,
+        } => {
+            cmd_doc_coverage(
+                &path,
+                lang,
+                format,
+                public_only,
+                min_quality,
+                check_params,
+                check_returns,
+                check_exceptions,
+                check_examples,
+                flag_restatement,
+                strict,
+                lenient,
+                min_lines,
+            )?;
+        }
+        QualityCommands::SemanticClones {
+            path,
+            threshold,
+            min_lines,
+            cross_file_only,
+            include_tests,
+            format,
+            suggest_refactor,
+            max_results,
+            lang,
+            tei_url,
+        } => {
+            cmd_semantic_clones(
+                &path,
+                threshold,
+                min_lines,
+                cross_file_only,
+                include_tests,
+                format,
+                suggest_refactor,
+                max_results,
+                lang,
+                &tei_url,
+            )?;
+        }
+        QualityCommands::SimilarTo {
+            location,
+            k,
+            path,
+            threshold,
+            format,
+            lang,
+            tei_url,
+        } => {
+            cmd_similar_to(&location, k, &path, threshold, format, lang, &tei_url)?;
+        }
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_test_quality(
+    path: &PathBuf,
+    lang: Option<Language>,
+    format: OutputFormat,
+    strict: bool,
+    lenient: bool,
+    min_density: f64,
+    flag_single_assertion: bool,
+    analyze_mocks: bool,
+    check_boundaries: bool,
+    estimate_mutations: bool,
+    weak_only: bool,
+    min_grade: Option<char>,
+) -> Result<()> {
+    use quality::test_quality::{
+        analyze_test_quality, format_test_quality_report, TestQualityConfig,
+    };
+
+    // Validate path exists
+    require_exists(path)?;
+
+    // Build configuration based on preset or custom values
+    let config = if strict {
+        TestQualityConfig::strict()
+    } else if lenient {
+        TestQualityConfig::lenient()
+    } else {
+        TestQualityConfig {
+            min_assertion_density: min_density,
+            flag_single_assertion,
+            analyze_mocks,
+            check_boundary_testing: check_boundaries,
+            estimate_mutation_score: estimate_mutations,
+            ..Default::default()
+        }
+    };
+
+    // Parse language
+    let language = lang.map(|l| l.to_string());
+
+    // Run analysis
+    let result = analyze_test_quality(path, language.as_deref(), Some(config))
+        .map_err(|e| anyhow::anyhow!("Test quality analysis failed: {}", e))?;
+
+    // Filter to weak tests only if requested
+    let display_result = if weak_only {
+        let mut filtered = result.clone();
+        filtered.files = filtered
+            .files
+            .into_iter()
+            .map(|mut f| {
+                f.test_functions = f
+                    .test_functions
+                    .into_iter()
+                    .filter(|t| t.grade == 'D' || t.grade == 'F' || !t.issues.is_empty())
+                    .collect();
+                f
+            })
+            .filter(|f| !f.test_functions.is_empty())
+            .collect();
+        filtered
+    } else {
+        result.clone()
+    };
+
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&display_result)
+                    .map_err(|e| anyhow::anyhow!("JSON serialization failed: {}", e))?
+            );
+        }
+        OutputFormat::Text => {
+            println!("{}", format_test_quality_report(&display_result));
+        }
+        _ => {
+            // For other formats (Mermaid, Dot, Csv), default to JSON
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&display_result)
+                    .map_err(|e| anyhow::anyhow!("JSON serialization failed: {}", e))?
+            );
+        }
+    }
+
+    // Check if minimum grade requirement is met
+    if let Some(min) = min_grade {
+        let grade_value = |g: char| match g {
+            'A' => 4,
+            'B' => 3,
+            'C' => 2,
+            'D' => 1,
+            _ => 0,
+        };
+        let required = grade_value(min);
+        let actual = grade_value(result.summary.overall_grade);
+
+        if actual < required {
+            eprintln!(
+                "\x1b[31mTest quality grade {} does not meet minimum requirement {}\x1b[0m",
+                result.summary.overall_grade, min
+            );
+            std::process::exit(1);
+        }
+    }
+
+    // Print summary to stderr
+    if matches!(format, OutputFormat::Json | OutputFormat::Jsonl) {
+        eprintln!(
+            "\x1b[32mAnalyzed {} test files, {} tests total\x1b[0m",
+            result.summary.files_analyzed, result.summary.total_tests
+        );
+        eprintln!(
+            "Overall grade: \x1b[{}m{}\x1b[0m",
+            match result.summary.overall_grade {
+                'A' => "32",
+                'B' => "32",
+                'C' => "33",
+                'D' => "31",
+                _ => "31",
+            },
+            result.summary.overall_grade
+        );
+        if result.summary.weak_test_count > 0 {
+            eprintln!(
+                "\x1b[33mWeak tests: {} ({:.1}%)\x1b[0m",
+                result.summary.weak_test_count,
+                if result.summary.total_tests > 0 {
+                    f64::from(result.summary.weak_test_count)
+                        / f64::from(result.summary.total_tests)
+                        * 100.0
+                } else {
+                    0.0
+                }
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_doc_coverage(
+    path: &PathBuf,
+    lang: Option<Language>,
+    format: OutputFormat,
+    public_only: bool,
+    min_quality: u8,
+    check_params: bool,
+    check_returns: bool,
+    check_exceptions: bool,
+    check_examples: bool,
+    flag_restatement: bool,
+    strict: bool,
+    lenient: bool,
+    min_lines: u32,
+) -> Result<()> {
+    use quality::doc_coverage::{
+        analyze_doc_coverage, format_doc_coverage_report, DocCoverageConfig,
+    };
+
+    // Validate path exists
+    require_exists(path)?;
+
+    // Build configuration based on preset or custom values
+    let config = if strict {
+        DocCoverageConfig::strict()
+    } else if lenient {
+        DocCoverageConfig::lenient()
+    } else {
+        DocCoverageConfig {
+            public_only,
+            min_quality_score: min_quality,
+            check_params,
+            check_returns,
+            check_exceptions,
+            check_examples,
+            flag_name_restatement: flag_restatement,
+            min_lines_require_doc: min_lines,
+            ..Default::default()
+        }
+    };
+
+    // Parse language
+    let language = lang.map(|l| l.to_string());
+
+    // Run analysis
+    let result = analyze_doc_coverage(path, language.as_deref(), Some(config))
+        .map_err(|e| anyhow::anyhow!("Documentation coverage analysis failed: {}", e))?;
+
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result)
+                    .map_err(|e| anyhow::anyhow!("JSON serialization failed: {}", e))?
+            );
+        }
+        OutputFormat::Text => {
+            println!("{}", format_doc_coverage_report(&result));
+        }
+        _ => {
+            // For other formats (Mermaid, Dot, Csv), default to JSON
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result)
+                    .map_err(|e| anyhow::anyhow!("JSON serialization failed: {}", e))?
+            );
+        }
+    }
+
+    // Print summary to stderr for JSON output
+    if matches!(format, OutputFormat::Json | OutputFormat::Jsonl) {
+        eprintln!(
+            "\x1b[32mAnalyzed {} files, {} items\x1b[0m",
+            result.metrics.files_analyzed, result.metrics.total_items
+        );
+        let coverage_pct = result.metrics.coverage_rate * 100.0;
+        let coverage_color = if coverage_pct >= 80.0 {
+            "32" // green
+        } else if coverage_pct >= 50.0 {
+            "33" // yellow
+        } else {
+            "31" // red
+        };
+        eprintln!(
+            "Coverage: \x1b[{}m{:.1}%\x1b[0m ({}/{} documented)",
+            coverage_color,
+            coverage_pct,
+            result.metrics.documented_items,
+            result.metrics.total_items
+        );
+        eprintln!(
+            "Quality Score: \x1b[{}m{:.1}/5\x1b[0m",
+            if result.metrics.quality_score >= 3.0 {
+                "32"
+            } else if result.metrics.quality_score >= 2.0 {
+                "33"
+            } else {
+                "31"
+            },
+            result.metrics.quality_score
+        );
+        if !result.missing_docs.is_empty() {
+            eprintln!(
+                "\x1b[33mMissing docs: {} items\x1b[0m",
+                result.missing_docs.len()
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -9416,7 +13148,7 @@ fn cmd_clones(
     include_generated: bool,
     max_file_size: u64,
 ) -> Result<()> {
-    use quality::clones::{detect_clones, format_clone_summary, CloneConfig, TextualCloneDetector};
+    use quality::clones::{format_clone_summary, CloneConfig, TextualCloneDetector};
 
     // Validate path exists
     require_exists(path)?;
@@ -9435,11 +13167,12 @@ fn cmd_clones(
 
     // Run detection
     let detector = TextualCloneDetector::new(config);
-    let result = detector.detect(path)
+    let result = detector
+        .detect(path)
         .map_err(|e| anyhow::anyhow!("Clone detection failed: {}", e))?;
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&result).context("Failed to serialize output")?
@@ -9535,7 +13268,7 @@ fn cmd_structural_clones(
     }
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&result).context("Failed to serialize output")?
@@ -9569,6 +13302,513 @@ fn cmd_structural_clones(
             eprintln!(
                 "  ({} potential false positive groups filtered, use --show-filtered to see them)",
                 result.stats.filtered_groups
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_semantic_clones(
+    path: &PathBuf,
+    threshold: f32,
+    min_lines: usize,
+    cross_file_only: bool,
+    include_tests: bool,
+    format: OutputFormat,
+    suggest_refactor: bool,
+    max_results: usize,
+    lang: Option<Language>,
+    tei_url: &str,
+) -> Result<()> {
+    use indicatif::{ProgressBar, ProgressStyle};
+    use quality::clones::{
+        detect_semantic_clones, format_semantic_clone_summary, SemanticCloneConfig,
+    };
+
+    // Validate path exists
+    require_exists(path)?;
+
+    // Build configuration
+    let mut config = SemanticCloneConfig::default();
+    config.low_similarity_threshold = threshold;
+    config.min_lines = min_lines;
+    config.cross_file_only = cross_file_only;
+    config.ignore_tests = !include_tests;
+    config.tei_url = tei_url.to_string();
+
+    if let Some(l) = lang {
+        config.language = Some(l.to_string());
+    }
+
+    // Create progress spinner
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg} [{elapsed_precise}]")
+            .expect("Invalid spinner template")
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
+    );
+    spinner.set_message("Detecting semantic clones...");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    // Run detection
+    let result = detect_semantic_clones(path, Some(config))
+        .map_err(|e| anyhow::anyhow!("Semantic clone detection failed: {}", e))?;
+
+    spinner.finish_with_message(format!(
+        "Found {} clone pairs in {}ms",
+        result.stats.pairs_found, result.stats.processing_time_ms
+    ));
+
+    // Limit results if needed
+    let pairs_to_show: Vec<_> = result
+        .clone_pairs
+        .iter()
+        .take(max_results)
+        .cloned()
+        .collect();
+
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            // Create output with limited pairs
+            let output = serde_json::json!({
+                "project_path": result.project_path,
+                "clone_pairs": pairs_to_show,
+                "clusters": result.clusters,
+                "stats": result.stats,
+                "config": {
+                    "threshold": threshold,
+                    "min_lines": min_lines,
+                    "cross_file_only": cross_file_only,
+                    "include_tests": include_tests,
+                },
+                "suggest_refactor": suggest_refactor,
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).context("Failed to serialize output")?
+            );
+        }
+        OutputFormat::Text => {
+            // Human-readable summary
+            println!("{}", format_semantic_clone_summary(&result));
+
+            if suggest_refactor && !result.clone_pairs.is_empty() {
+                println!("\n=== Refactoring Suggestions ===\n");
+                for (i, pair) in result.pairs_by_similarity().iter().take(10).enumerate() {
+                    let suggestion = match pair.clone_type {
+                        quality::clones::SemanticCloneType::Identical => {
+                            format!(
+                                "Delete one of '{}' or '{}' and redirect callers to the other",
+                                pair.name_a, pair.name_b
+                            )
+                        }
+                        quality::clones::SemanticCloneType::HighSimilarity => {
+                            format!(
+                                "Extract common logic from '{}' and '{}' into a shared function",
+                                pair.name_a, pair.name_b
+                            )
+                        }
+                        quality::clones::SemanticCloneType::MediumSimilarity => {
+                            format!(
+                                "Review '{}' and '{}' for potential abstraction opportunities",
+                                pair.name_a, pair.name_b
+                            )
+                        }
+                        quality::clones::SemanticCloneType::LowSimilarity => {
+                            format!(
+                                "'{}' and '{}' share some patterns - consider if consolidation is appropriate",
+                                pair.name_a, pair.name_b
+                            )
+                        }
+                    };
+                    println!(
+                        "{}. [{:.1}%] {}\n   {}:{} <-> {}:{}",
+                        i + 1,
+                        pair.similarity * 100.0,
+                        suggestion,
+                        pair.file_a,
+                        pair.line_a,
+                        pair.file_b,
+                        pair.line_b
+                    );
+                }
+            }
+        }
+        OutputFormat::Dot => {
+            // DOT graph format for visualization
+            println!("digraph SemanticClones {{");
+            println!("  rankdir=LR;");
+            println!("  node [shape=box, style=filled];");
+            println!();
+
+            // Collect unique nodes
+            let mut nodes: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for pair in &pairs_to_show {
+                nodes.insert(pair.unit_a_id.clone());
+                nodes.insert(pair.unit_b_id.clone());
+            }
+
+            // Output nodes with colors based on kind
+            for node in &nodes {
+                let label = node.replace("::", "\\n");
+                println!("  \"{}\" [label=\"{}\", fillcolor=lightblue];", node, label);
+            }
+
+            println!();
+
+            // Output edges with similarity as label
+            for pair in &pairs_to_show {
+                let color = match pair.clone_type {
+                    quality::clones::SemanticCloneType::Identical => "red",
+                    quality::clones::SemanticCloneType::HighSimilarity => "orange",
+                    quality::clones::SemanticCloneType::MediumSimilarity => "yellow",
+                    quality::clones::SemanticCloneType::LowSimilarity => "gray",
+                };
+                println!(
+                    "  \"{}\" -> \"{}\" [label=\"{:.0}%\", color={}, penwidth=2];",
+                    pair.unit_a_id,
+                    pair.unit_b_id,
+                    pair.similarity * 100.0,
+                    color
+                );
+            }
+
+            println!("}}");
+        }
+        OutputFormat::Mermaid | OutputFormat::Csv => {
+            // Fall back to JSON for unsupported formats
+            let output = serde_json::json!({
+                "project_path": result.project_path,
+                "clone_pairs": pairs_to_show,
+                "stats": result.stats,
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).context("Failed to serialize output")?
+            );
+        }
+    }
+
+    // Print summary to stderr
+    if result.stats.pairs_found > 0 {
+        eprintln!();
+        eprintln!(
+            "Detected {} semantic clone pairs:",
+            result.stats.pairs_found
+        );
+        eprintln!(
+            "  Identical (>=98%): {}",
+            result.stats.identical_count
+        );
+        eprintln!(
+            "  High similarity (>=90%): {}",
+            result.stats.high_similarity_count
+        );
+        eprintln!(
+            "  Medium similarity (>=80%): {}",
+            result.stats.medium_similarity_count
+        );
+        eprintln!(
+            "  Cross-file clones: {}",
+            result.stats.cross_file_count
+        );
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_similar_to(
+    location: &str,
+    k: usize,
+    path: &PathBuf,
+    threshold: f32,
+    format: OutputFormat,
+    lang: Option<Language>,
+    tei_url: &str,
+) -> Result<()> {
+    use go_brrr::embedding::{IndexConfig, Metric, TeiClient, VectorIndex};
+    use go_brrr::semantic::{build_embedding_text, extract_units, EmbeddingUnit};
+    use indicatif::{ProgressBar, ProgressStyle};
+
+    // Validate path exists
+    require_exists(path)?;
+
+    // Parse location: file:name or file:line
+    let (file_path, target) = location
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("Invalid location format. Use file:function_name or file:line"))?;
+
+    let file_path = PathBuf::from(file_path);
+    if !file_path.exists() {
+        anyhow::bail!("File not found: {}", file_path.display());
+    }
+
+    // Determine language
+    let language = if let Some(l) = lang {
+        l.to_string()
+    } else {
+        detect_project_language(path)
+    };
+
+    // Create progress spinner
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg} [{elapsed_precise}]")
+            .expect("Invalid spinner template")
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
+    );
+    spinner.set_message("Extracting code units...");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    // Extract units from the target file
+    let file_units = extract_units(file_path.to_str().unwrap_or("."), &language)
+        .map_err(|e| anyhow::anyhow!("Failed to extract units from file: {}", e))?;
+
+    // Find the target unit
+    let target_unit: Option<EmbeddingUnit> = if let Ok(line_num) = target.parse::<usize>() {
+        // Find unit containing the line
+        file_units.into_iter().find(|u| {
+            u.start_line <= line_num && u.end_line >= line_num
+        })
+    } else {
+        // Find unit by name (supports Class.method format)
+        file_units.into_iter().find(|u| {
+            u.name == target || u.id.ends_with(&format!("::{}", target))
+        })
+    };
+
+    let target_unit = target_unit.ok_or_else(|| {
+        anyhow::anyhow!("Could not find unit matching '{}' in {}", target, file_path.display())
+    })?;
+
+    spinner.set_message(format!("Found target: {} - extracting all units...", target_unit.name));
+
+    // Extract all units from the search path
+    let all_units = extract_units(path.to_str().unwrap_or("."), &language)
+        .map_err(|e| anyhow::anyhow!("Failed to extract units: {}", e))?;
+
+    if all_units.is_empty() {
+        spinner.finish_with_message("No units found to compare");
+        return Ok(());
+    }
+
+    spinner.set_message(format!("Generating embeddings for {} units...", all_units.len()));
+
+    // Build embedding texts
+    let target_text = build_embedding_text(&target_unit);
+    let all_texts: Vec<String> = all_units.iter().map(|u| build_embedding_text(u)).collect();
+
+    // Helper function to generate embeddings via TEI
+    async fn generate_embeddings_async(
+        tei_url: &str,
+        target_text: &str,
+        all_texts: &[String],
+    ) -> Result<(Vec<f32>, Vec<Vec<f32>>)> {
+        let client = TeiClient::new(tei_url).await?;
+
+        // Generate target embedding
+        let target_texts: Vec<&str> = vec![target_text];
+        let target_embs = client.embed(&target_texts).await
+            .map_err(|e| anyhow::anyhow!("Failed to embed target: {}", e))?;
+
+        let target_emb = target_embs.into_iter().next()
+            .ok_or_else(|| anyhow::anyhow!("No embedding returned for target"))?;
+
+        // Generate all embeddings in batches
+        let text_refs: Vec<&str> = all_texts.iter().map(String::as_str).collect();
+        let embeddings = client.embed_batch(&text_refs, Some(64)).await
+            .map_err(|e| anyhow::anyhow!("Failed to embed units: {}", e))?;
+
+        Ok((target_emb, embeddings))
+    }
+
+    // Helper function to generate placeholder embeddings
+    fn generate_placeholder_embeddings(target_idx: usize, num_units: usize) -> (Vec<f32>, Vec<Vec<f32>>) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let dims = 1024;
+        let gen_embedding = |seed: usize| -> Vec<f32> {
+            let mut embedding = vec![0.0f32; dims];
+            let mut hasher = DefaultHasher::new();
+            seed.hash(&mut hasher);
+            let base = hasher.finish();
+
+            for (j, val) in embedding.iter_mut().enumerate() {
+                let mut h = DefaultHasher::new();
+                (base, j).hash(&mut h);
+                *val = ((h.finish() as f64 / u64::MAX as f64) * 2.0 - 1.0) as f32;
+            }
+
+            let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                for val in &mut embedding {
+                    *val /= norm;
+                }
+            }
+            embedding
+        };
+
+        let target_emb = gen_embedding(target_idx);
+        let embeddings: Vec<Vec<f32>> = (0..num_units).map(gen_embedding).collect();
+        (target_emb, embeddings)
+    }
+
+    // Use block_in_place to handle nested runtime case
+    let tei_url_owned = tei_url.to_string();
+    let (target_embedding, all_embeddings): (Vec<f32>, Vec<Vec<f32>>) =
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            // Already inside a tokio runtime - use block_in_place
+            let result: Result<(Vec<f32>, Vec<Vec<f32>>)> = tokio::task::block_in_place(|| {
+                handle.block_on(async {
+                    generate_embeddings_async(&tei_url_owned, &target_text, &all_texts).await
+                })
+            });
+
+            match result {
+                Ok(embeddings) => embeddings,
+                Err(e) => {
+                    eprintln!("Warning: Could not connect to TEI server at {}: {}", tei_url, e);
+                    eprintln!("Using placeholder embeddings (results will be random)");
+                    generate_placeholder_embeddings(0, all_units.len())
+                }
+            }
+        } else {
+            // Not in a runtime - create one
+            let rt = tokio::runtime::Runtime::new()?;
+            let result = rt.block_on(async {
+                generate_embeddings_async(&tei_url_owned, &target_text, &all_texts).await
+            });
+
+            match result {
+                Ok(embeddings) => embeddings,
+                Err(e) => {
+                    eprintln!("Warning: Could not connect to TEI server at {}: {}", tei_url, e);
+                    eprintln!("Using placeholder embeddings (results will be random)");
+                    generate_placeholder_embeddings(0, all_units.len())
+                }
+            }
+        };
+
+    spinner.set_message("Computing similarities...");
+
+    // Build vector index and find similar
+    let index_config = IndexConfig::new(target_embedding.len())
+        .with_metric(Metric::InnerProduct);
+    let index = VectorIndex::with_config(index_config)?;
+
+    index.reserve(all_embeddings.len())?;
+    for (i, embedding) in all_embeddings.iter().enumerate() {
+        index.add(i as u64, embedding)?;
+    }
+
+    // Search for similar (k+1 because we might include the target itself)
+    let neighbors = index.search(&target_embedding, k + 1)?;
+
+    // Filter and convert results
+    let mut results: Vec<(f32, &EmbeddingUnit)> = neighbors
+        .into_iter()
+        .filter_map(|(id, distance)| {
+            let idx = id as usize;
+            if idx >= all_units.len() {
+                return None;
+            }
+            // Convert distance to similarity
+            let similarity = 1.0 - distance;
+            if similarity < threshold {
+                return None;
+            }
+            // Skip if it's the same unit
+            if all_units[idx].id == target_unit.id {
+                return None;
+            }
+            Some((similarity, &all_units[idx]))
+        })
+        .take(k)
+        .collect();
+
+    results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+
+    spinner.finish_with_message(format!("Found {} similar units", results.len()));
+
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            let output = serde_json::json!({
+                "query": {
+                    "location": location,
+                    "unit_id": target_unit.id,
+                    "name": target_unit.name,
+                    "file": target_unit.file,
+                    "start_line": target_unit.start_line,
+                    "end_line": target_unit.end_line,
+                },
+                "results": results.iter().map(|(sim, unit)| {
+                    serde_json::json!({
+                        "similarity": sim,
+                        "unit_id": unit.id,
+                        "name": unit.name,
+                        "file": unit.file,
+                        "start_line": unit.start_line,
+                        "end_line": unit.end_line,
+                        "kind": format!("{:?}", unit.kind),
+                    })
+                }).collect::<Vec<_>>(),
+                "config": {
+                    "k": k,
+                    "threshold": threshold,
+                    "search_path": path,
+                }
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).context("Failed to serialize output")?
+            );
+        }
+        OutputFormat::Text => {
+            println!("=== Similar to: {} ===", target_unit.name);
+            println!("File: {}:{}-{}", target_unit.file, target_unit.start_line, target_unit.end_line);
+            println!();
+
+            if results.is_empty() {
+                println!("No similar code found above threshold {:.0}%", threshold * 100.0);
+            } else {
+                println!("Found {} similar units:\n", results.len());
+                for (i, (sim, unit)) in results.iter().enumerate() {
+                    println!(
+                        "{}. {} ({:.1}% similar)",
+                        i + 1,
+                        unit.name,
+                        sim * 100.0
+                    );
+                    println!(
+                        "   {}:{}-{}",
+                        unit.file, unit.start_line, unit.end_line
+                    );
+                    println!();
+                }
+            }
+        }
+        _ => {
+            // Fall back to JSON
+            let output = serde_json::json!({
+                "query": target_unit.id,
+                "results": results.iter().map(|(sim, unit)| {
+                    serde_json::json!({
+                        "similarity": sim,
+                        "name": unit.name,
+                        "file": unit.file,
+                        "line": unit.start_line,
+                    })
+                }).collect::<Vec<_>>(),
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).context("Failed to serialize output")?
             );
         }
     }
@@ -9635,7 +13875,7 @@ fn cmd_god_class(
     let filtered_count = result.findings.len();
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&result).context("Failed to serialize output")?
@@ -9774,14 +14014,16 @@ fn cmd_long_method(
     // Sort by score if requested
     if sort {
         result.findings.sort_by(|a, b| {
-            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
     }
 
     let filtered_count = result.findings.len();
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             // Optionally filter out suggestions if not requested
             if !show_suggestions {
                 for finding in &mut result.findings {
@@ -9900,10 +14142,7 @@ fn cmd_long_method(
         eprintln!("No long methods detected with severity >= {}", min_severity);
     }
 
-    eprintln!(
-        "Analyzed {} methods total",
-        result.stats.total_methods
-    );
+    eprintln!("Analyzed {} methods total", result.stats.total_methods);
 
     Ok(())
 }
@@ -9955,7 +14194,7 @@ fn cmd_circular(
         .map_err(|e| anyhow::anyhow!("Circular dependency detection failed: {}", e))?;
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&result).context("Failed to serialize output")?
@@ -10080,7 +14319,7 @@ fn cmd_patterns(
         .map_err(|e| anyhow::anyhow!("Pattern detection failed: {}", e))?;
 
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json | OutputFormat::Jsonl => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&result).context("Failed to serialize output")?
@@ -10119,13 +14358,649 @@ fn cmd_patterns(
         );
     } else {
         eprintln!();
-        eprintln!("No design patterns detected with confidence >= {:.0}%", min_confidence * 100.0);
+        eprintln!(
+            "No design patterns detected with confidence >= {:.0}%",
+            min_confidence * 100.0
+        );
     }
 
     eprintln!(
         "Scanned {} files ({} skipped)",
         result.stats.files_scanned, result.stats.files_skipped
     );
+
+    Ok(())
+}
+
+// =============================================================================
+// ANALYZE COMMANDS
+// =============================================================================
+
+fn cmd_analyze(subcmd: AnalyzeCommands) -> Result<()> {
+    match subcmd {
+        AnalyzeCommands::ResourceFlow {
+            file,
+            function,
+            lang,
+            format,
+            issues_only,
+            min_severity,
+        } => {
+            cmd_resource_flow(&file, &function, lang, format, issues_only, &min_severity)?;
+        }
+        AnalyzeCommands::Invariants {
+            file,
+            function,
+            lang,
+            format,
+            preconditions_only,
+            postconditions_only,
+            loop_invariants_only,
+            suggestions,
+            min_confidence,
+        } => {
+            cmd_invariants(
+                &file,
+                function.as_deref(),
+                lang,
+                format,
+                preconditions_only,
+                postconditions_only,
+                loop_invariants_only,
+                suggestions,
+                min_confidence,
+            )?;
+        }
+        AnalyzeCommands::StateMachine {
+            file,
+            scope,
+            lang,
+            format,
+            var_pattern,
+            min_confidence,
+            validate,
+        } => {
+            cmd_state_machine(
+                &file,
+                scope.as_deref(),
+                lang,
+                format,
+                var_pattern.as_deref(),
+                min_confidence,
+                validate,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract implicit state machines from code.
+fn cmd_state_machine(
+    file: &PathBuf,
+    scope: Option<&str>,
+    _lang: Option<Language>,
+    format: OutputFormat,
+    var_pattern: Option<&str>,
+    _min_confidence: f64,
+    validate: bool,
+) -> Result<()> {
+    use analysis::state_machine::{ExtractorConfig, StateMachineExtractor};
+
+    // Validate file exists
+    require_file(file)?;
+
+    // Create extractor with optional configuration
+    let config = if let Some(pattern) = var_pattern {
+        let mut cfg = ExtractorConfig::new();
+        cfg.state_variable_names = pattern.split(',').map(|s| s.trim().to_string()).collect();
+        cfg
+    } else {
+        ExtractorConfig::new()
+    };
+    let extractor = StateMachineExtractor::with_config(config);
+
+    // Extract state machines
+    let machines = extractor
+        .extract_from_file(file)
+        .context("Failed to extract state machines")?;
+
+    // Filter by scope if specified
+    let filtered: Vec<_> = if let Some(scope_filter) = scope {
+        machines
+            .into_iter()
+            .filter(|m| m.name.contains(scope_filter))
+            .collect()
+    } else {
+        machines
+    };
+
+    // Output based on format
+    match format {
+        OutputFormat::Text => {
+            if filtered.is_empty() {
+                println!("No state machines found in {}", file.display());
+            } else {
+                for (i, machine) in filtered.iter().enumerate() {
+                    if i > 0 {
+                        println!();
+                    }
+                    println!("State Machine: {}", machine.name);
+                    println!("  Variable: {}", machine.state_variable);
+                    println!(
+                        "  Location: {}:{}",
+                        machine.location.file, machine.location.start_line
+                    );
+                    println!();
+
+                    println!("  States ({}):", machine.states.len());
+                    for state in &machine.states {
+                        let marker = if state.id == machine.initial_state {
+                            " (initial)"
+                        } else if machine.final_states.contains(&state.id) {
+                            " (final)"
+                        } else {
+                            ""
+                        };
+                        println!("    - {}{}", state.name, marker);
+                    }
+                    println!();
+
+                    println!("  Transitions ({}):", machine.transitions.len());
+                    for trans in &machine.transitions {
+                        let from = machine
+                            .get_state(trans.from)
+                            .map(|s| s.name.as_str())
+                            .unwrap_or("?");
+                        let to = machine
+                            .get_state(trans.to)
+                            .map(|s| s.name.as_str())
+                            .unwrap_or("?");
+                        print!("    {} --[{}]--> {}", from, trans.trigger, to);
+                        if let Some(ref guard) = trans.guard {
+                            print!(" [{}]", guard);
+                        }
+                        println!();
+                    }
+
+                    if validate {
+                        let validation = machine.validate();
+                        if !validation.issues.is_empty() {
+                            println!();
+                            println!("  Validation Issues:");
+                            for issue in &validation.issues {
+                                println!("    - {:?}: {}", issue.severity, issue.message);
+                            }
+                        }
+                    }
+                }
+
+                eprintln!();
+                eprintln!("Found {} state machine(s)", filtered.len());
+            }
+        }
+        OutputFormat::Mermaid => {
+            for machine in &filtered {
+                println!("{}", machine.to_mermaid());
+            }
+        }
+        OutputFormat::Dot => {
+            for machine in &filtered {
+                println!("{}", machine.to_dot());
+            }
+        }
+        OutputFormat::Json | OutputFormat::Jsonl | OutputFormat::Csv => {
+            // Build JSON output with optional validation
+            let output: Vec<_> = filtered
+                .iter()
+                .map(|m| {
+                    let mut obj = serde_json::to_value(m).unwrap_or_default();
+                    if validate {
+                        let validation = m.validate();
+                        if let serde_json::Value::Object(ref mut map) = obj {
+                            map.insert(
+                                "validation".to_string(),
+                                serde_json::to_value(&validation).unwrap_or_default(),
+                            );
+                        }
+                    }
+                    obj
+                })
+                .collect();
+
+            let result = serde_json::json!({
+                "file": file.to_string_lossy(),
+                "state_machines_count": output.len(),
+                "state_machines": output,
+            });
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result).context("Failed to serialize output")?
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Analyze resource flow in a function.
+fn cmd_resource_flow(
+    file: &PathBuf,
+    function: &str,
+    lang: Option<Language>,
+    format: OutputFormat,
+    issues_only: bool,
+    min_severity: &str,
+) -> Result<()> {
+    use analysis::resource_flow::{analyze_resource_flow, format_resource_flow_text, LeakSeverity};
+
+    // Validate file exists
+    require_file(file)?;
+
+    let lang_str = lang.map(|l| l.to_string());
+
+    // Run resource flow analysis
+    let result = analyze_resource_flow(file, function, lang_str.as_deref())
+        .context("Failed to analyze resource flow")?;
+
+    // Filter by severity if specified
+    let min_sev = match min_severity.to_lowercase().as_str() {
+        "critical" => LeakSeverity::Critical,
+        "high" => LeakSeverity::High,
+        "medium" => LeakSeverity::Medium,
+        _ => LeakSeverity::Low,
+    };
+
+    // Filter leaks by severity
+    let filtered_leaks: Vec<_> = result
+        .leaks
+        .iter()
+        .filter(|l| l.severity.weight() >= min_sev.weight())
+        .collect();
+
+    // Build output based on format
+    match format {
+        OutputFormat::Text => {
+            if issues_only {
+                // Only show issues
+                if filtered_leaks.is_empty()
+                    && result.double_releases.is_empty()
+                    && result.use_after_release.is_empty()
+                {
+                    println!("No resource flow issues detected.");
+                } else {
+                    println!("Resource Flow Issues: {}", result.function_name);
+                    println!("{}", "=".repeat(60));
+
+                    if !filtered_leaks.is_empty() {
+                        println!("\nRESOURCE LEAKS:");
+                        for leak in &filtered_leaks {
+                            println!(
+                                "  [{}] {} `{}`",
+                                leak.severity.weight(),
+                                leak.resource.resource_type,
+                                leak.resource.variable
+                            );
+                            println!("    At: {}", leak.resource.acquire_location);
+                            println!("    Fix: {}", leak.suggestion);
+                        }
+                    }
+
+                    if !result.double_releases.is_empty() {
+                        println!("\nDOUBLE-RELEASE BUGS:");
+                        for dr in &result.double_releases {
+                            println!("  {} `{}`", dr.resource.resource_type, dr.resource.variable);
+                            println!("    First: {}", dr.first_release);
+                            println!("    Second: {}", dr.second_release);
+                        }
+                    }
+
+                    if !result.use_after_release.is_empty() {
+                        println!("\nUSE-AFTER-RELEASE BUGS:");
+                        for uar in &result.use_after_release {
+                            println!(
+                                "  {} `{}`",
+                                uar.resource.resource_type, uar.resource.variable
+                            );
+                            println!("    Released at: {}", uar.release_location);
+                            println!("    Used at: {}", uar.use_location);
+                        }
+                    }
+                }
+            } else {
+                // Full text output
+                println!("{}", format_resource_flow_text(&result));
+            }
+        }
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            // Output full result as JSON
+            let output = if issues_only {
+                serde_json::json!({
+                    "function": result.function_name,
+                    "file": result.file,
+                    "leaks": filtered_leaks,
+                    "double_releases": result.double_releases,
+                    "use_after_release": result.use_after_release,
+                    "total_issues": filtered_leaks.len()
+                        + result.double_releases.len()
+                        + result.use_after_release.len()
+                })
+            } else {
+                serde_json::to_value(&result)?
+            };
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).context("Failed to serialize output")?
+            );
+        }
+        OutputFormat::Mermaid | OutputFormat::Dot | OutputFormat::Csv => {
+            // Not applicable for resource flow, output JSON
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result).context("Failed to serialize output")?
+            );
+        }
+    }
+
+    // Print summary to stderr
+    let total_issues =
+        result.stats.leaked + result.stats.double_releases + result.stats.use_after_release;
+
+    if total_issues > 0 {
+        eprintln!();
+        eprintln!(
+            "\x1b[31mFound {} issue(s):\x1b[0m {} leak(s), {} double-release(s), {} use-after-release",
+            total_issues,
+            result.stats.leaked,
+            result.stats.double_releases,
+            result.stats.use_after_release
+        );
+    } else {
+        eprintln!();
+        eprintln!("\x1b[32mNo resource flow issues detected.\x1b[0m");
+    }
+
+    eprintln!(
+        "Analyzed {} resources ({} safely managed)",
+        result.stats.total_resources, result.stats.safely_managed
+    );
+
+    Ok(())
+}
+
+/// Analyze invariants in source code.
+#[allow(clippy::too_many_arguments)]
+fn cmd_invariants(
+    file: &PathBuf,
+    function: Option<&str>,
+    lang: Option<Language>,
+    format: OutputFormat,
+    preconditions_only: bool,
+    postconditions_only: bool,
+    loop_invariants_only: bool,
+    include_suggestions: bool,
+    min_confidence: f64,
+) -> Result<()> {
+    use analysis::{
+        analyze_invariants, analyze_invariants_function, format_invariant_function_json,
+        format_invariant_json, format_invariant_text,
+    };
+
+    // Validate file exists
+    require_file(file)?;
+
+    let file_str = file.to_str().context("Invalid file path")?;
+    let lang_str = lang.map(|l| l.to_string());
+
+    // Run analysis based on whether a specific function is requested
+    if let Some(func_name) = function {
+        // Analyze specific function
+        let mut result = analyze_invariants_function(file_str, func_name, lang_str.as_deref())
+            .context("Failed to analyze function invariants")?;
+
+        // Filter by confidence
+        result
+            .preconditions
+            .retain(|i| i.confidence >= min_confidence);
+        result
+            .postconditions
+            .retain(|i| i.confidence >= min_confidence);
+        for invs in result.loop_invariants.values_mut() {
+            invs.retain(|i| i.confidence >= min_confidence);
+        }
+
+        // Filter by type if requested
+        if preconditions_only {
+            result.postconditions.clear();
+            result.loop_invariants.clear();
+            result.loop_details.clear();
+        } else if postconditions_only {
+            result.preconditions.clear();
+            result.loop_invariants.clear();
+            result.loop_details.clear();
+        } else if loop_invariants_only {
+            result.preconditions.clear();
+            result.postconditions.clear();
+        }
+
+        // Clear suggestions if not wanted
+        if !include_suggestions {
+            result.suggested_assertions.clear();
+        }
+
+        // Output
+        match format {
+            OutputFormat::Text => {
+                println!("Invariant Analysis: {}", result.function);
+                println!(
+                    "File: {} (lines {}-{})",
+                    result.file, result.start_line, result.end_line
+                );
+                println!("{}", "=".repeat(60));
+
+                if !result.preconditions.is_empty() {
+                    println!("\nPRECONDITIONS:");
+                    for inv in &result.preconditions {
+                        println!(
+                            "  {} (confidence: {:.0}%{})",
+                            inv.expression,
+                            inv.confidence * 100.0,
+                            if inv.is_explicit { ", explicit" } else { "" }
+                        );
+                        for ev in &inv.evidence {
+                            println!("    Evidence: {} - {}", ev.kind, ev.description);
+                        }
+                    }
+                }
+
+                if !result.postconditions.is_empty() {
+                    println!("\nPOSTCONDITIONS:");
+                    for inv in &result.postconditions {
+                        println!(
+                            "  {} (confidence: {:.0}%{})",
+                            inv.expression,
+                            inv.confidence * 100.0,
+                            if inv.is_explicit { ", explicit" } else { "" }
+                        );
+                    }
+                }
+
+                if !result.loop_invariants.is_empty() {
+                    println!("\nLOOP INVARIANTS:");
+                    for (line, invs) in &result.loop_invariants {
+                        println!("  At line {}:", line);
+                        for inv in invs {
+                            println!(
+                                "    {} (confidence: {:.0}%)",
+                                inv.expression,
+                                inv.confidence * 100.0
+                            );
+                        }
+                        if let Some(details) = result.loop_details.get(line) {
+                            if let Some(ref lv) = details.loop_variable {
+                                println!("    Loop variable: {}", lv);
+                            }
+                            if let Some(ref bounds) = details.bounds {
+                                if let (Some(ref lower), Some(ref upper)) =
+                                    (&bounds.lower, &bounds.upper)
+                                {
+                                    let op = if bounds.inclusive { "..=" } else { ".." };
+                                    println!("    Bounds: {}{}{}", lower, op, upper);
+                                }
+                            }
+                            if !details.monotonic_variables.is_empty() {
+                                for mv in &details.monotonic_variables {
+                                    println!("    {} is {:?}", mv.name, mv.direction);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !result.suggested_assertions.is_empty() {
+                    println!("\nSUGGESTED ASSERTIONS:");
+                    for sug in &result.suggested_assertions {
+                        println!("  Line {}: {}", sug.location.line, sug.assertion);
+                        println!(
+                            "    Reason: {} (confidence: {:.0}%)",
+                            sug.reason,
+                            sug.confidence * 100.0
+                        );
+                    }
+                }
+
+                // Summary
+                println!();
+                println!("Summary:");
+                println!(
+                    "  Preconditions: {} ({} explicit, {} inferred)",
+                    result.preconditions.len(),
+                    result.metrics.explicit_assertions,
+                    result.metrics.inferred_preconditions
+                );
+                println!("  Postconditions: {}", result.postconditions.len());
+                println!(
+                    "  Loop invariants: {}",
+                    result.metrics.loop_invariants_count
+                );
+                if include_suggestions {
+                    println!("  Suggestions: {}", result.suggested_assertions.len());
+                }
+            }
+            OutputFormat::Json | OutputFormat::Jsonl => {
+                println!(
+                    "{}",
+                    format_invariant_function_json(&result)
+                        .context("Failed to serialize output")?
+                );
+            }
+            _ => {
+                // Default to JSON for other formats
+                println!(
+                    "{}",
+                    format_invariant_function_json(&result)
+                        .context("Failed to serialize output")?
+                );
+            }
+        }
+
+        // Summary to stderr
+        let total = result.preconditions.len()
+            + result.postconditions.len()
+            + result
+                .loop_invariants
+                .values()
+                .map(|v| v.len())
+                .sum::<usize>();
+
+        eprintln!();
+        if total > 0 {
+            eprintln!(
+                "Found {} invariant(s) (avg confidence: {:.0}%)",
+                total,
+                result.metrics.average_confidence * 100.0
+            );
+        } else {
+            eprintln!(
+                "No invariants found with confidence >= {:.0}%",
+                min_confidence * 100.0
+            );
+        }
+    } else {
+        // Analyze all functions in file
+        let mut result = analyze_invariants(file_str, lang_str.as_deref())
+            .context("Failed to analyze invariants")?;
+
+        // Filter by confidence
+        for func in &mut result.functions {
+            func.preconditions
+                .retain(|i| i.confidence >= min_confidence);
+            func.postconditions
+                .retain(|i| i.confidence >= min_confidence);
+            for invs in func.loop_invariants.values_mut() {
+                invs.retain(|i| i.confidence >= min_confidence);
+            }
+
+            // Filter by type if requested
+            if preconditions_only {
+                func.postconditions.clear();
+                func.loop_invariants.clear();
+                func.loop_details.clear();
+            } else if postconditions_only {
+                func.preconditions.clear();
+                func.loop_invariants.clear();
+                func.loop_details.clear();
+            } else if loop_invariants_only {
+                func.preconditions.clear();
+                func.postconditions.clear();
+            }
+
+            // Clear suggestions if not wanted
+            if !include_suggestions {
+                func.suggested_assertions.clear();
+            }
+        }
+
+        // Output
+        match format {
+            OutputFormat::Text => {
+                println!("{}", format_invariant_text(&result));
+            }
+            OutputFormat::Json | OutputFormat::Jsonl => {
+                println!(
+                    "{}",
+                    format_invariant_json(&result).context("Failed to serialize output")?
+                );
+            }
+            _ => {
+                println!(
+                    "{}",
+                    format_invariant_json(&result).context("Failed to serialize output")?
+                );
+            }
+        }
+
+        // Summary to stderr
+        eprintln!();
+        eprintln!(
+            "Analyzed {} function(s), found {} invariant(s)",
+            result.summary.functions_analyzed, result.summary.total_invariants
+        );
+        if result.summary.average_confidence > 0.0 {
+            eprintln!(
+                "Average confidence: {:.0}%",
+                result.summary.average_confidence * 100.0
+            );
+        }
+        if result.summary.total_suggestions > 0 && include_suggestions {
+            eprintln!(
+                "Generated {} suggestion(s)",
+                result.summary.total_suggestions
+            );
+        }
+    }
 
     Ok(())
 }

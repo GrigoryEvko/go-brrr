@@ -44,12 +44,14 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
-use tree_sitter::{Node, Tree};
+use tree_sitter::Node;
 
 use crate::ast::AstExtractor;
 use crate::callgraph::scanner::{ProjectScanner, ScanConfig};
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
+
+use super::common;
 
 // =============================================================================
 // TYPES
@@ -337,38 +339,23 @@ pub struct HalsteadError {
 /// These operators are common across most programming languages.
 const COMMON_OPERATORS: &[&str] = &[
     // Arithmetic
-    "+", "-", "*", "/", "%",
-    // Comparison
-    "==", "!=", "<", ">", "<=", ">=",
-    // Assignment
-    "=", "+=", "-=", "*=", "/=", "%=",
-    // Bitwise
-    "&", "|", "^", "~", "<<", ">>",
-    "&=", "|=", "^=", "<<=", ">>=",
-    // Logical (symbols)
-    "&&", "||", "!",
-    // Member access
-    ".", ",", ";",
-    // Brackets (counted as operators)
-    "(", ")", "[", "]", "{", "}",
-    // Other common
+    "+", "-", "*", "/", "%", // Comparison
+    "==", "!=", "<", ">", "<=", ">=", // Assignment
+    "=", "+=", "-=", "*=", "/=", "%=", // Bitwise
+    "&", "|", "^", "~", "<<", ">>", "&=", "|=", "^=", "<<=", ">>=", // Logical (symbols)
+    "&&", "||", "!", // Member access
+    ".", ",", ";", // Brackets (counted as operators)
+    "(", ")", "[", "]", "{", "}", // Other common
     "?", ":",
 ];
 
 /// Python-specific operators.
 const PYTHON_OPERATORS: &[&str] = &[
     // Python-specific
-    "**", "//", "@", "->",
-    "**=", "//=", "@=",
-    // Python keywords as operators
-    "and", "or", "not", "in", "is",
-    "if", "else", "elif", "while", "for",
-    "try", "except", "finally", "raise",
-    "with", "as", "from", "import",
-    "def", "class", "return", "yield",
-    "break", "continue", "pass",
-    "lambda", "assert", "del",
-    "global", "nonlocal", "async", "await",
+    "**", "//", "@", "->", "**=", "//=", "@=", // Python keywords as operators
+    "and", "or", "not", "in", "is", "if", "else", "elif", "while", "for", "try", "except",
+    "finally", "raise", "with", "as", "from", "import", "def", "class", "return", "yield", "break",
+    "continue", "pass", "lambda", "assert", "del", "global", "nonlocal", "async", "await",
 ];
 
 /// Python value keywords (operands).
@@ -377,24 +364,58 @@ const PYTHON_VALUE_KEYWORDS: &[&str] = &["True", "False", "None"];
 /// TypeScript/JavaScript-specific operators.
 const TYPESCRIPT_OPERATORS: &[&str] = &[
     // Arrow and optional chaining
-    "=>", "?.", "??", "??=",
+    "=>",
+    "?.",
+    "??",
+    "??=",
     // Type operators
-    "as", "typeof", "instanceof", "keyof", "readonly",
+    "as",
+    "typeof",
+    "instanceof",
+    "keyof",
+    "readonly",
     // Increment/decrement
-    "++", "--",
+    "++",
+    "--",
     // Ternary (already have ? and :)
     // Keywords as operators
-    "if", "else", "while", "for", "do",
-    "switch", "case", "default",
-    "try", "catch", "finally", "throw",
-    "return", "break", "continue",
-    "function", "class", "new", "delete",
-    "void", "in", "of",
-    "import", "export", "from",
-    "let", "const", "var",
-    "async", "await", "yield",
-    "type", "interface", "enum", "namespace",
-    "extends", "implements",
+    "if",
+    "else",
+    "while",
+    "for",
+    "do",
+    "switch",
+    "case",
+    "default",
+    "try",
+    "catch",
+    "finally",
+    "throw",
+    "return",
+    "break",
+    "continue",
+    "function",
+    "class",
+    "new",
+    "delete",
+    "void",
+    "in",
+    "of",
+    "import",
+    "export",
+    "from",
+    "let",
+    "const",
+    "var",
+    "async",
+    "await",
+    "yield",
+    "type",
+    "interface",
+    "enum",
+    "namespace",
+    "extends",
+    "implements",
     // Spread/rest
     "...",
 ];
@@ -405,19 +426,12 @@ const TYPESCRIPT_VALUE_KEYWORDS: &[&str] = &["true", "false", "null", "undefined
 /// Rust-specific operators.
 const RUST_OPERATORS: &[&str] = &[
     // Rust-specific
-    "::", "->", "=>", "..", "..=",
-    "?",
-    // Reference operators
-    "&mut",
-    // Keywords as operators
-    "if", "else", "while", "for", "loop",
-    "match", "return", "break", "continue",
-    "fn", "struct", "enum", "impl", "trait",
-    "pub", "mod", "use", "crate", "super",
-    "let", "mut", "ref", "const", "static",
-    "unsafe", "async", "await", "move",
-    "where", "type", "as", "in", "dyn",
-    "box", "yield",
+    "::", "->", "=>", "..", "..=", "?",    // Reference operators
+    "&mut", // Keywords as operators
+    "if", "else", "while", "for", "loop", "match", "return", "break", "continue", "fn", "struct",
+    "enum", "impl", "trait", "pub", "mod", "use", "crate", "super", "let", "mut", "ref", "const",
+    "static", "unsafe", "async", "await", "move", "where", "type", "as", "in", "dyn", "box",
+    "yield",
 ];
 
 /// Rust value keywords (operands).
@@ -426,15 +440,35 @@ const RUST_VALUE_KEYWORDS: &[&str] = &["true", "false", "self", "Self"];
 /// Go-specific operators.
 const GO_OPERATORS: &[&str] = &[
     // Go-specific
-    ":=", "<-", "...",
+    ":=",
+    "<-",
+    "...",
     // Keywords as operators
-    "if", "else", "for", "range",
-    "switch", "case", "default", "select",
-    "func", "return", "break", "continue",
-    "go", "defer", "chan",
-    "type", "struct", "interface",
-    "package", "import", "const", "var",
-    "fallthrough", "goto", "map",
+    "if",
+    "else",
+    "for",
+    "range",
+    "switch",
+    "case",
+    "default",
+    "select",
+    "func",
+    "return",
+    "break",
+    "continue",
+    "go",
+    "defer",
+    "chan",
+    "type",
+    "struct",
+    "interface",
+    "package",
+    "import",
+    "const",
+    "var",
+    "fallthrough",
+    "goto",
+    "map",
 ];
 
 /// Go value keywords (operands).
@@ -443,20 +477,49 @@ const GO_VALUE_KEYWORDS: &[&str] = &["true", "false", "nil", "iota"];
 /// Java-specific operators.
 const JAVA_OPERATORS: &[&str] = &[
     // Java-specific
-    "->", "::",
-    "++", "--",
+    "->",
+    "::",
+    "++",
+    "--",
     "instanceof",
     // Keywords as operators
-    "if", "else", "while", "for", "do",
-    "switch", "case", "default",
-    "try", "catch", "finally", "throw", "throws",
-    "return", "break", "continue",
-    "class", "interface", "enum", "extends", "implements",
-    "new", "void",
-    "public", "private", "protected", "static", "final",
-    "abstract", "synchronized", "volatile", "transient",
-    "import", "package",
-    "assert", "native", "strictfp",
+    "if",
+    "else",
+    "while",
+    "for",
+    "do",
+    "switch",
+    "case",
+    "default",
+    "try",
+    "catch",
+    "finally",
+    "throw",
+    "throws",
+    "return",
+    "break",
+    "continue",
+    "class",
+    "interface",
+    "enum",
+    "extends",
+    "implements",
+    "new",
+    "void",
+    "public",
+    "private",
+    "protected",
+    "static",
+    "final",
+    "abstract",
+    "synchronized",
+    "volatile",
+    "transient",
+    "import",
+    "package",
+    "assert",
+    "native",
+    "strictfp",
 ];
 
 /// Java value keywords (operands).
@@ -465,20 +528,57 @@ const JAVA_VALUE_KEYWORDS: &[&str] = &["true", "false", "null", "this", "super"]
 /// C/C++-specific operators.
 const C_CPP_OPERATORS: &[&str] = &[
     // C/C++ specific
-    "->", "::", ".*", "->*",
-    "++", "--",
-    "sizeof", "alignof",
+    "->",
+    "::",
+    ".*",
+    "->*",
+    "++",
+    "--",
+    "sizeof",
+    "alignof",
     // Keywords as operators
-    "if", "else", "while", "for", "do",
-    "switch", "case", "default",
-    "return", "break", "continue", "goto",
-    "struct", "union", "enum", "class", "typedef",
-    "const", "volatile", "static", "extern", "register",
-    "inline", "virtual", "explicit", "friend",
-    "public", "private", "protected",
-    "new", "delete", "throw", "try", "catch",
-    "namespace", "using", "template", "typename",
-    "auto", "decltype", "constexpr", "noexcept",
+    "if",
+    "else",
+    "while",
+    "for",
+    "do",
+    "switch",
+    "case",
+    "default",
+    "return",
+    "break",
+    "continue",
+    "goto",
+    "struct",
+    "union",
+    "enum",
+    "class",
+    "typedef",
+    "const",
+    "volatile",
+    "static",
+    "extern",
+    "register",
+    "inline",
+    "virtual",
+    "explicit",
+    "friend",
+    "public",
+    "private",
+    "protected",
+    "new",
+    "delete",
+    "throw",
+    "try",
+    "catch",
+    "namespace",
+    "using",
+    "template",
+    "typename",
+    "auto",
+    "decltype",
+    "constexpr",
+    "noexcept",
 ];
 
 /// C/C++ value keywords (operands).
@@ -799,9 +899,9 @@ pub fn analyze_halstead(
     }
 
     // Directory analysis
-    let path_str = path.to_str().ok_or_else(|| {
-        BrrrError::InvalidArgument("Invalid path encoding".to_string())
-    })?;
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| BrrrError::InvalidArgument("Invalid path encoding".to_string()))?;
 
     let scanner = ProjectScanner::new(path_str)?;
 
@@ -821,7 +921,10 @@ pub fn analyze_halstead(
         )));
     }
 
-    debug!("Analyzing {} files for Halstead metrics", scan_result.files.len());
+    debug!(
+        "Analyzing {} files for Halstead metrics",
+        scan_result.files.len()
+    );
 
     // Analyze files in parallel
     let results: Vec<(Vec<FunctionHalstead>, Vec<HalsteadError>)> = scan_result
@@ -876,9 +979,7 @@ pub fn analyze_file_halstead(
 
     // Detect language
     let registry = LanguageRegistry::global();
-    let language = registry
-        .detect_language(file)
-        .map(|l| l.name().to_string());
+    let language = registry.detect_language(file).map(|l| l.name().to_string());
 
     Ok(HalsteadAnalysis {
         path: file.to_path_buf(),
@@ -900,25 +1001,25 @@ fn analyze_function_halstead(
     let source = std::fs::read_to_string(file)?;
     let registry = LanguageRegistry::global();
 
-    let lang = registry
-        .detect_language(file)
-        .ok_or_else(|| BrrrError::UnsupportedLanguage(
+    let lang = registry.detect_language(file).ok_or_else(|| {
+        BrrrError::UnsupportedLanguage(
             file.extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("unknown")
-                .to_string()
-        ))?;
-
-    let mut parser = lang.parser()?;
-    let tree = parser.parse(&source, None).ok_or_else(|| {
-        BrrrError::Parse {
-            file: file.display().to_string(),
-            message: "Failed to parse file".to_string(),
-        }
+                .to_string(),
+        )
     })?;
 
-    // Find the function node by line range
-    let function_node = find_function_node(&tree, start_line, end_line);
+    let mut parser = lang.parser()?;
+    let tree = parser
+        .parse(&source, None)
+        .ok_or_else(|| BrrrError::Parse {
+            file: file.display().to_string(),
+            message: "Failed to parse file".to_string(),
+        })?;
+
+    // Find the function node by line range (using common utility)
+    let function_node = common::find_function_node(&tree, start_line, end_line);
 
     let node_to_analyze = function_node.unwrap_or_else(|| tree.root_node());
 
@@ -949,48 +1050,7 @@ fn analyze_function_halstead(
     })
 }
 
-/// Find a function node by line range.
-fn find_function_node(tree: &Tree, start_line: usize, end_line: usize) -> Option<Node<'_>> {
-    let root = tree.root_node();
-    find_function_node_recursive(root, start_line, end_line)
-}
-
-/// Recursively search for a function node matching the line range.
-fn find_function_node_recursive(node: Node<'_>, start_line: usize, end_line: usize) -> Option<Node<'_>> {
-    let node_start = node.start_position().row + 1; // 1-indexed
-    let node_end = node.end_position().row + 1;
-
-    // Check if this node matches
-    if is_function_node(&node) && node_start == start_line && node_end >= end_line {
-        return Some(node);
-    }
-
-    // Search children
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if let Some(found) = find_function_node_recursive(child, start_line, end_line) {
-            return Some(found);
-        }
-    }
-
-    None
-}
-
-/// Check if a node represents a function definition.
-fn is_function_node(node: &Node) -> bool {
-    matches!(
-        node.kind(),
-        "function_definition"
-            | "function_declaration"
-            | "method_definition"
-            | "function_item"
-            | "function"
-            | "method"
-            | "arrow_function"
-            | "function_expression"
-            | "method_declaration"
-    )
-}
+// Note: find_function_node and is_function_node are now in common.rs
 
 /// Analyze all functions in a file.
 fn analyze_file_functions_halstead(
@@ -1034,7 +1094,13 @@ fn analyze_file_functions_halstead(
             let qualified_name = format!("{}.{}", class.name, method.name);
             let start_line = method.line_number;
             let end_line = method.end_line_number.unwrap_or(start_line);
-            match analyze_function_halstead(file, &qualified_name, start_line, end_line, include_tokens) {
+            match analyze_function_halstead(
+                file,
+                &qualified_name,
+                start_line,
+                end_line,
+                include_tokens,
+            ) {
                 Ok(halstead) => results.push(halstead),
                 Err(e) => {
                     debug!("Failed to analyze method {}: {}", qualified_name, e);
@@ -1110,7 +1176,10 @@ mod tests {
         // Higher complexity
         let high = HalsteadMetrics::from_counts(50, 100, 500, 1000);
         let quality = high.quality_assessment();
-        assert!(matches!(quality.volume_level, QualityLevel::High | QualityLevel::VeryHigh));
+        assert!(matches!(
+            quality.volume_level,
+            QualityLevel::High | QualityLevel::VeryHigh
+        ));
     }
 
     #[test]
@@ -1269,8 +1338,14 @@ class Calculator:
 
         assert_eq!(analysis.functions.len(), 2);
 
-        let add = analysis.functions.iter().find(|f| f.function_name == "Calculator.add");
-        let mul = analysis.functions.iter().find(|f| f.function_name == "Calculator.multiply");
+        let add = analysis
+            .functions
+            .iter()
+            .find(|f| f.function_name == "Calculator.add");
+        let mul = analysis
+            .functions
+            .iter()
+            .find(|f| f.function_name == "Calculator.multiply");
 
         assert!(add.is_some());
         assert!(mul.is_some());

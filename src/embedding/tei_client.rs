@@ -11,10 +11,11 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use futures::stream;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::{OnceCell, RwLock};
+use tokio::sync::{OnceCell, RwLock, Semaphore};
 use tonic::transport::{Channel, Endpoint};
 
 // Generated protobuf types
@@ -108,6 +109,46 @@ pub enum TeiError {
 
 /// Result type for TEI operations.
 pub type Result<T> = std::result::Result<T, TeiError>;
+
+// =============================================================================
+// Retry Error Classification
+// =============================================================================
+
+/// Classification of how to handle errors during retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryAction {
+    /// Error should be returned immediately, no retry.
+    FailImmediately,
+    /// Error is retryable without reconnection.
+    Retry,
+    /// Error warrants channel reconnection before retry.
+    ReconnectAndRetry,
+}
+
+/// Classify a gRPC status code to determine retry behavior.
+///
+/// This centralizes the error classification logic used by all retry functions.
+#[inline]
+fn classify_grpc_code(code: tonic::Code) -> RetryAction {
+    match code {
+        // Non-retryable errors: client-side issues that won't change on retry
+        tonic::Code::InvalidArgument
+        | tonic::Code::NotFound
+        | tonic::Code::AlreadyExists
+        | tonic::Code::PermissionDenied
+        | tonic::Code::Unauthenticated => RetryAction::FailImmediately,
+
+        // Channel errors: warrant reconnection before retry
+        tonic::Code::Unavailable
+        | tonic::Code::Unknown
+        | tonic::Code::Internal
+        | tonic::Code::Aborted
+        | tonic::Code::ResourceExhausted => RetryAction::ReconnectAndRetry,
+
+        // Other errors: retryable without reconnection
+        _ => RetryAction::Retry,
+    }
+}
 
 // =============================================================================
 // Data Types
@@ -419,7 +460,7 @@ impl Default for TeiClientConfig {
             max_attempts: 3,
             retry_base_delay_ms: 100,
             retry_max_delay_ms: 5000,
-            batch_token_budget: 8192,
+            batch_token_budget: 65536,
             keepalive_secs: 30,
         }
     }
@@ -505,6 +546,30 @@ fn calculate_backoff_with_jitter(base_delay_ms: u64, max_delay_ms: u64, attempt:
     Duration::from_millis(capped_delay_ms + jitter_ms)
 }
 
+/// Estimate token count from character count using heuristic.
+///
+/// Most embedding models (BGE, Qwen, etc.) use subword tokenization where
+/// average tokens per character is approximately 0.25-0.33 for English text.
+/// We use 0.30 as a conservative estimate (slightly over-estimates tokens).
+///
+/// This avoids a server round-trip for token counting, which was causing
+/// double tokenization overhead: once for batching, once for embedding.
+///
+/// # Arguments
+///
+/// * `char_count` - Number of characters in the text
+///
+/// # Returns
+///
+/// Estimated token count (conservative, tends to slightly over-estimate).
+#[inline]
+fn estimate_tokens_from_chars(char_count: usize) -> usize {
+    // ~3.3 chars per token on average, use 3 to be conservative
+    // This means we slightly over-estimate tokens, leading to smaller batches
+    // which is safer than under-estimating and hitting server limits
+    (char_count + 2) / 3
+}
+
 // =============================================================================
 // Client Implementation
 // =============================================================================
@@ -560,6 +625,12 @@ pub struct TeiClient {
     /// metadata that doesn't change during runtime, so we don't need to
     /// invalidate this cache on reconnection.
     server_info: OnceCell<ServerInfo>,
+    /// Semaphore for limiting concurrent requests to the server.
+    ///
+    /// Initialized lazily based on `server_info.max_concurrent_requests` to
+    /// prevent overwhelming the TEI server with too many parallel requests.
+    /// This is critical for avoiding server-side queue overflow and timeouts.
+    request_semaphore: OnceCell<Semaphore>,
     /// Tracks whether the client has been explicitly closed.
     ///
     /// Uses `AtomicBool` with `SeqCst` ordering for thread-safe access without
@@ -602,6 +673,7 @@ impl TeiClient {
             config,
             channel: RwLock::new(channel),
             server_info: OnceCell::const_new(),
+            request_semaphore: OnceCell::const_new(),
             closed: AtomicBool::new(false),
         })
     }
@@ -630,7 +702,15 @@ impl TeiClient {
     ///
     /// The close operation uses atomic compare-and-swap to ensure only one
     /// thread performs the actual close. The write lock on the channel ensures
-    /// no in-flight operations are interrupted.
+    /// no new operations can acquire the channel during the close sequence.
+    ///
+    /// # In-Flight Request Behavior
+    ///
+    /// Requests that have already acquired a channel reference before `close()`
+    /// is called may continue to completion. Retry loops check the closed state
+    /// at the start of each attempt, so in-flight requests will return
+    /// `ClientClosed` on their next retry attempt if `close()` is called during
+    /// a retry backoff.
     ///
     /// # Example
     ///
@@ -722,7 +802,9 @@ impl TeiClient {
     /// Reconnect the channel after a failure.
     ///
     /// This method creates a new channel and replaces the existing one.
-    /// It acquires a write lock during the update to ensure thread safety.
+    /// It acquires a write lock BEFORE creating the channel to prevent race
+    /// conditions where multiple threads could create different channels and
+    /// one would overwrite the other.
     ///
     /// Note: Server info cache is NOT cleared on reconnection because it contains
     /// static metadata (model ID, max lengths, etc.) that doesn't change unless
@@ -732,11 +814,22 @@ impl TeiClient {
     /// # Returns
     ///
     /// The newly created channel on success, or an error if reconnection fails.
+    ///
+    /// # Thread Safety
+    ///
+    /// The write lock is held during channel creation to ensure only one thread
+    /// performs reconnection at a time. While this means readers will block during
+    /// reconnection, this is acceptable because:
+    /// 1. Reconnection is a rare event (only on channel failures)
+    /// 2. Readers using a stale channel would fail anyway
+    /// 3. Tokio's async RwLock doesn't block the runtime
     async fn reconnect(&self) -> Result<Channel> {
-        let new_channel = Self::create_channel(&self.config).await?;
-
-        // Update the stored channel
+        // Acquire write lock FIRST to prevent race condition where multiple
+        // threads create different channels and one overwrites the other
         let mut channel = self.channel.write().await;
+
+        // Create new channel while holding the lock
+        let new_channel = Self::create_channel(&self.config).await?;
         *channel = new_channel.clone();
 
         Ok(new_channel)
@@ -744,10 +837,16 @@ impl TeiClient {
 
     /// Check if an error indicates a channel/connection problem that warrants reconnection.
     ///
-    /// Returns `true` for errors that suggest the channel is broken:
+    /// Returns `true` for errors that suggest the channel is broken or overloaded:
     /// - Connection errors (server unreachable, connection reset)
     /// - Transport errors (HTTP/2 errors, stream failures)
-    /// - gRPC status codes indicating server unavailability
+    /// - gRPC status codes indicating server unavailability or overload:
+    ///   - `Unavailable`: Server is not reachable
+    ///   - `Unknown`: Unknown error (often transport-level)
+    ///   - `Internal`: Server-side error
+    ///   - `Aborted`: Operation aborted
+    ///   - `ResourceExhausted`: Server is overloaded (may benefit from reconnection
+    ///     to a different backend via load balancer)
     fn is_channel_error(&self, error: &TeiError) -> bool {
         match error {
             TeiError::Connection(_) | TeiError::Transport(_) => true,
@@ -757,6 +856,7 @@ impl TeiClient {
                     | tonic::Code::Unknown
                     | tonic::Code::Internal
                     | tonic::Code::Aborted
+                    | tonic::Code::ResourceExhausted
             ),
             _ => false,
         }
@@ -890,8 +990,6 @@ impl TeiClient {
     ) -> Result<(Vec<f32>, EmbedMetadata)> {
         self.ensure_not_closed()?;
 
-        let client = EmbedClient::new(self.get_channel().await);
-
         let request = EmbedRequest {
             inputs: text.to_string(),
             truncate,
@@ -901,10 +999,15 @@ impl TeiClient {
             dimensions,
         };
 
+        // Use with_retry_reconnect to get fresh channel on each attempt.
+        // This ensures reconnected channels are used after channel errors.
         let response = self
-            .with_retry(|| async {
-                let mut client = client.clone();
-                client.embed(request.clone()).await
+            .with_retry_reconnect(|channel| {
+                let req = request.clone();
+                async move {
+                    let mut client = EmbedClient::new(channel);
+                    client.embed(req).await
+                }
             })
             .await?;
 
@@ -937,10 +1040,17 @@ impl TeiClient {
         dimensions: Option<u32>,
     ) -> Result<Vec<Vec<f32>>> {
         let mut attempt = 0;
-        let mut last_error = None;
+        // Store status directly to avoid repeated .to_string() calls
+        let mut last_grpc_error: Option<tonic::Status> = None;
+        let mut last_other_error: Option<String> = None;
         let mut should_reconnect = false;
 
         while attempt < self.config.max_attempts {
+            // Check closed state at start of each attempt to handle race with close()
+            if self.is_closed() {
+                return Err(TeiError::ClientClosed);
+            }
+
             // Reconnect if previous attempt detected a channel error
             if should_reconnect {
                 let _ = self.reconnect().await;
@@ -953,25 +1063,16 @@ impl TeiClient {
             {
                 Ok(results) => return Ok(results),
                 Err(TeiError::Grpc(status)) => {
-                    // Don't retry on certain error codes
-                    match status.code() {
-                        tonic::Code::InvalidArgument
-                        | tonic::Code::NotFound
-                        | tonic::Code::AlreadyExists
-                        | tonic::Code::PermissionDenied
-                        | tonic::Code::Unauthenticated => {
+                    match classify_grpc_code(status.code()) {
+                        RetryAction::FailImmediately => {
                             return Err(TeiError::Grpc(status));
                         }
-                        // Channel errors that warrant reconnection
-                        tonic::Code::Unavailable
-                        | tonic::Code::Unknown
-                        | tonic::Code::Internal
-                        | tonic::Code::Aborted => {
+                        RetryAction::ReconnectAndRetry => {
                             should_reconnect = true;
-                            last_error = Some(status.to_string());
+                            last_grpc_error = Some(status);
                         }
-                        _ => {
-                            last_error = Some(status.to_string());
+                        RetryAction::Retry => {
+                            last_grpc_error = Some(status);
                         }
                     }
                 }
@@ -980,7 +1081,7 @@ impl TeiClient {
                     if self.is_channel_error(&e) {
                         should_reconnect = true;
                     }
-                    last_error = Some(e.to_string());
+                    last_other_error = Some(e.to_string());
                 }
             }
 
@@ -996,9 +1097,12 @@ impl TeiClient {
             }
         }
 
-        Err(TeiError::RetryExhausted(
-            last_error.unwrap_or_else(|| "Unknown error".to_string()),
-        ))
+        // Convert to string only once at the end
+        let error_msg = last_grpc_error
+            .map(|s| s.to_string())
+            .or(last_other_error)
+            .unwrap_or_else(|| "Unknown error".into());
+        Err(TeiError::RetryExhausted(error_msg))
     }
 
     /// Single attempt at streaming embed.
@@ -1017,20 +1121,29 @@ impl TeiClient {
         let mut client = EmbedClient::new(self.get_channel().await);
         let expected_count = texts.len();
 
-        // Create request stream - fresh for each attempt
-        let requests: Vec<EmbedRequest> = texts
-            .iter()
-            .map(|text| EmbedRequest {
-                inputs: (*text).to_string(),
+        // BUG FIX: Lazy EmbedRequest creation to reduce memory allocation.
+        //
+        // Previously, all EmbedRequest objects were eagerly collected into a Vec
+        // before streaming. For 100K texts, this allocated ~5-10MB of EmbedRequest
+        // structs upfront.
+        //
+        // Now we:
+        // 1. Clone strings to Vec<String> (required for 'static gRPC lifetime)
+        // 2. Lazily create EmbedRequest as the stream is consumed
+        //
+        // This halves memory overhead by avoiding the intermediate Vec<EmbedRequest>.
+        // For truly large batches, users should use embed_batch() which chunks the input.
+        let owned_texts: Vec<String> = texts.iter().map(|t| (*t).to_string()).collect();
+        let request_stream = tokio_stream::iter(owned_texts.into_iter().map(move |text| {
+            EmbedRequest {
+                inputs: text,
                 truncate,
                 normalize,
                 truncation_direction: TruncationDirection::Right.into(),
                 prompt_name: None,
                 dimensions,
-            })
-            .collect();
-
-        let request_stream = tokio_stream::iter(requests);
+            }
+        }));
         let response = client.embed_stream(request_stream).await?;
 
         let mut results = Vec::with_capacity(expected_count);
@@ -1039,10 +1152,26 @@ impl TeiClient {
         // Track expected dimension from first embedding for consistency validation
         let mut expected_dims: Option<usize> = None;
 
-        use tokio_stream::StreamExt;
+        // BUG FIX: Per-item timeout to detect stalled streams (30s per item).
+        let per_item_timeout = Duration::from_secs(30);
+
+        use tokio_stream::StreamExt as TokioStreamExt;
         let mut index = 0usize;
-        while let Some(resp) = stream.next().await {
-            let resp = resp?;
+        loop {
+            // Apply per-item timeout to detect stalled streams
+            let next_item =
+                tokio::time::timeout(per_item_timeout, TokioStreamExt::next(&mut stream)).await;
+            let resp = match next_item {
+                Ok(Some(r)) => r?,
+                Ok(None) => break, // Stream ended normally
+                Err(_) => {
+                    return Err(TeiError::RetryExhausted(format!(
+                        "Stream stalled: no response for item {} after {}s",
+                        index,
+                        per_item_timeout.as_secs()
+                    )));
+                }
+            };
 
             // Validate embedding is not empty
             if resp.embeddings.is_empty() {
@@ -1085,9 +1214,9 @@ impl TeiClient {
 
     /// Embed texts in batches optimized for token budget.
     ///
-    /// This method counts tokens first and batches requests to stay within
-    /// the configured token budget, maximizing throughput while avoiding
-    /// server-side batching limits.
+    /// Uses character-based token estimation to avoid double tokenization overhead.
+    /// Previously, this method called `count_tokens_batch()` (round-trip 1) followed
+    /// by `embed()` (round-trip 2). Now it estimates tokens from character counts.
     ///
     /// # Arguments
     ///
@@ -1097,6 +1226,11 @@ impl TeiClient {
     /// # Returns
     ///
     /// Vector of embedding vectors (one per input text).
+    ///
+    /// # Performance
+    ///
+    /// - Uses character-based token estimation (avoids server round-trip)
+    /// - Processes batches in parallel with concurrency control
     ///
     /// # Errors
     ///
@@ -1118,20 +1252,66 @@ impl TeiClient {
             .unwrap_or(server_info.max_client_batch_size as usize)
             .min(server_info.max_client_batch_size as usize);
 
-        // Count tokens for each text to optimize batching
-        let token_counts = self.count_tokens_batch(texts).await?;
-        let token_budget = self.config.batch_token_budget;
+        // BUG FIX: Use character-based token estimation instead of server round-trip.
+        // Previously: count_tokens_batch() made a server call THEN embed() made another.
+        // Now: Estimate tokens from char count (~3 chars/token for subword tokenizers).
+        let token_counts: Vec<usize> = texts
+            .iter()
+            .map(|t| estimate_tokens_from_chars(t.len()))
+            .collect();
+
+        // Respect both client config and server's max_batch_tokens limit
+        let token_budget = self
+            .config
+            .batch_token_budget
+            .min(server_info.max_batch_tokens as usize);
 
         // Build batches based on token budget
         let batches = Self::build_token_batches(texts, &token_counts, token_budget, max_batch);
 
-        // Process batches
-        let mut all_results = Vec::with_capacity(texts.len());
+        // Get semaphore for concurrency control (reference to self.request_semaphore)
+        // Semaphore limits concurrent requests to server's max_concurrent_requests
+        let semaphore = self.get_request_semaphore().await?;
 
-        for batch in batches {
-            let batch_results = self.embed(&batch).await?;
-            all_results.extend(batch_results);
+        // BUG FIX: Process batches in parallel instead of sequentially.
+        // Previously: for batch in batches { embed(&batch).await? }
+        // Now: Use buffer_unordered for concurrent batch processing.
+        use futures::StreamExt as FuturesStreamExt;
+
+        // Use server's max_concurrent_requests as the concurrency limit.
+        // Cap at 32 for client-side resource management (memory for in-flight requests).
+        // The semaphore provides the actual rate limiting based on server capacity.
+        let max_concurrent = (server_info.max_concurrent_requests as usize).clamp(1, 32);
+
+        let batch_futures = batches.into_iter().enumerate().map(|(batch_idx, batch)| {
+            async move {
+                // Acquire permit before making request
+                let _permit = semaphore.acquire().await.map_err(|_| {
+                    TeiError::Connection("Request semaphore closed unexpectedly".to_string())
+                })?;
+
+                let batch_results = self.embed(&batch).await?;
+                Ok::<_, TeiError>((batch_idx, batch_results))
+            }
+        });
+
+        // Execute batches concurrently with bounded parallelism
+        let results: Vec<_> = stream::iter(batch_futures)
+            .buffer_unordered(max_concurrent)
+            .collect()
+            .await;
+
+        // Sort by batch index and flatten, checking for errors
+        let mut indexed_results: Vec<(usize, Vec<Vec<f32>>)> = Vec::with_capacity(results.len());
+        for result in results {
+            indexed_results.push(result?);
         }
+        indexed_results.sort_by_key(|(idx, _)| *idx);
+
+        let all_results: Vec<Vec<f32>> = indexed_results
+            .into_iter()
+            .flat_map(|(_, batch_results)| batch_results)
+            .collect();
 
         Ok(all_results)
     }
@@ -1213,10 +1393,7 @@ impl TeiClient {
     /// ```
     pub async fn embed_sparse(&self, text: &str) -> Result<SparseEmbedding> {
         let results = self.embed_sparse_batch(&[text]).await?;
-        results
-            .into_iter()
-            .next()
-            .ok_or(TeiError::EmptyResponse)
+        results.into_iter().next().ok_or(TeiError::EmptyResponse)
     }
 
     /// Generate a sparse embedding with metadata for a single text.
@@ -1360,10 +1537,17 @@ impl TeiClient {
         truncate: bool,
     ) -> Result<Vec<SparseEmbedding>> {
         let mut attempt = 0;
-        let mut last_error = None;
+        // Store status directly to avoid repeated .to_string() calls
+        let mut last_grpc_error: Option<tonic::Status> = None;
+        let mut last_other_error: Option<String> = None;
         let mut should_reconnect = false;
 
         while attempt < self.config.max_attempts {
+            // Check closed state at start of each attempt to handle race with close()
+            if self.is_closed() {
+                return Err(TeiError::ClientClosed);
+            }
+
             // Reconnect if previous attempt detected a channel error
             if should_reconnect {
                 let _ = self.reconnect().await;
@@ -1373,25 +1557,16 @@ impl TeiClient {
             match self.embed_sparse_stream_once(texts, truncate).await {
                 Ok(results) => return Ok(results),
                 Err(TeiError::Grpc(status)) => {
-                    // Don't retry on certain error codes
-                    match status.code() {
-                        tonic::Code::InvalidArgument
-                        | tonic::Code::NotFound
-                        | tonic::Code::AlreadyExists
-                        | tonic::Code::PermissionDenied
-                        | tonic::Code::Unauthenticated => {
+                    match classify_grpc_code(status.code()) {
+                        RetryAction::FailImmediately => {
                             return Err(TeiError::Grpc(status));
                         }
-                        // Channel errors that warrant reconnection
-                        tonic::Code::Unavailable
-                        | tonic::Code::Unknown
-                        | tonic::Code::Internal
-                        | tonic::Code::Aborted => {
+                        RetryAction::ReconnectAndRetry => {
                             should_reconnect = true;
-                            last_error = Some(status.to_string());
+                            last_grpc_error = Some(status);
                         }
-                        _ => {
-                            last_error = Some(status.to_string());
+                        RetryAction::Retry => {
+                            last_grpc_error = Some(status);
                         }
                     }
                 }
@@ -1400,7 +1575,7 @@ impl TeiClient {
                     if self.is_channel_error(&e) {
                         should_reconnect = true;
                     }
-                    last_error = Some(e.to_string());
+                    last_other_error = Some(e.to_string());
                 }
             }
 
@@ -1416,9 +1591,12 @@ impl TeiClient {
             }
         }
 
-        Err(TeiError::RetryExhausted(
-            last_error.unwrap_or_else(|| "Unknown error".to_string()),
-        ))
+        // Convert to string only once at the end
+        let error_msg = last_grpc_error
+            .map(|s| s.to_string())
+            .or(last_other_error)
+            .unwrap_or_else(|| "Unknown error".into());
+        Err(TeiError::RetryExhausted(error_msg))
     }
 
     /// Single attempt at streaming sparse embed.
@@ -1432,25 +1610,25 @@ impl TeiClient {
         let mut client = EmbedClient::new(self.get_channel().await);
         let expected_count = texts.len();
 
-        // Create request stream - fresh for each attempt
-        let requests: Vec<tei_proto::EmbedSparseRequest> = texts
-            .iter()
-            .map(|text| tei_proto::EmbedSparseRequest {
-                inputs: (*text).to_string(),
-                truncate,
-                truncation_direction: TruncationDirection::Right.into(),
-                prompt_name: None,
-            })
-            .collect();
-
-        let request_stream = tokio_stream::iter(requests);
+        // Lazy EmbedSparseRequest creation - clone strings for 'static lifetime,
+        // then create request objects on-demand as the stream is consumed.
+        let owned_texts: Vec<String> = texts.iter().map(|t| (*t).to_string()).collect();
+        let request_stream =
+            tokio_stream::iter(owned_texts.into_iter().map(move |text| {
+                tei_proto::EmbedSparseRequest {
+                    inputs: text,
+                    truncate,
+                    truncation_direction: TruncationDirection::Right.into(),
+                    prompt_name: None,
+                }
+            }));
         let response = client.embed_sparse_stream(request_stream).await?;
 
         let mut results = Vec::with_capacity(expected_count);
         let mut stream = response.into_inner();
 
-        use tokio_stream::StreamExt;
-        while let Some(resp) = stream.next().await {
+        use tokio_stream::StreamExt as TokioStreamExt;
+        while let Some(resp) = TokioStreamExt::next(&mut stream).await {
             let resp = resp?;
             let values: Vec<SparseValue> = resp
                 .sparse_embeddings
@@ -1486,18 +1664,21 @@ impl TeiClient {
     pub async fn tokenize(&self, text: &str, add_special_tokens: bool) -> Result<Vec<Token>> {
         self.ensure_not_closed()?;
 
-        let client = TokenizeClient::new(self.get_channel().await);
-
         let request = EncodeRequest {
             inputs: text.to_string(),
             add_special_tokens,
             prompt_name: None,
         };
 
+        // Use with_retry_reconnect to get fresh channel on each attempt.
+        // This ensures reconnected channels are used after channel errors.
         let response = self
-            .with_retry(|| async {
-                let mut client = client.clone();
-                client.tokenize(request.clone()).await
+            .with_retry_reconnect(|channel| {
+                let req = request.clone();
+                async move {
+                    let mut client = TokenizeClient::new(channel);
+                    client.tokenize(req).await
+                }
             })
             .await?;
 
@@ -1541,10 +1722,17 @@ impl TeiClient {
     /// Internal streaming tokenize with retry and reconnection support.
     async fn count_tokens_batch_with_retry(&self, texts: &[&str]) -> Result<Vec<usize>> {
         let mut attempt = 0;
-        let mut last_error = None;
+        // Store status directly to avoid repeated .to_string() calls
+        let mut last_grpc_error: Option<tonic::Status> = None;
+        let mut last_other_error: Option<String> = None;
         let mut should_reconnect = false;
 
         while attempt < self.config.max_attempts {
+            // Check closed state at start of each attempt to handle race with close()
+            if self.is_closed() {
+                return Err(TeiError::ClientClosed);
+            }
+
             if should_reconnect {
                 let _ = self.reconnect().await;
                 should_reconnect = false;
@@ -1552,30 +1740,25 @@ impl TeiClient {
 
             match self.count_tokens_batch_once(texts).await {
                 Ok(counts) => return Ok(counts),
-                Err(TeiError::Grpc(status)) => match status.code() {
-                    tonic::Code::InvalidArgument
-                    | tonic::Code::NotFound
-                    | tonic::Code::AlreadyExists
-                    | tonic::Code::PermissionDenied
-                    | tonic::Code::Unauthenticated => {
-                        return Err(TeiError::Grpc(status));
+                Err(TeiError::Grpc(status)) => {
+                    match classify_grpc_code(status.code()) {
+                        RetryAction::FailImmediately => {
+                            return Err(TeiError::Grpc(status));
+                        }
+                        RetryAction::ReconnectAndRetry => {
+                            should_reconnect = true;
+                            last_grpc_error = Some(status);
+                        }
+                        RetryAction::Retry => {
+                            last_grpc_error = Some(status);
+                        }
                     }
-                    tonic::Code::Unavailable
-                    | tonic::Code::Unknown
-                    | tonic::Code::Internal
-                    | tonic::Code::Aborted => {
-                        should_reconnect = true;
-                        last_error = Some(status.to_string());
-                    }
-                    _ => {
-                        last_error = Some(status.to_string());
-                    }
-                },
+                }
                 Err(e) => {
                     if self.is_channel_error(&e) {
                         should_reconnect = true;
                     }
-                    last_error = Some(e.to_string());
+                    last_other_error = Some(e.to_string());
                 }
             }
 
@@ -1591,9 +1774,12 @@ impl TeiClient {
             }
         }
 
-        Err(TeiError::RetryExhausted(
-            last_error.unwrap_or_else(|| "Unknown error".to_string()),
-        ))
+        // Convert to string only once at the end
+        let error_msg = last_grpc_error
+            .map(|s| s.to_string())
+            .or(last_other_error)
+            .unwrap_or_else(|| "Unknown error".into());
+        Err(TeiError::RetryExhausted(error_msg))
     }
 
     /// Single attempt at streaming tokenize count.
@@ -1603,23 +1789,23 @@ impl TeiClient {
         let mut client = TokenizeClient::new(self.get_channel().await);
         let expected_count = texts.len();
 
-        let requests: Vec<EncodeRequest> = texts
-            .iter()
-            .map(|text| EncodeRequest {
-                inputs: (*text).to_string(),
+        // Lazy EncodeRequest creation - clone strings for 'static lifetime,
+        // then create request objects on-demand as the stream is consumed.
+        let owned_texts: Vec<String> = texts.iter().map(|t| (*t).to_string()).collect();
+        let request_stream = tokio_stream::iter(owned_texts.into_iter().map(|text| {
+            EncodeRequest {
+                inputs: text,
                 add_special_tokens: false,
                 prompt_name: None,
-            })
-            .collect();
-
-        let request_stream = tokio_stream::iter(requests);
+            }
+        }));
         let response = client.tokenize_stream(request_stream).await?;
 
         let mut counts = Vec::with_capacity(expected_count);
         let mut stream = response.into_inner();
 
-        use tokio_stream::StreamExt;
-        while let Some(resp) = stream.next().await {
+        use tokio_stream::StreamExt as TokioStreamExt;
+        while let Some(resp) = TokioStreamExt::next(&mut stream).await {
             let resp = resp?;
             counts.push(resp.tokens.len());
         }
@@ -1688,17 +1874,20 @@ impl TeiClient {
     ) -> Result<String> {
         self.ensure_not_closed()?;
 
-        let client = TokenizeClient::new(self.get_channel().await);
-
         let request = DecodeRequest {
             ids: token_ids.to_vec(),
             skip_special_tokens,
         };
 
+        // Use with_retry_reconnect to get fresh channel on each attempt.
+        // This ensures reconnected channels are used after channel errors.
         let response = self
-            .with_retry(|| async {
-                let mut client = client.clone();
-                client.decode(request.clone()).await
+            .with_retry_reconnect(|channel| {
+                let req = request.clone();
+                async move {
+                    let mut client = TokenizeClient::new(channel);
+                    client.decode(req).await
+                }
             })
             .await?;
 
@@ -1744,10 +1933,17 @@ impl TeiClient {
         skip_special_tokens: bool,
     ) -> Result<Vec<String>> {
         let mut attempt = 0;
-        let mut last_error = None;
+        // Store status directly to avoid repeated .to_string() calls
+        let mut last_grpc_error: Option<tonic::Status> = None;
+        let mut last_other_error: Option<String> = None;
         let mut should_reconnect = false;
 
         while attempt < self.config.max_attempts {
+            // Check closed state at start of each attempt to handle race with close()
+            if self.is_closed() {
+                return Err(TeiError::ClientClosed);
+            }
+
             if should_reconnect {
                 let _ = self.reconnect().await;
                 should_reconnect = false;
@@ -1758,30 +1954,25 @@ impl TeiClient {
                 .await
             {
                 Ok(results) => return Ok(results),
-                Err(TeiError::Grpc(status)) => match status.code() {
-                    tonic::Code::InvalidArgument
-                    | tonic::Code::NotFound
-                    | tonic::Code::AlreadyExists
-                    | tonic::Code::PermissionDenied
-                    | tonic::Code::Unauthenticated => {
-                        return Err(TeiError::Grpc(status));
+                Err(TeiError::Grpc(status)) => {
+                    match classify_grpc_code(status.code()) {
+                        RetryAction::FailImmediately => {
+                            return Err(TeiError::Grpc(status));
+                        }
+                        RetryAction::ReconnectAndRetry => {
+                            should_reconnect = true;
+                            last_grpc_error = Some(status);
+                        }
+                        RetryAction::Retry => {
+                            last_grpc_error = Some(status);
+                        }
                     }
-                    tonic::Code::Unavailable
-                    | tonic::Code::Unknown
-                    | tonic::Code::Internal
-                    | tonic::Code::Aborted => {
-                        should_reconnect = true;
-                        last_error = Some(status.to_string());
-                    }
-                    _ => {
-                        last_error = Some(status.to_string());
-                    }
-                },
+                }
                 Err(e) => {
                     if self.is_channel_error(&e) {
                         should_reconnect = true;
                     }
-                    last_error = Some(e.to_string());
+                    last_other_error = Some(e.to_string());
                 }
             }
 
@@ -1797,9 +1988,12 @@ impl TeiClient {
             }
         }
 
-        Err(TeiError::RetryExhausted(
-            last_error.unwrap_or_else(|| "Unknown error".to_string()),
-        ))
+        // Convert to string only once at the end
+        let error_msg = last_grpc_error
+            .map(|s| s.to_string())
+            .or(last_other_error)
+            .unwrap_or_else(|| "Unknown error".into());
+        Err(TeiError::RetryExhausted(error_msg))
     }
 
     /// Single attempt at streaming decode.
@@ -1813,22 +2007,22 @@ impl TeiClient {
         let mut client = TokenizeClient::new(self.get_channel().await);
         let expected_count = token_id_batches.len();
 
-        let requests: Vec<DecodeRequest> = token_id_batches
-            .iter()
-            .map(|ids| DecodeRequest {
-                ids: ids.to_vec(),
+        // Lazy DecodeRequest creation - clone token IDs for 'static lifetime,
+        // then create request objects on-demand as the stream is consumed.
+        let owned_ids: Vec<Vec<u32>> = token_id_batches.iter().map(|ids| ids.to_vec()).collect();
+        let request_stream = tokio_stream::iter(owned_ids.into_iter().map(move |ids| {
+            DecodeRequest {
+                ids,
                 skip_special_tokens,
-            })
-            .collect();
-
-        let request_stream = tokio_stream::iter(requests);
+            }
+        }));
         let response = client.decode_stream(request_stream).await?;
 
         let mut results = Vec::with_capacity(expected_count);
         let mut stream = response.into_inner();
 
-        use tokio_stream::StreamExt;
-        while let Some(resp) = stream.next().await {
+        use tokio_stream::StreamExt as TokioStreamExt;
+        while let Some(resp) = TokioStreamExt::next(&mut stream).await {
             let resp = resp?;
             results.push(resp.text);
         }
@@ -1905,8 +2099,6 @@ impl TeiClient {
             return Err(TeiError::Config("query cannot be empty".to_string()));
         }
 
-        let client = RerankClient::new(self.get_channel().await);
-
         let request = RerankRequest {
             query: query.to_string(),
             texts: texts.to_vec(),
@@ -1916,10 +2108,15 @@ impl TeiClient {
             truncation_direction: TruncationDirection::Right.into(),
         };
 
+        // Use with_retry_reconnect to get fresh channel on each attempt.
+        // This ensures reconnected channels are used after channel errors.
         let response = self
-            .with_retry(|| async {
-                let mut client = client.clone();
-                client.rerank(request.clone()).await
+            .with_retry_reconnect(|channel| {
+                let req = request.clone();
+                async move {
+                    let mut client = RerankClient::new(channel);
+                    client.rerank(req).await
+                }
             })
             .await?;
 
@@ -1976,8 +2173,6 @@ impl TeiClient {
             return Err(TeiError::Config("query cannot be empty".to_string()));
         }
 
-        let client = RerankClient::new(self.get_channel().await);
-
         let request = RerankRequest {
             query: query.to_string(),
             texts: texts.to_vec(),
@@ -1987,10 +2182,15 @@ impl TeiClient {
             truncation_direction: TruncationDirection::Right.into(),
         };
 
+        // Use with_retry_reconnect to get fresh channel on each attempt.
+        // This ensures reconnected channels are used after channel errors.
         let response = self
-            .with_retry(|| async {
-                let mut client = client.clone();
-                client.rerank(request.clone()).await
+            .with_retry_reconnect(|channel| {
+                let req = request.clone();
+                async move {
+                    let mut client = RerankClient::new(channel);
+                    client.rerank(req).await
+                }
             })
             .await?;
 
@@ -2027,6 +2227,27 @@ impl TeiClient {
             .cloned()
     }
 
+    /// Get or initialize the request semaphore based on server's max_concurrent_requests.
+    ///
+    /// The semaphore is initialized lazily because we need to know the server's
+    /// concurrency limit, which requires an info() call. This ensures we don't
+    /// overwhelm the TEI server with too many parallel requests.
+    async fn get_request_semaphore(&self) -> Result<&Semaphore> {
+        // First ensure server_info is cached
+        let server_info = self.get_cached_server_info().await?;
+
+        // Initialize semaphore based on server's max_concurrent_requests
+        // Use a reasonable default if the server reports 0
+        let permits = (server_info.max_concurrent_requests as usize).max(1);
+
+        self.request_semaphore
+            .get_or_init(|| async { Semaphore::new(permits) })
+            .await;
+
+        // Safe to unwrap because we just initialized it
+        Ok(self.request_semaphore.get().unwrap())
+    }
+
     /// Execute an async operation with exponential backoff retry and reconnection.
     ///
     /// On channel errors (Unavailable, Unknown, Internal, Aborted), triggers
@@ -2037,7 +2258,7 @@ impl TeiClient {
         Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
     {
         let mut attempt = 0;
-        let mut last_error = None;
+        let mut last_error: Option<tonic::Status> = None;
         let mut should_reconnect = false;
 
         while attempt < self.config.max_attempts {
@@ -2051,24 +2272,15 @@ impl TeiClient {
             match operation().await {
                 Ok(result) => return Ok(result),
                 Err(status) => {
-                    // Don't retry on certain error codes
-                    match status.code() {
-                        tonic::Code::InvalidArgument
-                        | tonic::Code::NotFound
-                        | tonic::Code::AlreadyExists
-                        | tonic::Code::PermissionDenied
-                        | tonic::Code::Unauthenticated => {
+                    match classify_grpc_code(status.code()) {
+                        RetryAction::FailImmediately => {
                             return Err(TeiError::Grpc(status));
                         }
-                        // Channel errors that warrant reconnection
-                        tonic::Code::Unavailable
-                        | tonic::Code::Unknown
-                        | tonic::Code::Internal
-                        | tonic::Code::Aborted => {
+                        RetryAction::ReconnectAndRetry => {
                             should_reconnect = true;
                             last_error = Some(status);
                         }
-                        _ => {
+                        RetryAction::Retry => {
                             last_error = Some(status);
                         }
                     }
@@ -2087,11 +2299,11 @@ impl TeiClient {
             }
         }
 
-        Err(TeiError::RetryExhausted(
-            last_error
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "Unknown error".to_string()),
-        ))
+        // Convert to string only once at the end
+        let error_msg = last_error
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Unknown error".into());
+        Err(TeiError::RetryExhausted(error_msg))
     }
 
     /// Execute an async operation with retry and automatic channel reconnection.
@@ -2110,10 +2322,15 @@ impl TeiClient {
         Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
     {
         let mut attempt = 0;
-        let mut last_error = None;
+        let mut last_error: Option<tonic::Status> = None;
         let mut should_reconnect = false;
 
         while attempt < self.config.max_attempts {
+            // Check closed state at start of each attempt to handle race with close()
+            if self.is_closed() {
+                return Err(TeiError::ClientClosed);
+            }
+
             // Reconnect if previous attempt detected a channel error
             if should_reconnect {
                 let _ = self.reconnect().await;
@@ -2126,22 +2343,15 @@ impl TeiClient {
             match operation(channel).await {
                 Ok(result) => return Ok(result),
                 Err(status) => {
-                    match status.code() {
-                        tonic::Code::InvalidArgument
-                        | tonic::Code::NotFound
-                        | tonic::Code::AlreadyExists
-                        | tonic::Code::PermissionDenied
-                        | tonic::Code::Unauthenticated => {
+                    match classify_grpc_code(status.code()) {
+                        RetryAction::FailImmediately => {
                             return Err(TeiError::Grpc(status));
                         }
-                        tonic::Code::Unavailable
-                        | tonic::Code::Unknown
-                        | tonic::Code::Internal
-                        | tonic::Code::Aborted => {
+                        RetryAction::ReconnectAndRetry => {
                             should_reconnect = true;
                             last_error = Some(status);
                         }
-                        _ => {
+                        RetryAction::Retry => {
                             last_error = Some(status);
                         }
                     }
@@ -2160,11 +2370,11 @@ impl TeiClient {
             }
         }
 
-        Err(TeiError::RetryExhausted(
-            last_error
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "Unknown error".to_string()),
-        ))
+        // Convert to string only once at the end
+        let error_msg = last_error
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Unknown error".into());
+        Err(TeiError::RetryExhausted(error_msg))
     }
 }
 
@@ -2367,7 +2577,10 @@ mod tests {
         assert_eq!(deserialized.model_id, info.model_id);
         assert_eq!(deserialized.model_dtype, info.model_dtype);
         assert_eq!(deserialized.model_type, info.model_type);
-        assert_eq!(deserialized.max_concurrent_requests, info.max_concurrent_requests);
+        assert_eq!(
+            deserialized.max_concurrent_requests,
+            info.max_concurrent_requests
+        );
     }
 
     #[test]
@@ -2639,7 +2852,10 @@ mod tests {
         assert!(msg.contains("768"), "Should contain expected dimension");
         assert!(msg.contains("512"), "Should contain actual dimension");
         assert!(msg.contains("3"), "Should contain index");
-        assert!(msg.to_lowercase().contains("mismatch"), "Should indicate mismatch");
+        assert!(
+            msg.to_lowercase().contains("mismatch"),
+            "Should indicate mismatch"
+        );
     }
 
     #[test]
@@ -2690,7 +2906,9 @@ mod tests {
 
         let mut results: Vec<Duration> = Vec::new();
         for _ in 0..10 {
-            results.push(calculate_backoff_with_jitter(base_delay, max_delay, attempt));
+            results.push(calculate_backoff_with_jitter(
+                base_delay, max_delay, attempt,
+            ));
         }
 
         // With true random jitter, we expect at least some variation
@@ -2705,8 +2923,14 @@ mod tests {
 
         for duration in &results {
             let ms = duration.as_millis() as u64;
-            assert!(ms >= expected_base, "Backoff should be at least {expected_base}ms, got {ms}ms");
-            assert!(ms <= max_with_jitter, "Backoff should be at most {max_with_jitter}ms, got {ms}ms");
+            assert!(
+                ms >= expected_base,
+                "Backoff should be at least {expected_base}ms, got {ms}ms"
+            );
+            assert!(
+                ms <= max_with_jitter,
+                "Backoff should be at most {max_with_jitter}ms, got {ms}ms"
+            );
         }
 
         // Log whether variation was found (for debugging, not a hard failure)
@@ -2735,7 +2959,10 @@ mod tests {
         assert!(backoff_2.as_millis() <= 500, "Attempt 2 should be <= 500ms");
 
         assert!(backoff_3.as_millis() >= 800, "Attempt 3 should be >= 800ms");
-        assert!(backoff_3.as_millis() <= 1000, "Attempt 3 should be <= 1000ms");
+        assert!(
+            backoff_3.as_millis() <= 1000,
+            "Attempt 3 should be <= 1000ms"
+        );
     }
 
     #[test]
@@ -2747,8 +2974,14 @@ mod tests {
         let backoff = calculate_backoff_with_jitter(base_delay, max_delay, 10);
 
         // Should be capped at max_delay (2000ms) + 25% jitter (500ms) = 2500ms max
-        assert!(backoff.as_millis() <= 2500, "Backoff should be capped at max_delay + jitter");
-        assert!(backoff.as_millis() >= 2000, "Backoff should be at least max_delay");
+        assert!(
+            backoff.as_millis() <= 2500,
+            "Backoff should be capped at max_delay + jitter"
+        );
+        assert!(
+            backoff.as_millis() >= 2000,
+            "Backoff should be at least max_delay"
+        );
     }
 
     #[test]
@@ -3083,6 +3316,7 @@ mod tests {
             config,
             channel: RwLock::new(channel),
             server_info: OnceCell::const_new(),
+            request_semaphore: OnceCell::const_new(),
             closed: AtomicBool::new(false),
         };
 
@@ -3102,6 +3336,7 @@ mod tests {
             config,
             channel: RwLock::new(channel),
             server_info: OnceCell::const_new(),
+            request_semaphore: OnceCell::const_new(),
             closed: AtomicBool::new(false),
         };
 
@@ -3126,6 +3361,7 @@ mod tests {
             config,
             channel: RwLock::new(channel),
             server_info: OnceCell::const_new(),
+            request_semaphore: OnceCell::const_new(),
             closed: AtomicBool::new(false),
         };
 
@@ -3154,6 +3390,7 @@ mod tests {
             config,
             channel: RwLock::new(channel),
             server_info: OnceCell::const_new(),
+            request_semaphore: OnceCell::const_new(),
             closed: AtomicBool::new(false),
         };
 

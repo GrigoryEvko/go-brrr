@@ -13,8 +13,9 @@
 //! this arena, eliminating duplicate storage and reducing memory usage by ~3x
 //! compared to storing function references in multiple HashMaps.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use rayon::prelude::*;
 use tree_sitter::Parser;
@@ -70,7 +71,7 @@ pub struct FunctionIndex {
 
     /// Index: function name -> indices into functions arena.
     /// Used for initial candidate lookup before disambiguation.
-    by_name: HashMap<String, Vec<usize>>,
+    by_name: FxHashMap<String, Vec<usize>>,
 
     /// Index: qualified name -> index into functions arena.
     ///
@@ -79,18 +80,18 @@ pub struct FunctionIndex {
     /// - TypeScript: file/Class.method or file/function
     /// - Go: package.Function or package.Type.Method
     /// - Rust: crate::module::function or crate::module::Type::method
-    by_qualified: HashMap<String, usize>,
+    by_qualified: FxHashMap<String, usize>,
 
     /// Index: file path -> indices into functions arena.
     /// Used for resolving local/relative calls.
-    by_file: HashMap<String, Vec<usize>>,
+    by_file: FxHashMap<String, Vec<usize>>,
 
     /// Index: (class_name, method_name) -> indices into functions arena.
     ///
     /// Enables O(1) method lookup by class and method name, avoiding
     /// full scan of all definitions. Multiple entries possible when
     /// same class/method name exists in different files.
-    by_class_method: HashMap<(String, String), Vec<usize>>,
+    by_class_method: FxHashMap<(String, String), Vec<usize>>,
 
     /// Index: (simple_module, func_name) -> indices into functions arena.
     ///
@@ -103,7 +104,7 @@ pub struct FunctionIndex {
     /// 2. (simple_module, func_name) - basename only (THIS FIELD)
     /// 3. "module_name.func_name" - string key in by_qualified
     /// 4. "simple_module.func_name" - string key in by_qualified
-    by_simple_module: HashMap<(String, String), Vec<usize>>,
+    by_simple_module: FxHashMap<(String, String), Vec<usize>>,
 
     /// Statistics for debugging
     pub stats: IndexStats,
@@ -453,12 +454,12 @@ impl FunctionIndex {
 /// with the same name in different scopes.
 fn collect_nested_class_ids<'a>(
     classes: &'a [crate::ast::types::ClassInfo],
-) -> std::collections::HashSet<(&'a str, usize)> {
-    let mut nested_ids = std::collections::HashSet::new();
+) -> FxHashSet<(&'a str, usize)> {
+    let mut nested_ids = FxHashSet::default();
 
     fn collect_inner<'a>(
         class: &'a crate::ast::types::ClassInfo,
-        result: &mut std::collections::HashSet<(&'a str, usize)>,
+        result: &mut FxHashSet<(&'a str, usize)>,
     ) {
         for inner in &class.inner_classes {
             result.insert((inner.name.as_str(), inner.line_number));
@@ -482,12 +483,12 @@ fn collect_nested_class_ids<'a>(
 /// functions, so we need to deduplicate.
 fn collect_all_method_identities<'a>(
     classes: &'a [crate::ast::types::ClassInfo],
-) -> std::collections::HashSet<(&'a str, usize)> {
-    let mut method_ids = std::collections::HashSet::new();
+) -> FxHashSet<(&'a str, usize)> {
+    let mut method_ids = FxHashSet::default();
 
     fn collect_from_class<'a>(
         class: &'a crate::ast::types::ClassInfo,
-        result: &mut std::collections::HashSet<(&'a str, usize)>,
+        result: &mut FxHashSet<(&'a str, usize)>,
     ) {
         // Collect methods from this class
         for method in &class.methods {
@@ -558,7 +559,7 @@ fn extract_functions_from_file(path: &PathBuf, root: Option<&Path>) -> Result<Fi
     // BUG FIX: Recursively collect methods from inner_classes too. Methods in nested
     // classes were being indexed as top-level functions because they weren't in
     // method_identities.
-    let method_identities: std::collections::HashSet<(&str, usize)> =
+    let method_identities: FxHashSet<(&str, usize)> =
         collect_all_method_identities(&module_info.classes);
 
     // Extract top-level functions (skip those that are actually class methods)
@@ -599,7 +600,7 @@ fn extract_functions_from_file(path: &PathBuf, root: Option<&Path>) -> Result<Fi
     // Strategy: Build a set of all nested class names (collected from inner_classes fields),
     // then skip any class in the top-level loop that matches by (name, line_number) tuple.
     // Using line_number disambiguates classes with the same name in different scopes.
-    let nested_class_ids: std::collections::HashSet<(&str, usize)> =
+    let nested_class_ids: FxHashSet<(&str, usize)> =
         collect_nested_class_ids(&module_info.classes);
 
     for class in &module_info.classes {
@@ -672,7 +673,8 @@ fn index_class_recursive(
 
     // Index all methods with the full class path
     for method in &class.methods {
-        let qname = build_qualified_name(module_name, Some(&full_class_path), &method.name, language);
+        let qname =
+            build_qualified_name(module_name, Some(&full_class_path), &method.name, language);
 
         functions.push(FunctionDef {
             func_ref: FunctionRef {
@@ -734,9 +736,7 @@ fn index_class_recursive(
 /// * `Option<String>` - Package name if found, None if parsing fails
 fn extract_go_package_name(source: &[u8]) -> Option<String> {
     let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_go::LANGUAGE.into())
-        .ok()?;
+    parser.set_language(&tree_sitter_go::LANGUAGE.into()).ok()?;
 
     let tree = parser.parse(source, None)?;
     let root = tree.root_node();
@@ -1490,7 +1490,10 @@ class MyClass:
                 assert!(
                     def.class_name.is_some(),
                     "INVARIANT VIOLATION: {} has is_method=true but class_name=None",
-                    def.func_ref.qualified_name.as_deref().unwrap_or(&def.func_ref.name)
+                    def.func_ref
+                        .qualified_name
+                        .as_deref()
+                        .unwrap_or(&def.func_ref.name)
                 );
             }
         }
@@ -1578,7 +1581,10 @@ func NewService() *Service {
         // not as class_name. Therefore, is_method should be false to maintain the
         // invariant. The receiver information is preserved in FunctionInfo.decorators.
         let run_def = index.get_definition("myservice.Run");
-        assert!(run_def.is_some(), "Should have definition for myservice.Run");
+        assert!(
+            run_def.is_some(),
+            "Should have definition for myservice.Run"
+        );
         let def = run_def.unwrap();
 
         // Go receiver methods are NOT marked as is_method because they don't have
@@ -1729,5 +1735,4 @@ class Parent:
             "Should NOT find child_method with class_name='Child' (needs full path)"
         );
     }
-
 }

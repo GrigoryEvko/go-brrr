@@ -77,7 +77,7 @@ use tree_sitter::{Node, Parser, Tree};
 use super::{
     DetectedSource, HandlerInfo, SourceKind, SourcePattern, SourceScanResult, TaintedParameter,
 };
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::security::taint::types::Location;
 
 // =============================================================================
@@ -270,13 +270,7 @@ const GIN_SOURCES: &[SourcePattern] = &[
         Some("gin"),
     ),
     // URL path parameters
-    SourcePattern::method_call(
-        "gin_param",
-        SourceKind::UrlPath,
-        "c",
-        "Param",
-        Some("gin"),
-    ),
+    SourcePattern::method_call("gin_param", SourceKind::UrlPath, "c", "Param", Some("gin")),
     // POST form
     SourcePattern::method_call(
         "gin_postform",
@@ -315,13 +309,7 @@ const GIN_SOURCES: &[SourcePattern] = &[
         Some("gin"),
     ),
     // Cookies
-    SourcePattern::method_call(
-        "gin_cookie",
-        SourceKind::Cookie,
-        "c",
-        "Cookie",
-        Some("gin"),
-    ),
+    SourcePattern::method_call("gin_cookie", SourceKind::Cookie, "c", "Cookie", Some("gin")),
     // JSON binding
     SourcePattern::method_call(
         "gin_bindjson",
@@ -588,13 +576,7 @@ const FIBER_SOURCES: &[SourcePattern] = &[
         "Get",
         Some("fiber"),
     ),
-    SourcePattern::method_call(
-        "fiber_ip",
-        SourceKind::HttpHeader,
-        "c",
-        "IP",
-        Some("fiber"),
-    ),
+    SourcePattern::method_call("fiber_ip", SourceKind::HttpHeader, "c", "IP", Some("fiber")),
     SourcePattern::method_call(
         "fiber_ips",
         SourceKind::HttpHeader,
@@ -609,7 +591,13 @@ const STDLIB_SOURCES: &[SourcePattern] = &[
     // os package
     SourcePattern::property_access("os_args", SourceKind::ProcessArgs, "os", "Args", None),
     SourcePattern::method_call("os_getenv", SourceKind::Environment, "os", "Getenv", None),
-    SourcePattern::method_call("os_lookupenv", SourceKind::Environment, "os", "LookupEnv", None),
+    SourcePattern::method_call(
+        "os_lookupenv",
+        SourceKind::Environment,
+        "os",
+        "LookupEnv",
+        None,
+    ),
     SourcePattern::property_access("os_stdin", SourceKind::Stdin, "os", "Stdin", None),
     // File operations
     SourcePattern::method_call("os_readfile", SourceKind::FileRead, "os", "ReadFile", None),
@@ -636,7 +624,13 @@ const STDLIB_SOURCES: &[SourcePattern] = &[
     SourcePattern::method_call("io_readfull", SourceKind::FileRead, "io", "ReadFull", None),
     // bufio package
     SourcePattern::method_call("bufio_text", SourceKind::FileRead, "Scanner", "Text", None),
-    SourcePattern::method_call("bufio_bytes", SourceKind::FileRead, "Scanner", "Bytes", None),
+    SourcePattern::method_call(
+        "bufio_bytes",
+        SourceKind::FileRead,
+        "Scanner",
+        "Bytes",
+        None,
+    ),
     SourcePattern::method_call(
         "bufio_readline",
         SourceKind::FileRead,
@@ -659,10 +653,22 @@ const STDLIB_SOURCES: &[SourcePattern] = &[
         None,
     ),
     // flag package
-    SourcePattern::method_call("flag_string", SourceKind::ProcessArgs, "flag", "String", None),
+    SourcePattern::method_call(
+        "flag_string",
+        SourceKind::ProcessArgs,
+        "flag",
+        "String",
+        None,
+    ),
     SourcePattern::method_call("flag_int", SourceKind::ProcessArgs, "flag", "Int", None),
     SourcePattern::method_call("flag_bool", SourceKind::ProcessArgs, "flag", "Bool", None),
-    SourcePattern::method_call("flag_float64", SourceKind::ProcessArgs, "flag", "Float64", None),
+    SourcePattern::method_call(
+        "flag_float64",
+        SourceKind::ProcessArgs,
+        "flag",
+        "Float64",
+        None,
+    ),
     SourcePattern::method_call(
         "flag_duration",
         SourceKind::ProcessArgs,
@@ -673,19 +679,19 @@ const STDLIB_SOURCES: &[SourcePattern] = &[
     SourcePattern::method_call("flag_var", SourceKind::ProcessArgs, "flag", "Var", None),
     SourcePattern::method_call("flag_arg", SourceKind::ProcessArgs, "flag", "Arg", None),
     SourcePattern::method_call("flag_args", SourceKind::ProcessArgs, "flag", "Args", None),
-    SourcePattern::method_call(
-        "flag_narg",
-        SourceKind::ProcessArgs,
-        "flag",
-        "NArg",
-        None,
-    ),
+    SourcePattern::method_call("flag_narg", SourceKind::ProcessArgs, "flag", "NArg", None),
 ];
 
 /// Network taint sources.
 const NETWORK_SOURCES: &[SourcePattern] = &[
     // net package
-    SourcePattern::method_call("net_conn_read", SourceKind::SocketRecv, "Conn", "Read", None),
+    SourcePattern::method_call(
+        "net_conn_read",
+        SourceKind::SocketRecv,
+        "Conn",
+        "Read",
+        None,
+    ),
     SourcePattern::method_call(
         "net_udpconn_read",
         SourceKind::SocketRecv,
@@ -992,9 +998,7 @@ const HTTP_ROUTE_METHODS: &[&str] = &[
 ];
 
 /// Common request variable names in Go handlers.
-const REQUEST_VAR_NAMES: &[&str] = &[
-    "r", "req", "request", "c", "ctx", "context", "w", "writer",
-];
+const REQUEST_VAR_NAMES: &[&str] = &["r", "req", "request", "c", "ctx", "context", "w", "writer"];
 
 // =============================================================================
 // Go Source Detector
@@ -1069,10 +1073,12 @@ impl GoSourceDetector {
         let mut parser = Parser::new();
 
         let language = tree_sitter_go::LANGUAGE.into();
-        parser.set_language(&language).map_err(|e| BrrrError::Parse {
-            file: file_name.to_string(),
-            message: format!("Failed to set Go language: {}", e),
-        })?;
+        parser
+            .set_language(&language)
+            .map_err(|e| BrrrError::Parse {
+                file: file_name.to_string(),
+                message: format!("Failed to set Go language: {}", e),
+            })?;
 
         let tree = parser.parse(source, None).ok_or_else(|| BrrrError::Parse {
             file: file_name.to_string(),
@@ -1149,7 +1155,12 @@ impl GoSourceDetector {
     }
 
     /// Process a single import spec.
-    fn process_import_spec(&self, node: Node, source: &[u8], aliases: &mut HashMap<String, String>) {
+    fn process_import_spec(
+        &self,
+        node: Node,
+        source: &[u8],
+        aliases: &mut HashMap<String, String>,
+    ) {
         let mut alias_name: Option<String> = None;
         let mut path: Option<String> = None;
         let mut cursor = node.walk();
@@ -1268,11 +1279,11 @@ impl GoSourceDetector {
         // Check if this is an HTTP handler function
         // Pattern: func handler(w http.ResponseWriter, r *http.Request)
         if let Some(params) = node.child_by_field_name("parameters") {
-            if let Some(handler_info) = self.check_http_handler_signature(node, params, &name, ctx) {
+            if let Some(handler_info) = self.check_http_handler_signature(node, params, &name, ctx)
+            {
                 // Mark parameters as tainted
                 for param in &handler_info.tainted_params {
-                    ctx.tainted_vars
-                        .insert(param.name.clone(), param.kind);
+                    ctx.tainted_vars.insert(param.name.clone(), param.kind);
 
                     let loc = Location::new(ctx.file_name, handler_info.start_line, 0);
                     let source =
@@ -1421,7 +1432,7 @@ impl GoSourceDetector {
             name: func_name.to_string(),
             start_line: func_node.start_position().row + 1,
             end_line: func_node.end_position().row + 1,
-            route: None,  // Would need to track mux.HandleFunc calls
+            route: None, // Would need to track mux.HandleFunc calls
             methods: Vec::new(),
             framework: framework.to_string(),
             tainted_params,
@@ -1513,7 +1524,8 @@ impl GoSourceDetector {
             }
         }
         // Check for qualified identifier: pkg.Function()
-        else if func_node.kind() == "qualified_type" || func_node.kind() == "selector_expression" {
+        else if func_node.kind() == "qualified_type" || func_node.kind() == "selector_expression"
+        {
             self.scan_qualified_call(func_node, node, ctx, result);
         }
 
@@ -1596,11 +1608,15 @@ impl GoSourceDetector {
         // These methods are almost always taint sources regardless of the exact type name
         let heuristic_match = match method_name {
             // Database: row.Scan(), rows.Scan()
-            "Scan" if object_lower.contains("row") => Some((SourceKind::DatabaseResult, "database/sql")),
+            "Scan" if object_lower.contains("row") => {
+                Some((SourceKind::DatabaseResult, "database/sql"))
+            }
             // HTTP client: client.Do(), client.Get(), client.Post()
             "Do" if object_lower.contains("client") => Some((SourceKind::HttpResponse, "net/http")),
             // JSON/XML/YAML decoder: decoder.Decode()
-            "Decode" if object_lower.contains("decoder") => Some((SourceKind::Deserialized, "encoding")),
+            "Decode" if object_lower.contains("decoder") => {
+                Some((SourceKind::Deserialized, "encoding"))
+            }
             // WebSocket: conn.ReadMessage(), conn.ReadJSON()
             "ReadMessage" | "ReadJSON" | "NextReader"
                 if object_lower.contains("conn") || object_lower.contains("ws") =>
@@ -1608,7 +1624,9 @@ impl GoSourceDetector {
                 Some((SourceKind::WebSocketMessage, "websocket"))
             }
             // bufio Reader/Scanner
-            "Text" | "Bytes" if object_lower.contains("scanner") => Some((SourceKind::FileRead, "bufio")),
+            "Text" | "Bytes" if object_lower.contains("scanner") => {
+                Some((SourceKind::FileRead, "bufio"))
+            }
             "ReadLine" | "ReadString" | "ReadBytes" if object_lower.contains("reader") => {
                 Some((SourceKind::FileRead, "bufio"))
             }
@@ -1643,7 +1661,9 @@ impl GoSourceDetector {
         }
 
         // Check for json.Unmarshal with tainted data
-        if method_name == "Unmarshal" && (object_name == "json" || object_name == "xml" || object_name == "yaml") {
+        if method_name == "Unmarshal"
+            && (object_name == "json" || object_name == "xml" || object_name == "yaml")
+        {
             let loc = Location::new(ctx.file_name, line, col);
             let source = DetectedSource::new(SourceKind::Deserialized, loc, &expression)
                 .with_confidence(0.9)
@@ -1776,16 +1796,16 @@ impl GoSourceDetector {
         // Check for os.Args access
         if object_name == "os" && field_name == "Args" {
             let loc = Location::new(ctx.file_name, line, col);
-            let source = DetectedSource::new(SourceKind::ProcessArgs, loc, &expression)
-                .with_confidence(1.0);
+            let source =
+                DetectedSource::new(SourceKind::ProcessArgs, loc, &expression).with_confidence(1.0);
             result.add_source(source);
         }
 
         // Check for os.Stdin access
         if object_name == "os" && field_name == "Stdin" {
             let loc = Location::new(ctx.file_name, line, col);
-            let source = DetectedSource::new(SourceKind::Stdin, loc, &expression)
-                .with_confidence(1.0);
+            let source =
+                DetectedSource::new(SourceKind::Stdin, loc, &expression).with_confidence(1.0);
             result.add_source(source);
         }
 
@@ -1858,12 +1878,7 @@ impl GoSourceDetector {
     }
 
     /// Scan goroutine statement for captured variables.
-    fn scan_go_statement(
-        &self,
-        node: Node,
-        ctx: &mut ScanContext,
-        result: &mut SourceScanResult,
-    ) {
+    fn scan_go_statement(&self, node: Node, ctx: &mut ScanContext, result: &mut SourceScanResult) {
         let old_in_goroutine = ctx.in_goroutine;
         ctx.in_goroutine = true;
 
@@ -1965,12 +1980,7 @@ impl GoSourceDetector {
     }
 
     /// Scan for statement for tainted iteration.
-    fn scan_for_statement(
-        &self,
-        node: Node,
-        ctx: &mut ScanContext,
-        result: &mut SourceScanResult,
-    ) {
+    fn scan_for_statement(&self, node: Node, ctx: &mut ScanContext, result: &mut SourceScanResult) {
         // Check for range clause
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -2063,7 +2073,8 @@ impl GoSourceDetector {
                     for pattern in &self.patterns {
                         if let Some(obj) = pattern.object {
                             let expected = format!("{}.{}", obj, pattern.method);
-                            if func_text.contains(&expected) || func_text.ends_with(pattern.method) {
+                            if func_text.contains(&expected) || func_text.ends_with(pattern.method)
+                            {
                                 return Some(pattern.kind);
                             }
                         }
@@ -2157,11 +2168,17 @@ impl GoSourceDetector {
     }
 
     /// Classify method call on a tainted object.
-    fn classify_method_on_tainted(&self, method: &str, base_kind: SourceKind) -> Option<SourceKind> {
+    fn classify_method_on_tainted(
+        &self,
+        method: &str,
+        base_kind: SourceKind,
+    ) -> Option<SourceKind> {
         // Methods that return parts of a request
         match method {
             "FormValue" | "PostFormValue" => Some(SourceKind::RequestParam),
-            "Query" | "Get" if base_kind == SourceKind::RequestBody => Some(SourceKind::RequestParam),
+            "Query" | "Get" if base_kind == SourceKind::RequestBody => {
+                Some(SourceKind::RequestParam)
+            }
             "Cookie" | "Cookies" => Some(SourceKind::Cookie),
             "Header" => Some(SourceKind::HttpHeader),
             "Body" => Some(SourceKind::RequestBody),
@@ -2174,7 +2191,11 @@ impl GoSourceDetector {
     }
 
     /// Classify property access on a tainted object.
-    fn classify_property_access(&self, property: &str, base_kind: SourceKind) -> Option<SourceKind> {
+    fn classify_property_access(
+        &self,
+        property: &str,
+        base_kind: SourceKind,
+    ) -> Option<SourceKind> {
         match property {
             "Body" => Some(SourceKind::RequestBody),
             "Header" | "Headers" => Some(SourceKind::HttpHeader),
@@ -2329,8 +2350,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestParam
-            || s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestParam || s.kind == SourceKind::RequestBody));
     }
 
     #[test]
@@ -2346,8 +2369,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestParam
-            || s.kind == SourceKind::UrlPath));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestParam || s.kind == SourceKind::UrlPath));
     }
 
     #[test]
@@ -2363,7 +2388,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::HttpHeader));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::HttpHeader));
     }
 
     #[test]
@@ -2379,8 +2407,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::Cookie
-            || s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::Cookie || s.kind == SourceKind::RequestBody));
     }
 
     #[test]
@@ -2399,8 +2429,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestBody
-            || s.kind == SourceKind::FileRead));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestBody || s.kind == SourceKind::FileRead));
     }
 
     #[test]
@@ -2436,8 +2468,10 @@ func handler(c *gin.Context) {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestParam
-            || s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestParam || s.kind == SourceKind::RequestBody));
     }
 
     #[test]
@@ -2453,8 +2487,10 @@ func handler(c *gin.Context) {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::UrlPath
-            || s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::UrlPath || s.kind == SourceKind::RequestBody));
     }
 
     #[test]
@@ -2470,7 +2506,10 @@ func handler(c *gin.Context) {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestBody));
     }
 
     #[test]
@@ -2490,7 +2529,10 @@ func handler(c *gin.Context) {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestBody));
     }
 
     #[test]
@@ -2506,8 +2548,10 @@ func handler(c *gin.Context) {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::HttpHeader
-            || s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::HttpHeader || s.kind == SourceKind::RequestBody));
     }
 
     #[test]
@@ -2543,7 +2587,10 @@ func main() {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::ProcessArgs));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::ProcessArgs));
     }
 
     #[test]
@@ -2559,7 +2606,10 @@ func main() {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::Environment));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::Environment));
     }
 
     #[test]
@@ -2576,7 +2626,10 @@ func main() {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::Environment));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::Environment));
     }
 
     #[test]
@@ -2593,7 +2646,10 @@ func main() {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::ProcessArgs));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::ProcessArgs));
     }
 
     // =========================================================================
@@ -2613,7 +2669,10 @@ func main() {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::FileRead));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::FileRead));
     }
 
     #[test]
@@ -2629,7 +2688,10 @@ func main() {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::FileRead));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::FileRead));
     }
 
     #[test]
@@ -2649,7 +2711,10 @@ func main() {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::FileRead));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::FileRead));
     }
 
     #[test]
@@ -2672,8 +2737,10 @@ func main() {
 "#;
         let result = scan(source);
         // Should detect os.Stdin as taint source
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::Stdin
-            || s.kind == SourceKind::FileRead));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::Stdin || s.kind == SourceKind::FileRead));
     }
 
     // =========================================================================
@@ -2693,7 +2760,10 @@ func main() {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::HttpResponse));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::HttpResponse));
     }
 
     #[test]
@@ -2711,7 +2781,10 @@ func main() {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::HttpResponse));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::HttpResponse));
     }
 
     // =========================================================================
@@ -2732,7 +2805,10 @@ func query(db *sql.DB) {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::DatabaseResult));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::DatabaseResult));
     }
 
     #[test]
@@ -2751,7 +2827,10 @@ func query(db *sql.DB) {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::DatabaseResult));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::DatabaseResult));
     }
 
     // =========================================================================
@@ -2772,7 +2851,10 @@ func main() {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::Deserialized));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::Deserialized));
     }
 
     #[test]
@@ -2793,7 +2875,10 @@ func main() {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::Deserialized));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::Deserialized));
     }
 
     // =========================================================================
@@ -2818,7 +2903,10 @@ func main() {
 func process(data []byte) {}
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::FileRead));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::FileRead));
     }
 
     #[test]
@@ -2834,7 +2922,10 @@ func main() {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::FileRead));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::FileRead));
     }
 
     // =========================================================================
@@ -2862,7 +2953,10 @@ func main() {
 "#;
         let result = scan(source);
         // Should detect os.ReadFile as source
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::FileRead));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::FileRead));
     }
 
     // =========================================================================
@@ -2887,7 +2981,10 @@ func main() {
 func process(s string) {}
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::ProcessArgs));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::ProcessArgs));
     }
 
     // =========================================================================
@@ -2917,9 +3014,12 @@ func main() {
 "#;
         let result = scan(source);
         // No external taint sources
-        assert!(result.sources.is_empty() || result.sources.iter().all(|s| {
-            s.kind != SourceKind::RequestParam && s.kind != SourceKind::FileRead
-        }));
+        assert!(
+            result.sources.is_empty()
+                || result.sources.iter().all(|s| {
+                    s.kind != SourceKind::RequestParam && s.kind != SourceKind::FileRead
+                })
+        );
     }
 
     #[test]
@@ -2959,9 +3059,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestParam
-            || s.kind == SourceKind::UrlPath
-            || s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestParam
+                || s.kind == SourceKind::UrlPath
+                || s.kind == SourceKind::RequestBody));
     }
 
     #[test]

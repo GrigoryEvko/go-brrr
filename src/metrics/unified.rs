@@ -34,20 +34,20 @@
 //! }
 //! ```
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 
 use super::cohesion::{analyze_cohesion, CohesionLevel};
 use super::complexity::{
-    analyze_complexity, analyze_cognitive_complexity, analyze_halstead, analyze_maintainability,
+    analyze_cognitive_complexity, analyze_complexity, analyze_halstead, analyze_maintainability,
     CognitiveRiskLevel, HalsteadMetrics, MaintainabilityRiskLevel, RiskLevel,
 };
 use super::coupling::CouplingLevel;
@@ -229,7 +229,8 @@ impl MetricThresholds {
     /// Only specified values are overridden; others use defaults.
     pub fn from_toml(content: &str) -> std::result::Result<Self, String> {
         // Parse as TOML table
-        let value: toml::Value = content.parse()
+        let value: toml::Value = content
+            .parse()
             .map_err(|e| format!("Invalid TOML: {}", e))?;
 
         let mut thresholds = Self::default();
@@ -274,10 +275,16 @@ impl MetricThresholds {
                 if let Some(v) = t.get("params_critical").and_then(|v| v.as_integer()) {
                     thresholds.params_critical = v as u32;
                 }
-                if let Some(v) = t.get("coupling_distance_warning").and_then(|v| v.as_float()) {
+                if let Some(v) = t
+                    .get("coupling_distance_warning")
+                    .and_then(|v| v.as_float())
+                {
                     thresholds.coupling_distance_warning = v;
                 }
-                if let Some(v) = t.get("coupling_distance_critical").and_then(|v| v.as_float()) {
+                if let Some(v) = t
+                    .get("coupling_distance_critical")
+                    .and_then(|v| v.as_float())
+                {
                     thresholds.coupling_distance_critical = v;
                 }
                 if let Some(v) = t.get("lcom_warning").and_then(|v| v.as_integer()) {
@@ -312,17 +319,15 @@ impl MetricThresholds {
 
         if config_path.exists() {
             match fs::read_to_string(&config_path) {
-                Ok(content) => {
-                    match Self::from_toml(&content) {
-                        Ok(thresholds) => {
-                            info!("Loaded metric thresholds from {}", config_path.display());
-                            return thresholds;
-                        }
-                        Err(e) => {
-                            warn!("Failed to parse {}: {}", config_path.display(), e);
-                        }
+                Ok(content) => match Self::from_toml(&content) {
+                    Ok(thresholds) => {
+                        info!("Loaded metric thresholds from {}", config_path.display());
+                        return thresholds;
                     }
-                }
+                    Err(e) => {
+                        warn!("Failed to parse {}: {}", config_path.display(), e);
+                    }
+                },
                 Err(e) => {
                     warn!("Failed to read {}: {}", config_path.display(), e);
                 }
@@ -862,7 +867,7 @@ pub fn analyze_all_metrics<P: AsRef<Path>>(
     if !path.exists() {
         return Err(BrrrError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("Path not found: {}", path.display())
+            format!("Path not found: {}", path.display()),
         )));
     }
 
@@ -879,7 +884,13 @@ pub fn analyze_all_metrics<P: AsRef<Path>>(
                 || analyze_cognitive_complexity(path, lang_str.as_deref(), None),
                 || {
                     let (halstead, rest2) = rayon::join(
-                        || analyze_halstead(path, lang_str.as_deref(), config.include_halstead_tokens),
+                        || {
+                            analyze_halstead(
+                                path,
+                                lang_str.as_deref(),
+                                config.include_halstead_tokens,
+                            )
+                        },
                         || {
                             let (maint, rest3) = rayon::join(
                                 || analyze_maintainability(path, lang_str.as_deref(), None, false),
@@ -889,7 +900,13 @@ pub fn analyze_all_metrics<P: AsRef<Path>>(
                                         || {
                                             rayon::join(
                                                 || analyze_nesting(path, lang_str.as_deref(), None),
-                                                || analyze_function_size(path, lang_str.as_deref(), None),
+                                                || {
+                                                    analyze_function_size(
+                                                        path,
+                                                        lang_str.as_deref(),
+                                                        None,
+                                                    )
+                                                },
                                             )
                                         },
                                     );
@@ -907,8 +924,13 @@ pub fn analyze_all_metrics<P: AsRef<Path>>(
     );
 
     // Unpack the nested results
-    let (cognitive_result, (halstead_result, (maintainability_result, (loc_result, (nesting_result, function_size_result))))) =
-        other_results;
+    let (
+        cognitive_result,
+        (
+            halstead_result,
+            (maintainability_result, (loc_result, (nesting_result, function_size_result))),
+        ),
+    ) = other_results;
 
     // Handle errors gracefully - collect what we can
     let complexity_analysis = complexity_result.ok();
@@ -927,7 +949,7 @@ pub fn analyze_all_metrics<P: AsRef<Path>>(
     };
 
     // Build unified function metrics
-    let mut function_metrics = build_function_metrics(
+    let function_metrics = build_function_metrics(
         &complexity_analysis,
         &cognitive_analysis,
         &halstead_analysis,
@@ -938,11 +960,7 @@ pub fn analyze_all_metrics<P: AsRef<Path>>(
     );
 
     // Detect issues based on thresholds
-    let mut issues = detect_issues(
-        &function_metrics,
-        &cohesion_analysis,
-        &config.thresholds,
-    );
+    let mut issues = detect_issues(&function_metrics, &cohesion_analysis, &config.thresholds);
 
     // Sort issues by severity (critical first)
     issues.sort_by(|a, b| b.severity.cmp(&a.severity));
@@ -976,8 +994,11 @@ pub fn analyze_all_metrics<P: AsRef<Path>>(
 
     Ok(MetricsReport {
         path: path.to_path_buf(),
-        language: lang.map(ToString::to_string)
-            .or_else(|| complexity_analysis.as_ref().and_then(|a| a.language.clone())),
+        language: lang.map(ToString::to_string).or_else(|| {
+            complexity_analysis
+                .as_ref()
+                .and_then(|a| a.language.clone())
+        }),
         analysis_duration_ms: duration.as_millis() as u64,
         config: config.clone(),
         project_summary,
@@ -1017,27 +1038,30 @@ fn build_function_metrics(
         let (cognitive_val, cognitive_risk) = cognitive
             .as_ref()
             .and_then(|ca| {
-                ca.functions.iter().find(|f| {
-                    &f.file == key.0 && &f.function_name == key.1 && f.line == key.2
-                })
+                ca.functions
+                    .iter()
+                    .find(|f| &f.file == key.0 && &f.function_name == key.1 && f.line == key.2)
             })
             .map(|f| (f.complexity, f.risk_level))
             .unwrap_or((0, CognitiveRiskLevel::Low));
 
         // Look up Halstead metrics
-        let halstead_metrics = halstead.as_ref().and_then(|ha| {
-            ha.functions.iter().find(|f| {
-                &f.file == key.0 && &f.function_name == key.1 && f.line == key.2
+        let halstead_metrics = halstead
+            .as_ref()
+            .and_then(|ha| {
+                ha.functions
+                    .iter()
+                    .find(|f| &f.file == key.0 && &f.function_name == key.1 && f.line == key.2)
             })
-        }).map(|f| f.metrics.clone());
+            .map(|f| f.metrics.clone());
 
         // Look up maintainability
         let (mi_val, mi_risk) = maintainability
             .as_ref()
             .and_then(|ma| {
-                ma.functions.iter().find(|f| {
-                    &f.file == key.0 && &f.function_name == key.1 && f.line == key.2
-                })
+                ma.functions
+                    .iter()
+                    .find(|f| &f.file == key.0 && &f.function_name == key.1 && f.line == key.2)
             })
             .map(|f| (f.index.score, f.index.risk_level))
             .unwrap_or((100.0, MaintainabilityRiskLevel::Low));
@@ -1046,9 +1070,9 @@ fn build_function_metrics(
         let (nesting_val, nesting_risk) = nesting
             .as_ref()
             .and_then(|na| {
-                na.functions.iter().find(|f| {
-                    &f.file == key.0 && &f.function_name == key.1 && f.line == key.2
-                })
+                na.functions
+                    .iter()
+                    .find(|f| &f.file == key.0 && &f.function_name == key.1 && f.line == key.2)
             })
             .map(|f| (f.max_depth, f.risk_level))
             .unwrap_or((0, NestingDepthLevel::Good));
@@ -1057,15 +1081,21 @@ fn build_function_metrics(
         let (loc, stmts, params, vars, returns, end_line, size_issues) = function_size
             .as_ref()
             .and_then(|fa| {
-                fa.functions.iter().find(|f| {
-                    &f.file == key.0 && &f.name == key.1 && f.line == key.2
-                })
+                fa.functions
+                    .iter()
+                    .find(|f| &f.file == key.0 && &f.name == key.1 && f.line == key.2)
             })
             .map(|f| {
-                let issues: Vec<String> = f.issues.iter()
-                    .map(|i| format!("{:?}", i))
-                    .collect();
-                (f.sloc, f.statements, f.parameters, f.local_variables, f.return_statements, f.end_line, issues)
+                let issues: Vec<String> = f.issues.iter().map(|i| format!("{:?}", i)).collect();
+                (
+                    f.sloc,
+                    f.statements,
+                    f.parameters,
+                    f.local_variables,
+                    f.return_statements,
+                    f.end_line,
+                    issues,
+                )
             })
             .unwrap_or((0, 0, 0, 0, 0, func.line, Vec::new()));
 
@@ -1185,7 +1215,9 @@ fn detect_issues(
                 unit_name: func.name.clone(),
                 value: func.maintainability,
                 threshold: thresholds.maintainability_critical,
-                suggestion: Some("Major refactoring recommended - reduce complexity and size".to_string()),
+                suggestion: Some(
+                    "Major refactoring recommended - reduce complexity and size".to_string(),
+                ),
             });
         } else if func.maintainability <= thresholds.maintainability_warning {
             issues.push(MetricIssue {
@@ -1200,7 +1232,9 @@ fn detect_issues(
                 unit_name: func.name.clone(),
                 value: func.maintainability,
                 threshold: thresholds.maintainability_warning,
-                suggestion: Some("Consider reducing complexity and improving documentation".to_string()),
+                suggestion: Some(
+                    "Consider reducing complexity and improving documentation".to_string(),
+                ),
             });
         }
 
@@ -1224,16 +1258,15 @@ fn detect_issues(
             issues.push(MetricIssue {
                 severity: IssueSeverity::Warning,
                 category: IssueCategory::FunctionLength,
-                message: format!(
-                    "Function '{}' is too long ({} lines)",
-                    func.name, func.loc
-                ),
+                message: format!("Function '{}' is too long ({} lines)", func.name, func.loc),
                 file: func.file.clone(),
                 line: Some(func.line),
                 unit_name: func.name.clone(),
                 value: f64::from(func.loc),
                 threshold: f64::from(thresholds.loc_warning),
-                suggestion: Some("Consider extracting logical sections into helper functions".to_string()),
+                suggestion: Some(
+                    "Consider extracting logical sections into helper functions".to_string(),
+                ),
             });
         }
 
@@ -1251,7 +1284,9 @@ fn detect_issues(
                 unit_name: func.name.clone(),
                 value: f64::from(func.nesting),
                 threshold: f64::from(thresholds.nesting_critical),
-                suggestion: Some("Use early returns, extract methods, or flatten conditionals".to_string()),
+                suggestion: Some(
+                    "Use early returns, extract methods, or flatten conditionals".to_string(),
+                ),
             });
         } else if func.nesting >= thresholds.nesting_warning {
             issues.push(MetricIssue {
@@ -1266,7 +1301,9 @@ fn detect_issues(
                 unit_name: func.name.clone(),
                 value: f64::from(func.nesting),
                 threshold: f64::from(thresholds.nesting_warning),
-                suggestion: Some("Consider using guard clauses and extracting nested logic".to_string()),
+                suggestion: Some(
+                    "Consider using guard clauses and extracting nested logic".to_string(),
+                ),
             });
         }
 
@@ -1373,7 +1410,10 @@ fn detect_issues(
                     unit_name: class.class_name.clone(),
                     value: f64::from(class.lcom3),
                     threshold: f64::from(thresholds.lcom_warning),
-                    suggestion: Some("Review class responsibilities for Single Responsibility Principle".to_string()),
+                    suggestion: Some(
+                        "Review class responsibilities for Single Responsibility Principle"
+                            .to_string(),
+                    ),
                 });
             }
         }
@@ -1383,9 +1423,7 @@ fn detect_issues(
 }
 
 /// Build class metrics from cohesion analysis.
-fn build_class_metrics(
-    cohesion: &Option<super::cohesion::CohesionAnalysis>,
-) -> Vec<ClassMetrics> {
+fn build_class_metrics(cohesion: &Option<super::cohesion::CohesionAnalysis>) -> Vec<ClassMetrics> {
     let Some(ca) = cohesion else {
         return Vec::new();
     };
@@ -1423,28 +1461,30 @@ fn build_file_metrics(
     // Populate from LOC analysis (has comprehensive file data)
     if let Some(la) = loc {
         for file_loc in &la.files {
-            let issue_count = issues.iter()
-                .filter(|i| i.file == file_loc.file)
-                .count() as u32;
-            let critical_count = issues.iter()
+            let issue_count = issues.iter().filter(|i| i.file == file_loc.file).count() as u32;
+            let critical_count = issues
+                .iter()
                 .filter(|i| i.file == file_loc.file && i.severity == IssueSeverity::Critical)
                 .count() as u32;
 
-            file_data.insert(file_loc.file.clone(), FileMetrics {
-                path: file_loc.file.clone(),
-                language: file_loc.language.clone(),
-                loc: file_loc.metrics.clone(),
-                function_count: file_loc.functions.len() as u32,
-                class_count: 0, // Would need separate analysis
-                avg_cyclomatic: 0.0,
-                max_cyclomatic: 0,
-                avg_cognitive: 0.0,
-                max_cognitive: 0,
-                avg_maintainability: 0.0,
-                min_maintainability: 100.0,
-                issue_count,
-                critical_issue_count: critical_count,
-            });
+            file_data.insert(
+                file_loc.file.clone(),
+                FileMetrics {
+                    path: file_loc.file.clone(),
+                    language: file_loc.language.clone(),
+                    loc: file_loc.metrics.clone(),
+                    function_count: file_loc.functions.len() as u32,
+                    class_count: 0, // Would need separate analysis
+                    avg_cyclomatic: 0.0,
+                    max_cyclomatic: 0,
+                    avg_cognitive: 0.0,
+                    max_cognitive: 0,
+                    avg_maintainability: 0.0,
+                    min_maintainability: 100.0,
+                    issue_count,
+                    critical_issue_count: critical_count,
+                },
+            );
         }
     }
 
@@ -1456,15 +1496,15 @@ fn build_file_metrics(
             }
         }
 
-        // Calculate averages per file
-        let mut file_cc: HashMap<PathBuf, (u32, u32)> = HashMap::new();
+        // Calculate averages per file - use &Path keys to avoid cloning PathBuf
+        let mut file_cc: HashMap<&Path, (u32, u32)> = HashMap::new();
         for func in &ca.functions {
-            let entry = file_cc.entry(func.file.clone()).or_insert((0, 0));
+            let entry = file_cc.entry(func.file.as_path()).or_insert((0, 0));
             entry.0 += func.complexity;
             entry.1 += 1;
         }
-        for (file, (sum, count)) in file_cc {
-            if let Some(fm) = file_data.get_mut(&file) {
+        for (file_path, (sum, count)) in file_cc {
+            if let Some(fm) = file_data.get_mut(file_path) {
                 if count > 0 {
                     fm.avg_cyclomatic = f64::from(sum) / f64::from(count);
                 }
@@ -1480,14 +1520,15 @@ fn build_file_metrics(
             }
         }
 
-        let mut file_cog: HashMap<PathBuf, (u32, u32)> = HashMap::new();
+        // Use &Path keys to avoid cloning PathBuf
+        let mut file_cog: HashMap<&Path, (u32, u32)> = HashMap::new();
         for func in &ca.functions {
-            let entry = file_cog.entry(func.file.clone()).or_insert((0, 0));
+            let entry = file_cog.entry(func.file.as_path()).or_insert((0, 0));
             entry.0 += func.complexity;
             entry.1 += 1;
         }
-        for (file, (sum, count)) in file_cog {
-            if let Some(fm) = file_data.get_mut(&file) {
+        for (file_path, (sum, count)) in file_cog {
+            if let Some(fm) = file_data.get_mut(file_path) {
                 if count > 0 {
                     fm.avg_cognitive = f64::from(sum) / f64::from(count);
                 }
@@ -1503,14 +1544,15 @@ fn build_file_metrics(
             }
         }
 
-        let mut file_mi: HashMap<PathBuf, (f64, u32)> = HashMap::new();
+        // Use &Path keys to avoid cloning PathBuf
+        let mut file_mi: HashMap<&Path, (f64, u32)> = HashMap::new();
         for func in &ma.functions {
-            let entry = file_mi.entry(func.file.clone()).or_insert((0.0, 0));
+            let entry = file_mi.entry(func.file.as_path()).or_insert((0.0, 0));
             entry.0 += func.index.score;
             entry.1 += 1;
         }
-        for (file, (sum, count)) in file_mi {
-            if let Some(fm) = file_data.get_mut(&file) {
+        for (file_path, (sum, count)) in file_mi {
+            if let Some(fm) = file_data.get_mut(file_path) {
                 if count > 0 {
                     fm.avg_maintainability = sum / f64::from(count);
                 }
@@ -1528,22 +1570,22 @@ fn build_project_summary(
     classes: &[ClassMetrics],
     loc: &Option<super::loc::LOCAnalysis>,
     halstead: &Option<super::complexity::HalsteadAnalysis>,
-    issues: &[MetricIssue],
+    _issues: &[MetricIssue],
 ) -> ProjectMetrics {
     let total_files = files.len() as u32;
     let total_functions = functions.len() as u32;
     let total_classes = classes.len() as u32;
 
-    // Aggregate LOC
-    let total_loc = loc.as_ref()
-        .map(|la| la.stats.clone())
-        .map(|stats| LOCMetrics {
-            physical: stats.total_physical,
-            source: stats.total_sloc,
-            logical: stats.total_logical,
-            comment: stats.total_comment,
-            blank: stats.total_blank,
-            code_to_comment_ratio: stats.code_to_comment_ratio,
+    // Aggregate LOC - access fields directly to avoid clone
+    let total_loc = loc
+        .as_ref()
+        .map(|la| LOCMetrics {
+            physical: la.stats.total_physical,
+            source: la.stats.total_sloc,
+            logical: la.stats.total_logical,
+            comment: la.stats.total_comment,
+            blank: la.stats.total_blank,
+            code_to_comment_ratio: la.stats.code_to_comment_ratio,
         })
         .unwrap_or_default();
 
@@ -1551,13 +1593,21 @@ fn build_project_summary(
     let avg_cyclomatic = if functions.is_empty() {
         0.0
     } else {
-        functions.iter().map(|f| f64::from(f.cyclomatic)).sum::<f64>() / functions.len() as f64
+        functions
+            .iter()
+            .map(|f| f64::from(f.cyclomatic))
+            .sum::<f64>()
+            / functions.len() as f64
     };
 
     let avg_cognitive = if functions.is_empty() {
         0.0
     } else {
-        functions.iter().map(|f| f64::from(f.cognitive)).sum::<f64>() / functions.len() as f64
+        functions
+            .iter()
+            .map(|f| f64::from(f.cognitive))
+            .sum::<f64>()
+            / functions.len() as f64
     };
 
     let avg_maintainability = if functions.is_empty() {
@@ -1579,22 +1629,22 @@ fn build_project_summary(
     };
 
     // Halstead totals
-    let (total_estimated_bugs, total_estimated_hours) = halstead.as_ref()
+    let (total_estimated_bugs, total_estimated_hours) = halstead
+        .as_ref()
         .map(|ha| (ha.stats.total_bugs, ha.stats.total_time_seconds / 3600.0))
         .unwrap_or((0.0, 0.0));
 
     // Count issues
-    let files_with_critical = files.iter()
-        .filter(|f| f.critical_issue_count > 0)
+    let files_with_critical = files.iter().filter(|f| f.critical_issue_count > 0).count() as u32;
+
+    let complex_functions = functions
+        .iter()
+        .filter(|f| {
+            f.cyclomatic_risk == RiskLevel::High || f.cyclomatic_risk == RiskLevel::Critical
+        })
         .count() as u32;
 
-    let complex_functions = functions.iter()
-        .filter(|f| f.cyclomatic_risk == RiskLevel::High || f.cyclomatic_risk == RiskLevel::Critical)
-        .count() as u32;
-
-    let low_cohesion_classes = classes.iter()
-        .filter(|c| c.is_low_cohesion)
-        .count() as u32;
+    let low_cohesion_classes = classes.iter().filter(|c| c.is_low_cohesion).count() as u32;
 
     ProjectMetrics {
         total_files,
@@ -1628,7 +1678,8 @@ fn build_issue_stats(issues: &[MetricIssue]) -> IssueStats {
             IssueSeverity::Critical => stats.critical += 1,
         }
 
-        *stats.by_category
+        *stats
+            .by_category
             .entry(issue.category.to_string())
             .or_insert(0) += 1;
     }
@@ -1687,7 +1738,8 @@ pub fn sort_functions(functions: &mut [FunctionMetrics], sort_by: FunctionSortBy
         }
         FunctionSortBy::Maintainability => {
             functions.sort_by(|a, b| {
-                a.maintainability.partial_cmp(&b.maintainability)
+                a.maintainability
+                    .partial_cmp(&b.maintainability)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
         }
@@ -1701,9 +1753,7 @@ pub fn sort_functions(functions: &mut [FunctionMetrics], sort_by: FunctionSortBy
             functions.sort_by(|a, b| b.params.cmp(&a.params));
         }
         FunctionSortBy::Location => {
-            functions.sort_by(|a, b| {
-                a.file.cmp(&b.file).then_with(|| a.line.cmp(&b.line))
-            });
+            functions.sort_by(|a, b| a.file.cmp(&b.file).then_with(|| a.line.cmp(&b.line)));
         }
     }
 }
@@ -1734,13 +1784,16 @@ pub fn format_functions_csv(functions: &[FunctionMetrics]) -> String {
 
     // Data rows
     for func in functions {
-        let (volume, difficulty, bugs) = func.halstead.as_ref()
+        let (volume, difficulty, bugs) = func
+            .halstead
+            .as_ref()
             .map(|h| (h.volume, h.difficulty, h.bugs))
             .unwrap_or((0.0, 0.0, 0.0));
 
         // Escape commas and quotes in name and file path
         let name = escape_csv_field(&func.name);
-        let file = escape_csv_field(&func.file.display().to_string());
+        let file_str = func.file.display().to_string();
+        let file = escape_csv_field(&file_str);
 
         output.push_str(&format!(
             "{},{},{},{},{},{},{},{},{:.2},{},{},{},{},{},{},{},{},{:.2},{:.2},{:.4}\n",
@@ -1778,10 +1831,13 @@ pub fn format_issues_csv(issues: &[MetricIssue]) -> String {
     output.push_str("severity,category,file,line,unit_name,value,threshold,message,suggestion\n");
 
     for issue in issues {
-        let file = escape_csv_field(&issue.file.display().to_string());
+        let file_str = issue.file.display().to_string();
+        let file = escape_csv_field(&file_str);
         let unit = escape_csv_field(&issue.unit_name);
         let msg = escape_csv_field(&issue.message);
-        let suggestion = issue.suggestion.as_ref()
+        let suggestion = issue
+            .suggestion
+            .as_ref()
             .map(|s| escape_csv_field(s))
             .unwrap_or_default();
 
@@ -1812,7 +1868,8 @@ pub fn format_classes_csv(classes: &[ClassMetrics]) -> String {
 
     for class in classes {
         let name = escape_csv_field(&class.name);
-        let file = escape_csv_field(&class.file.display().to_string());
+        let file_str = class.file.display().to_string();
+        let file = escape_csv_field(&file_str);
 
         output.push_str(&format!(
             "{},{},{},{},{},{},{},{},{},{},{:.2}\n",
@@ -1844,7 +1901,8 @@ pub fn format_files_csv(files: &[FileMetrics]) -> String {
     output.push_str("issue_count,critical_issue_count\n");
 
     for file in files {
-        let path = escape_csv_field(&file.path.display().to_string());
+        let path_str = file.path.display().to_string();
+        let path = escape_csv_field(&path_str);
         let lang = file.language.as_deref().unwrap_or("");
 
         output.push_str(&format!(
@@ -1872,11 +1930,12 @@ pub fn format_files_csv(files: &[FileMetrics]) -> String {
 }
 
 /// Escape a CSV field (handle commas and quotes).
-fn escape_csv_field(s: &str) -> String {
+/// Returns Cow to avoid allocation when no escaping is needed.
+fn escape_csv_field(s: &str) -> Cow<'_, str> {
     if s.contains(',') || s.contains('"') || s.contains('\n') {
-        format!("\"{}\"", s.replace('"', "\"\""))
+        Cow::Owned(format!("\"{}\"", s.replace('"', "\"\"")))
     } else {
-        s.to_string()
+        Cow::Borrowed(s)
     }
 }
 

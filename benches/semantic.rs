@@ -331,11 +331,10 @@ fn create_test_unit(name: &str, code: &str) -> EmbeddingUnit {
 
 /// Create a temporary file with the given content.
 fn create_temp_file(content: &str, extension: &str) -> NamedTempFile {
-    let mut file =
-        tempfile::Builder::new()
-            .suffix(extension)
-            .tempfile()
-            .expect("Failed to create temp file");
+    let mut file = tempfile::Builder::new()
+        .suffix(extension)
+        .tempfile()
+        .expect("Failed to create temp file");
     file.write_all(content.as_bytes())
         .expect("Failed to write to temp file");
     file.flush().expect("Failed to flush temp file");
@@ -376,9 +375,11 @@ fn bench_chunk_with_overlap_calculation(c: &mut Criterion) {
     let mut group = c.benchmark_group("chunk_with_overlap");
 
     for overlap in [50, 100, 200, 400] {
-        group.bench_with_input(BenchmarkId::new("overlap", overlap), &overlap, |b, &overlap| {
-            b.iter(|| chunk_code_with_overlap(black_box(&code), 1000, overlap))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("overlap", overlap),
+            &overlap,
+            |b, &overlap| b.iter(|| chunk_code_with_overlap(black_box(&code), 1000, overlap)),
+        );
     }
 
     group.finish();
@@ -414,9 +415,7 @@ fn bench_split_into_chunks_scaling(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("size_kb", code_len / 1024),
             &code,
-            |b, code| {
-                b.iter(|| split_into_chunks(black_box(code), 2000, CHUNK_OVERLAP_TOKENS))
-            },
+            |b, code| b.iter(|| split_into_chunks(black_box(code), 2000, CHUNK_OVERLAP_TOKENS)),
         );
     }
 
@@ -658,13 +657,9 @@ fn bench_vector_index_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("vector_index_creation");
 
     for dims in [384, 768, 1024, 1536] {
-        group.bench_with_input(
-            BenchmarkId::new("dimensions", dims),
-            &dims,
-            |b, &dims| {
-                b.iter(|| VectorIndex::new(dims, Metric::InnerProduct).expect("index creation"))
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("dimensions", dims), &dims, |b, &dims| {
+            b.iter(|| VectorIndex::new(dims, Metric::InnerProduct).expect("index creation"))
+        });
     }
 
     group.finish();

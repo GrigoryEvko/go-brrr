@@ -31,9 +31,8 @@ use crate::error::BrrrError;
 ///
 /// Parsed once at first access using SIMD-accelerated newline finding via `memchr`.
 /// Excludes comments and empty lines. Avoids re-parsing on every `BrrrIgnore::new()`.
-static PARSED_DEFAULT_PATTERNS: Lazy<Vec<(usize, usize)>> = Lazy::new(|| {
-    parse_pattern_bounds_simd(DEFAULT_PATTERNS.as_bytes())
-});
+static PARSED_DEFAULT_PATTERNS: Lazy<Vec<(usize, usize)>> =
+    Lazy::new(|| parse_pattern_bounds_simd(DEFAULT_PATTERNS.as_bytes()));
 
 /// Parse pattern boundaries from content using SIMD-accelerated newline finding.
 ///
@@ -277,7 +276,10 @@ impl BrrrIgnore {
         let matcher = match builder.build() {
             Ok(m) => m,
             Err(e) => {
-                tracing::warn!("Failed to build gitignore matcher: {}, trying empty fallback", e);
+                tracing::warn!(
+                    "Failed to build gitignore matcher: {}, trying empty fallback",
+                    e
+                );
                 // Try empty matcher as fallback
                 GitignoreBuilder::new(&root)
                     .build()
@@ -341,7 +343,6 @@ impl BrrrIgnore {
             .matched_path_or_any_parents(&relative_path, is_dir)
             .is_ignore()
     }
-
 }
 
 // =============================================================================
@@ -444,7 +445,8 @@ mod tests {
     #[test]
     fn test_simd_pattern_parsing_correctness() {
         // Verify SIMD-accelerated parsing produces correct results
-        let test_content = b"# Comment line\n  \npattern1\n  pattern2  \n# Another comment\npattern3\n";
+        let test_content =
+            b"# Comment line\n  \npattern1\n  pattern2  \n# Another comment\npattern3\n";
         let bounds = parse_pattern_bounds_simd(test_content);
 
         // Should extract exactly 3 patterns (comments and empty lines excluded)
@@ -474,12 +476,18 @@ mod tests {
         // No trailing newline
         let bounds = parse_pattern_bounds_simd(b"pattern_no_newline");
         assert_eq!(bounds.len(), 1);
-        assert_eq!(&b"pattern_no_newline"[bounds[0].0..bounds[0].1], b"pattern_no_newline");
+        assert_eq!(
+            &b"pattern_no_newline"[bounds[0].0..bounds[0].1],
+            b"pattern_no_newline"
+        );
 
         // Mixed whitespace around pattern
         let bounds = parse_pattern_bounds_simd(b"\t  mixed_ws  \t\n");
         assert_eq!(bounds.len(), 1);
-        assert_eq!(&b"\t  mixed_ws  \t\n"[bounds[0].0..bounds[0].1], b"mixed_ws");
+        assert_eq!(
+            &b"\t  mixed_ws  \t\n"[bounds[0].0..bounds[0].1],
+            b"mixed_ws"
+        );
     }
 
     #[test]

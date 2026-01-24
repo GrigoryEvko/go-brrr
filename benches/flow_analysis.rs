@@ -6,9 +6,7 @@
 //! - Different programming languages (Python, TypeScript, Rust, Go, Java)
 //! - Different function sizes (10, 100, 1000 statements)
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use go_brrr::cfg::CfgBuilder;
 use go_brrr::dfg::DfgBuilder;
 
@@ -580,19 +578,15 @@ fn bench_dfg_many_variables(c: &mut Criterion) {
     for count in [10, 50, 100] {
         let source = python_many_variables(count);
         group.throughput(Throughput::Elements(count as u64));
-        group.bench_with_input(
-            BenchmarkId::new("python", count),
-            &source,
-            |b, source| {
-                b.iter(|| {
-                    black_box(DfgBuilder::extract_from_source(
-                        black_box(source),
-                        "python",
-                        "many_vars_func",
-                    ))
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("python", count), &source, |b, source| {
+            b.iter(|| {
+                black_box(DfgBuilder::extract_from_source(
+                    black_box(source),
+                    "python",
+                    "many_vars_func",
+                ))
+            })
+        });
     }
 
     group.finish();
@@ -860,11 +854,7 @@ fn bench_backward_slice(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("line", target_line),
             &target_line,
-            |b, &line| {
-                b.iter(|| {
-                    black_box(dfg.backward_slice(black_box(line)))
-                })
-            },
+            |b, &line| b.iter(|| black_box(dfg.backward_slice(black_box(line)))),
         );
     }
 
@@ -884,11 +874,7 @@ fn bench_forward_slice(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("line", source_line),
             &source_line,
-            |b, &line| {
-                b.iter(|| {
-                    black_box(dfg.forward_slice(black_box(line)))
-                })
-            },
+            |b, &line| b.iter(|| black_box(dfg.forward_slice(black_box(line)))),
         );
     }
 
@@ -906,16 +892,8 @@ fn bench_full_flow_analysis(c: &mut Criterion) {
 
     group.bench_function("cfg_then_dfg", |b| {
         b.iter(|| {
-            let cfg = CfgBuilder::extract_from_source(
-                black_box(source),
-                "python",
-                "complex_func",
-            );
-            let dfg = DfgBuilder::extract_from_source(
-                black_box(source),
-                "python",
-                "complex_func",
-            );
+            let cfg = CfgBuilder::extract_from_source(black_box(source), "python", "complex_func");
+            let dfg = DfgBuilder::extract_from_source(black_box(source), "python", "complex_func");
             black_box((cfg, dfg))
         })
     });
@@ -940,15 +918,11 @@ fn bench_cyclomatic_complexity(c: &mut Criterion) {
         .expect("Failed to build complex CFG");
 
     group.bench_function("simple_function", |b| {
-        b.iter(|| {
-            black_box(simple_cfg.cyclomatic_complexity())
-        })
+        b.iter(|| black_box(simple_cfg.cyclomatic_complexity()))
     });
 
     group.bench_function("complex_function", |b| {
-        b.iter(|| {
-            black_box(complex_cfg.cyclomatic_complexity())
-        })
+        b.iter(|| black_box(complex_cfg.cyclomatic_complexity()))
     });
 
     group.finish();
@@ -968,9 +942,7 @@ fn bench_cfg_successors_predecessors(c: &mut Criterion) {
     let entry = cfg.entry;
 
     group.bench_function("successors", |b| {
-        b.iter(|| {
-            black_box(cfg.successors(black_box(entry)))
-        })
+        b.iter(|| black_box(cfg.successors(black_box(entry))))
     });
 
     group.bench_function("predecessors", |b| {
@@ -991,23 +963,13 @@ fn bench_dfg_variable_lookup(c: &mut Criterion) {
     let dfg = DfgBuilder::extract_from_source(&source, "python", "many_vars_func")
         .expect("Failed to build DFG");
 
-    group.bench_function("variables_list", |b| {
-        b.iter(|| {
-            black_box(dfg.variables())
-        })
-    });
+    group.bench_function("variables_list", |b| b.iter(|| black_box(dfg.variables())));
 
     group.bench_function("definitions_lookup", |b| {
-        b.iter(|| {
-            black_box(dfg.definitions.get("v50"))
-        })
+        b.iter(|| black_box(dfg.definitions.get("v50")))
     });
 
-    group.bench_function("uses_lookup", |b| {
-        b.iter(|| {
-            black_box(dfg.uses.get("v50"))
-        })
-    });
+    group.bench_function("uses_lookup", |b| b.iter(|| black_box(dfg.uses.get("v50"))));
 
     group.finish();
 }
@@ -1042,17 +1004,9 @@ criterion_group!(
     bench_dfg_per_language,
 );
 
-criterion_group!(
-    scaling_benches,
-    bench_cfg_scaling,
-    bench_dfg_scaling,
-);
+criterion_group!(scaling_benches, bench_cfg_scaling, bench_dfg_scaling,);
 
-criterion_group!(
-    slicing_benches,
-    bench_backward_slice,
-    bench_forward_slice,
-);
+criterion_group!(slicing_benches, bench_backward_slice, bench_forward_slice,);
 
 criterion_group!(
     combined_benches,

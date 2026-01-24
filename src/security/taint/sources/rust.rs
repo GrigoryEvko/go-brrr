@@ -80,7 +80,7 @@ use tree_sitter::{Node, Parser, Tree};
 use super::{
     DetectedSource, HandlerInfo, SourceKind, SourcePattern, SourceScanResult, TaintedParameter,
 };
-use crate::error::{Result, BrrrError};
+use crate::error::{BrrrError, Result};
 use crate::security::taint::types::Location;
 
 // =============================================================================
@@ -298,13 +298,7 @@ const STDLIB_SOURCES: &[SourcePattern] = &[
     // Command line arguments
     SourcePattern::function_call("env_args", SourceKind::ProcessArgs, "args", 0.95),
     SourcePattern::function_call("env_args_os", SourceKind::ProcessArgs, "args_os", 0.95),
-    SourcePattern::method_call(
-        "std_env_args",
-        SourceKind::ProcessArgs,
-        "env",
-        "args",
-        None,
-    ),
+    SourcePattern::method_call("std_env_args", SourceKind::ProcessArgs, "env", "args", None),
     SourcePattern::method_call(
         "std_env_args_os",
         SourceKind::ProcessArgs,
@@ -315,13 +309,7 @@ const STDLIB_SOURCES: &[SourcePattern] = &[
     // Environment variables
     SourcePattern::function_call("env_var", SourceKind::Environment, "var", 0.9),
     SourcePattern::function_call("env_var_os", SourceKind::Environment, "var_os", 0.9),
-    SourcePattern::method_call(
-        "std_env_var",
-        SourceKind::Environment,
-        "env",
-        "var",
-        None,
-    ),
+    SourcePattern::method_call("std_env_var", SourceKind::Environment, "env", "var", None),
     SourcePattern::method_call(
         "std_env_var_os",
         SourceKind::Environment,
@@ -329,13 +317,7 @@ const STDLIB_SOURCES: &[SourcePattern] = &[
         "var_os",
         None,
     ),
-    SourcePattern::method_call(
-        "std_env_vars",
-        SourceKind::Environment,
-        "env",
-        "vars",
-        None,
-    ),
+    SourcePattern::method_call("std_env_vars", SourceKind::Environment, "env", "vars", None),
     SourcePattern::method_call(
         "std_env_vars_os",
         SourceKind::Environment,
@@ -345,13 +327,7 @@ const STDLIB_SOURCES: &[SourcePattern] = &[
     ),
     // Standard input
     SourcePattern::function_call("io_stdin", SourceKind::Stdin, "stdin", 0.95),
-    SourcePattern::method_call(
-        "std_io_stdin",
-        SourceKind::Stdin,
-        "io",
-        "stdin",
-        None,
-    ),
+    SourcePattern::method_call("std_io_stdin", SourceKind::Stdin, "io", "stdin", None),
     SourcePattern::method_call(
         "stdin_read_line",
         SourceKind::Stdin,
@@ -366,25 +342,13 @@ const STDLIB_SOURCES: &[SourcePattern] = &[
         "read_to_string",
         None,
     ),
-    SourcePattern::method_call(
-        "stdin_lock",
-        SourceKind::Stdin,
-        "stdin",
-        "lock",
-        None,
-    ),
+    SourcePattern::method_call("stdin_lock", SourceKind::Stdin, "stdin", "lock", None),
 ];
 
 /// File I/O taint sources.
 const FILE_SOURCES: &[SourcePattern] = &[
     // std::fs functions
-    SourcePattern::method_call(
-        "fs_read",
-        SourceKind::FileRead,
-        "fs",
-        "read",
-        None,
-    ),
+    SourcePattern::method_call("fs_read", SourceKind::FileRead, "fs", "read", None),
     SourcePattern::method_call(
         "fs_read_to_string",
         SourceKind::FileRead,
@@ -392,13 +356,7 @@ const FILE_SOURCES: &[SourcePattern] = &[
         "read_to_string",
         None,
     ),
-    SourcePattern::method_call(
-        "fs_read_dir",
-        SourceKind::FileRead,
-        "fs",
-        "read_dir",
-        None,
-    ),
+    SourcePattern::method_call("fs_read_dir", SourceKind::FileRead, "fs", "read_dir", None),
     SourcePattern::method_call(
         "fs_read_link",
         SourceKind::FileRead,
@@ -407,13 +365,7 @@ const FILE_SOURCES: &[SourcePattern] = &[
         None,
     ),
     // File/BufReader methods
-    SourcePattern::method_call(
-        "file_read",
-        SourceKind::FileRead,
-        "File",
-        "open",
-        None,
-    ),
+    SourcePattern::method_call("file_read", SourceKind::FileRead, "File", "open", None),
     SourcePattern::method_call(
         "buf_reader_read_line",
         SourceKind::FileRead,
@@ -436,7 +388,12 @@ const FILE_SOURCES: &[SourcePattern] = &[
         None,
     ),
     // Read trait methods (on any implementor)
-    SourcePattern::function_call("read_to_string", SourceKind::FileRead, "read_to_string", 0.7),
+    SourcePattern::function_call(
+        "read_to_string",
+        SourceKind::FileRead,
+        "read_to_string",
+        0.7,
+    ),
     SourcePattern::function_call("read_to_end", SourceKind::FileRead, "read_to_end", 0.7),
     SourcePattern::function_call("read_exact", SourceKind::FileRead, "read_exact", 0.7),
     // tokio::fs
@@ -844,21 +801,26 @@ const WEBSOCKET_SOURCES: &[SourcePattern] = &[
 
 /// Actix-web route macros.
 const ACTIX_ROUTE_MACROS: &[&str] = &[
-    "get", "post", "put", "delete", "patch", "head", "options", "trace", "connect",
-    "route",
+    "get", "post", "put", "delete", "patch", "head", "options", "trace", "connect", "route",
 ];
 
 /// Axum router methods (for future router-based handler detection).
 #[allow(dead_code)]
 const AXUM_ROUTER_METHODS: &[&str] = &[
-    "get", "post", "put", "delete", "patch", "head", "options", "trace",
-    "route", "route_service",
+    "get",
+    "post",
+    "put",
+    "delete",
+    "patch",
+    "head",
+    "options",
+    "trace",
+    "route",
+    "route_service",
 ];
 
 /// Rocket route macros.
-const ROCKET_ROUTE_MACROS: &[&str] = &[
-    "get", "post", "put", "delete", "patch", "head", "options",
-];
+const ROCKET_ROUTE_MACROS: &[&str] = &["get", "post", "put", "delete", "patch", "head", "options"];
 
 /// Type patterns that indicate taint sources in function parameters.
 const TAINTED_PARAM_TYPES: &[(&str, SourceKind)] = &[
@@ -943,11 +905,10 @@ impl RustSourceDetector {
     /// Scan a source file for taint sources.
     pub fn scan_file(&self, path: impl AsRef<Path>) -> Result<SourceScanResult> {
         let path = path.as_ref();
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| BrrrError::IoWithPath {
-                error: e,
-                path: path.to_path_buf(),
-            })?;
+        let source = std::fs::read_to_string(path).map_err(|e| BrrrError::IoWithPath {
+            error: e,
+            path: path.to_path_buf(),
+        })?;
         self.scan_source(&source, path.to_string_lossy().as_ref())
     }
 
@@ -961,12 +922,10 @@ impl RustSourceDetector {
                 message: format!("Failed to set Rust language: {}", e),
             })?;
 
-        let tree = parser
-            .parse(source, None)
-            .ok_or_else(|| BrrrError::Parse {
-                file: file_name.to_string(),
-                message: "Failed to parse Rust source".to_string(),
-            })?;
+        let tree = parser.parse(source, None).ok_or_else(|| BrrrError::Parse {
+            file: file_name.to_string(),
+            message: "Failed to parse Rust source".to_string(),
+        })?;
 
         self.scan_tree(&tree, source, file_name)
     }
@@ -1054,12 +1013,7 @@ impl RustSourceDetector {
     }
 
     /// Recursively scan AST nodes for sources.
-    fn scan_node(
-        &self,
-        node: Node,
-        ctx: &mut ScanContext,
-        result: &mut SourceScanResult,
-    ) {
+    fn scan_node(&self, node: Node, ctx: &mut ScanContext, result: &mut SourceScanResult) {
         match node.kind() {
             // Function definitions with potential handler attributes
             "function_item" => {
@@ -1107,12 +1061,7 @@ impl RustSourceDetector {
     }
 
     /// Scan children of a node.
-    fn scan_children(
-        &self,
-        node: Node,
-        ctx: &mut ScanContext,
-        result: &mut SourceScanResult,
-    ) {
+    fn scan_children(&self, node: Node, ctx: &mut ScanContext, result: &mut SourceScanResult) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             self.scan_node(child, ctx, result);
@@ -1120,12 +1069,7 @@ impl RustSourceDetector {
     }
 
     /// Scan a function item for handler attributes and tainted parameters.
-    fn scan_function_item(
-        &self,
-        node: Node,
-        ctx: &mut ScanContext,
-        result: &mut SourceScanResult,
-    ) {
+    fn scan_function_item(&self, node: Node, ctx: &mut ScanContext, result: &mut SourceScanResult) {
         let old_func = ctx.current_function.take();
         let old_handler = ctx.current_handler.take();
         let old_in_handler = ctx.in_handler_scope;
@@ -1145,14 +1089,11 @@ impl RustSourceDetector {
             // Add tainted parameters as sources
             for param in &handler_info.tainted_params {
                 let loc = Location::new(ctx.file_name, handler_info.start_line, 0);
-                let source = DetectedSource::new(
-                    param.kind,
-                    loc,
-                    format!("parameter:{}", param.name),
-                )
-                .with_assignment(&param.name)
-                .with_framework(&handler_info.framework)
-                .in_handler_function(&handler_info.name);
+                let source =
+                    DetectedSource::new(param.kind, loc, format!("parameter:{}", param.name))
+                        .with_assignment(&param.name)
+                        .with_framework(&handler_info.framework)
+                        .in_handler_function(&handler_info.name);
 
                 result.add_source(source);
 
@@ -1191,11 +1132,7 @@ impl RustSourceDetector {
     }
 
     /// Analyze attributes to detect handler functions.
-    fn analyze_handler_attributes(
-        &self,
-        node: Node,
-        ctx: &ScanContext,
-    ) -> Option<HandlerInfo> {
+    fn analyze_handler_attributes(&self, node: Node, ctx: &ScanContext) -> Option<HandlerInfo> {
         // Look for preceding attributes
         let mut sibling = node.prev_sibling();
         let mut route = None;
@@ -1373,7 +1310,10 @@ impl RustSourceDetector {
 
         // In handler context, parameters without explicit types might still be tainted
         // (e.g., from path segments in Rocket: fn handler(id: usize))
-        if !framework.is_empty() && !param_text.contains("State") && !param_text.contains("Extension") {
+        if !framework.is_empty()
+            && !param_text.contains("State")
+            && !param_text.contains("Extension")
+        {
             // Check if this could be a path parameter based on framework conventions
             if framework == "rocket" {
                 // Rocket uses #[get("/<name>")] syntax, simple types are path params
@@ -1515,7 +1455,8 @@ impl RustSourceDetector {
         // Check patterns
         for pattern in &self.patterns {
             if let Some(pattern_obj) = pattern.object {
-                if (object_name == pattern_obj || self.matches_alias(&object_name, pattern_obj, ctx))
+                if (object_name == pattern_obj
+                    || self.matches_alias(&object_name, pattern_obj, ctx))
                     && method_name == pattern.method
                 {
                     let loc = Location::new(ctx.file_name, line, col);
@@ -1565,9 +1506,21 @@ impl RustSourceDetector {
     ///
     /// Returns the SourceKind and confidence if the method is a known taint source,
     /// regardless of the object it's called on.
-    fn check_known_taint_method(&self, method_name: &str, expression: &str) -> Option<(SourceKind, f64)> {
+    fn check_known_taint_method(
+        &self,
+        method_name: &str,
+        expression: &str,
+    ) -> Option<(SourceKind, f64)> {
         // Database fetch methods (sqlx, diesel, sea-orm)
-        let db_fetch_methods = ["fetch_one", "fetch_all", "fetch_optional", "fetch", "get_results", "get_result", "first"];
+        let db_fetch_methods = [
+            "fetch_one",
+            "fetch_all",
+            "fetch_optional",
+            "fetch",
+            "get_results",
+            "get_result",
+            "first",
+        ];
         if db_fetch_methods.contains(&method_name) {
             return Some((SourceKind::DatabaseResult, 0.8));
         }
@@ -1579,11 +1532,20 @@ impl RustSourceDetector {
         }
 
         // HTTP response methods (reqwest, hyper, ureq)
-        let http_response_methods = ["text", "json", "bytes", "chunk", "body_string", "body_bytes"];
+        let http_response_methods = [
+            "text",
+            "json",
+            "bytes",
+            "chunk",
+            "body_string",
+            "body_bytes",
+        ];
         if http_response_methods.contains(&method_name) {
             // Only if it looks like a response context
-            if expression.contains("response") || expression.contains("resp")
-                || expression.contains("res.") || expression.contains(".await")
+            if expression.contains("response")
+                || expression.contains("resp")
+                || expression.contains("res.")
+                || expression.contains(".await")
             {
                 return Some((SourceKind::HttpResponse, 0.75));
             }
@@ -1596,10 +1558,13 @@ impl RustSourceDetector {
         }
 
         // Deserialization methods
-        if method_name == "from_str" || method_name == "from_slice" || method_name == "from_reader" {
+        if method_name == "from_str" || method_name == "from_slice" || method_name == "from_reader"
+        {
             // Only if it looks like deserialization
-            if expression.contains("json") || expression.contains("serde")
-                || expression.contains("yaml") || expression.contains("toml")
+            if expression.contains("json")
+                || expression.contains("serde")
+                || expression.contains("yaml")
+                || expression.contains("toml")
             {
                 return Some((SourceKind::Deserialized, 0.75));
             }
@@ -1694,8 +1659,7 @@ impl RustSourceDetector {
         for (source_path, kind) in known_sources {
             if full_path == source_path {
                 let loc = Location::new(ctx.file_name, line, col);
-                let source = DetectedSource::new(kind, loc, &expression)
-                    .with_confidence(1.0);
+                let source = DetectedSource::new(kind, loc, &expression).with_confidence(1.0);
                 result.add_source(source);
                 return;
             }
@@ -1712,7 +1676,13 @@ impl RustSourceDetector {
         let call_text = self.node_text(call_node, _ctx.source);
 
         // Check for unwrap(), expect(), unwrap_or(), etc.
-        let unwrap_methods = ["unwrap()", "expect(", "unwrap_or(", "unwrap_or_else(", "unwrap_or_default()"];
+        let unwrap_methods = [
+            "unwrap()",
+            "expect(",
+            "unwrap_or(",
+            "unwrap_or_else(",
+            "unwrap_or_default()",
+        ];
 
         for method in unwrap_methods {
             if call_text.contains(method) {
@@ -1769,7 +1739,8 @@ impl RustSourceDetector {
         for pattern in &self.patterns {
             if let Some(pattern_obj) = pattern.object {
                 if pattern.is_property
-                    && (object_name == pattern_obj || self.matches_alias(&object_name, pattern_obj, ctx))
+                    && (object_name == pattern_obj
+                        || self.matches_alias(&object_name, pattern_obj, ctx))
                     && field_name == pattern.method
                 {
                     let loc = Location::new(ctx.file_name, line, col);
@@ -1923,8 +1894,15 @@ impl RustSourceDetector {
 
         // Check for known taint source patterns
         let source_patterns = [
-            "stdin()", "args()", "env::var(", "read_to_string(",
-            "request.", "req.", "body.", "query.", "params.",
+            "stdin()",
+            "args()",
+            "env::var(",
+            "read_to_string(",
+            "request.",
+            "req.",
+            "body.",
+            "query.",
+            "params.",
         ];
 
         for pattern in source_patterns {
@@ -1996,8 +1974,8 @@ impl RustSourceDetector {
         for (macro_name, kind) in source_macros {
             if macro_text.starts_with(macro_name) {
                 let loc = Location::new(ctx.file_name, line, col);
-                let source = DetectedSource::new(kind, loc, macro_text.to_string())
-                    .with_confidence(1.0);
+                let source =
+                    DetectedSource::new(kind, loc, macro_text.to_string()).with_confidence(1.0);
                 result.add_source(source);
                 return;
             }
@@ -2005,12 +1983,7 @@ impl RustSourceDetector {
     }
 
     /// Scan an identifier for references to tainted variables.
-    fn scan_identifier(
-        &self,
-        node: Node,
-        ctx: &mut ScanContext,
-        _result: &mut SourceScanResult,
-    ) {
+    fn scan_identifier(&self, node: Node, ctx: &mut ScanContext, _result: &mut SourceScanResult) {
         let name = self.node_text(node, ctx.source);
 
         // Track tainted variable usage for propagation analysis
@@ -2028,7 +2001,15 @@ impl RustSourceDetector {
     /// Check if this is a response method that returns tainted data.
     fn is_response_method(&self, object_name: &str, method: &str) -> bool {
         let response_objects = ["response", "resp", "res", "result", "Response"];
-        let response_methods = ["text", "json", "bytes", "body", "chunk", "into_body", "collect"];
+        let response_methods = [
+            "text",
+            "json",
+            "bytes",
+            "body",
+            "chunk",
+            "into_body",
+            "collect",
+        ];
 
         (response_objects.contains(&object_name) || object_name.ends_with("Response"))
             && response_methods.contains(&method)
@@ -2168,7 +2149,10 @@ async fn search(query: web::Query<SearchParams>) -> HttpResponse {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestParam));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestParam));
     }
 
     #[test]
@@ -2182,7 +2166,10 @@ async fn create(body: web::Json<CreateRequest>) -> HttpResponse {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestBody));
     }
 
     #[test]
@@ -2228,7 +2215,10 @@ async fn create(Json(payload): Json<CreateRequest>) -> impl IntoResponse {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestBody));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestBody));
     }
 
     #[test]
@@ -2241,7 +2231,10 @@ async fn search(Query(params): Query<SearchParams>) -> String {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::RequestParam));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::RequestParam));
     }
 
     // =========================================================================
@@ -2259,7 +2252,10 @@ fn main() {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::ProcessArgs));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::ProcessArgs));
     }
 
     #[test]
@@ -2310,7 +2306,10 @@ fn read_config() -> String {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::FileRead));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::FileRead));
     }
 
     #[test]
@@ -2323,7 +2322,10 @@ fn read_binary() -> Vec<u8> {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::FileRead));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::FileRead));
     }
 
     // =========================================================================
@@ -2339,7 +2341,10 @@ async fn fetch_data() -> String {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::HttpResponse));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::HttpResponse));
     }
 
     // =========================================================================
@@ -2357,7 +2362,10 @@ async fn get_user(pool: &PgPool, id: i32) -> User {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::DatabaseResult));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::DatabaseResult));
     }
 
     // =========================================================================
@@ -2374,7 +2382,10 @@ fn parse_config(json: &str) -> Config {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::Deserialized));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::Deserialized));
     }
 
     // =========================================================================
@@ -2392,7 +2403,10 @@ fn read_config() -> Result<String, std::io::Error> {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::FileRead));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::FileRead));
     }
 
     // =========================================================================
@@ -2407,7 +2421,10 @@ fn get_compile_time_env() -> &'static str {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::Environment));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::Environment));
     }
 
     #[test]
@@ -2416,7 +2433,10 @@ fn get_compile_time_env() -> &'static str {
 const CONFIG: &str = include_str!("../config.toml");
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::FileRead));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::FileRead));
     }
 
     // =========================================================================
@@ -2435,8 +2455,14 @@ async fn fetch_and_parse() -> Data {
         let result = scan(source);
         // Should detect both HTTP response and deserialization sources
         assert!(
-            result.sources.iter().any(|s| s.kind == SourceKind::HttpResponse)
-                || result.sources.iter().any(|s| s.kind == SourceKind::Deserialized)
+            result
+                .sources
+                .iter()
+                .any(|s| s.kind == SourceKind::HttpResponse)
+                || result
+                    .sources
+                    .iter()
+                    .any(|s| s.kind == SourceKind::Deserialized)
         );
     }
 
@@ -2504,6 +2530,9 @@ fn main() {
 }
 "#;
         let result = scan(source);
-        assert!(result.sources.iter().any(|s| s.kind == SourceKind::ProcessArgs));
+        assert!(result
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::ProcessArgs));
     }
 }

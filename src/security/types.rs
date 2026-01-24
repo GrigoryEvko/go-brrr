@@ -284,7 +284,7 @@ impl SecurityCategory {
             Self::Injection(InjectionType::Xml) => Some(91),
             Self::Injection(InjectionType::Template) => Some(1336),
             Self::SecretsExposure => Some(798), // Use of Hard-coded Credentials
-            Self::WeakCrypto => Some(327),       // Broken Crypto
+            Self::WeakCrypto => Some(327),      // Broken Crypto
             Self::UnsafeDeserialization => Some(502),
             Self::ReDoS => Some(1333),
             Self::InsecureConfig => Some(16),
@@ -618,7 +618,10 @@ impl SecurityConfig {
                 SecurityCategory::Other(s) => s.to_lowercase(),
             };
 
-            if !categories.iter().any(|c| cat_str.contains(&c.to_lowercase())) {
+            if !categories
+                .iter()
+                .any(|c| cat_str.contains(&c.to_lowercase()))
+            {
                 return false;
             }
         }
@@ -674,9 +677,7 @@ impl ScanSummary {
 
         for finding in findings {
             // Count by severity
-            *by_severity
-                .entry(finding.severity.to_string())
-                .or_insert(0) += 1;
+            *by_severity.entry(finding.severity.to_string()).or_insert(0) += 1;
 
             // Count by category
             let cat_name = match &finding.category {
