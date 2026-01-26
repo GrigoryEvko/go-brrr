@@ -104,32 +104,87 @@ val ibig  : int_type
     ---------------------------------------------------------------------------- *)
 
 (* Bit width for bounded widths - always returns nat (no option needed)
-   Following HACL* bits function pattern from Lib.IntTypes.fsti lines 55-69. *)
+   Following HACL* bits function pattern from Lib.IntTypes.fsti lines 55-69.
+   Using unfold to make definition visible to Z3 for trivial proofs. *)
 [@(strict_on_arguments [0])]
-val width_bits_bounded : bounded_width -> nat
+unfold
+let width_bits_bounded (w: bounded_width) : nat =
+  if I8? w then 8
+  else if I16? w then 16
+  else if I32? w then 32
+  else if I64? w then 64
+  else 128  (* Must be I128 since w <> IBig by refinement *)
 
-(* Bit width for any width - returns option for IBig *)
-val width_bits : int_width -> option nat
+(* Bit width for any width - returns option for IBig.
+   Using unfold for visibility in proofs. *)
+unfold
+let width_bits (w: int_width) : option nat =
+  if I8? w then Some 8
+  else if I16? w then Some 16
+  else if I32? w then Some 32
+  else if I64? w then Some 64
+  else if I128? w then Some 128
+  else None  (* IBig *)
 
-(* Width ordering for type coercion *)
-val width_leq : int_width -> int_width -> bool
+(* Numeric ordering value for width comparison *)
+unfold
+let width_order (w: int_width) : nat =
+  if I8? w then 0
+  else if I16? w then 1
+  else if I32? w then 2
+  else if I64? w then 3
+  else if I128? w then 4
+  else 5  (* IBig *)
+
+(* Width ordering for type coercion.
+   Using unfold so Z3 can see the comparison logic. *)
+unfold
+let width_leq (w1 w2: int_width) : bool =
+  width_order w1 <= width_order w2
 
 (** ----------------------------------------------------------------------------
     Integer range operations (following HACL* minint/maxint pattern)
     ---------------------------------------------------------------------------- *)
 
-(* Range for any type - returns option for IBig *)
-val int_min : int_type -> option int
-val int_max : int_type -> option int
+(* Range for any type - returns option for IBig.
+   Using unfold for proof visibility. *)
+unfold
+let int_min (it: int_type) : option int =
+  if IBig? it.width then None
+  else
+    let bits = width_bits_bounded it.width in
+    if Signed? it.sign then Some (-(pow2 (bits - 1)))
+    else Some 0
+
+unfold
+let int_max (it: int_type) : option int =
+  if IBig? it.width then None
+  else
+    let bits = width_bits_bounded it.width in
+    if Signed? it.sign then Some (pow2 (bits - 1) - 1)
+    else Some (pow2 bits - 1)
 
 (* Range for bounded types - always returns int (no option)
-   Following HACL* pattern: minint/maxint from Lib.IntTypes.fsti lines 79-85 *)
-val int_min_bounded : bounded_int_type -> int
-val int_max_bounded : bounded_int_type -> int
+   Following HACL* pattern: minint/maxint from Lib.IntTypes.fsti lines 79-85.
+   Using unfold so Z3 can compute ranges directly. *)
+[@(strict_on_arguments [0])]
+unfold
+let int_min_bounded (it: bounded_int_type) : int =
+  let bits = width_bits_bounded it.width in
+  if Signed? it.sign then -(pow2 (bits - 1)) else 0
+
+[@(strict_on_arguments [0])]
+unfold
+let int_max_bounded (it: bounded_int_type) : int =
+  let bits = width_bits_bounded it.width in
+  if Signed? it.sign then pow2 (bits - 1) - 1 else pow2 bits - 1
 
 (* Check if value is in range for bounded type
-   Following HACL* range pattern from Lib.IntTypes.fsti lines 87-91 *)
-val in_range : int -> bounded_int_type -> bool
+   Following HACL* range pattern from Lib.IntTypes.fsti lines 87-91.
+   Using unfold for proof visibility. *)
+unfold
+let in_range (v: int) (it: bounded_int_type) : bool =
+  int_min_bounded it <= v && v <= int_max_bounded it
 
 (* Refinement type for values in range - following HACL* range_t pattern
    Reference: Lib.IntTypes.fsti line 91: type range_t (t:inttype) = x:int{range x t} *)
@@ -144,11 +199,14 @@ let range_t (it: bounded_int_type) = x:int{in_range x it}
     Reference: Lib.IntTypes.fst lines 7-10
     ---------------------------------------------------------------------------- *)
 
-val width_bits_8   : unit -> Lemma (width_bits_bounded I8 = 8)   [SMTPat (width_bits_bounded I8)]
-val width_bits_16  : unit -> Lemma (width_bits_bounded I16 = 16) [SMTPat (width_bits_bounded I16)]
-val width_bits_32  : unit -> Lemma (width_bits_bounded I32 = 32) [SMTPat (width_bits_bounded I32)]
-val width_bits_64  : unit -> Lemma (width_bits_bounded I64 = 64) [SMTPat (width_bits_bounded I64)]
-val width_bits_128 : unit -> Lemma (width_bits_bounded I128 = 128) [SMTPat (width_bits_bounded I128)]
+(* Note: No SMTPat here - unit parameter causes Warning 271.
+   Use width_bits_bounded directly which is computable, or call these lemmas explicitly.
+   Following HACL* pattern from Lib.IntTypes.fst where assert_norm is used instead. *)
+val width_bits_8   : unit -> Lemma (width_bits_bounded I8 = 8)
+val width_bits_16  : unit -> Lemma (width_bits_bounded I16 = 16)
+val width_bits_32  : unit -> Lemma (width_bits_bounded I32 = 32)
+val width_bits_64  : unit -> Lemma (width_bits_bounded I64 = 64)
+val width_bits_128 : unit -> Lemma (width_bits_bounded I128 = 128)
 
 (** ----------------------------------------------------------------------------
     Width ordering lemmas
@@ -206,9 +264,11 @@ type overflow_behavior =
     ---------------------------------------------------------------------------- *)
 
 (* Modulus for bounded integer types: 2^bits
-   Following HACL* pattern: let modulus (t:inttype) = pow2 (bits t) *)
+   Following HACL* pattern: let modulus (t:inttype) = pow2 (bits t)
+   Using unfold so Z3 can compute modulus values directly. *)
 [@(strict_on_arguments [0])]
-val modulus : bounded_width -> pos
+unfold
+let modulus (w: bounded_width) : pos = pow2 (width_bits_bounded w)
 
 (** ----------------------------------------------------------------------------
     Compile-time modulus verification lemmas
@@ -224,28 +284,51 @@ val modulus_64  : unit -> Lemma (modulus I64 = 18446744073709551616)
     ---------------------------------------------------------------------------- *)
 
 (* Modular reduction operator for signed and unsigned types.
-   Following HACL* Lib.IntTypes.fsti lines 336-338:
-   let op_At_Percent_Dot x t =
-     if unsigned t then x % modulus t
-     else FStar.Int.(x @% modulus t) *)
+   Following HACL* Lib.IntTypes.fsti lines 336-338.
+   Using unfold for proof visibility. *)
 [@(strict_on_arguments [1])]
-val op_At_Percent_Dot : int -> bounded_int_type -> int
+unfold
+let op_At_Percent_Dot (x: int) (it: bounded_int_type) : int =
+  let m = modulus it.width in
+  if Unsigned? it.sign then x % m else FStar.Int.op_At_Percent x m
 
 (** ----------------------------------------------------------------------------
     Overflow detection predicates
     ---------------------------------------------------------------------------- *)
 
-(* Check if addition will overflow for a given integer type *)
-val will_overflow_add : bounded_int_type -> int -> int -> bool
+(* Check if addition will overflow for a given integer type.
+   Using unfold so overflow specifications are trivially provable. *)
+unfold
+let will_overflow_add (it: bounded_int_type) (a b: int) : bool =
+  let result = a + b in
+  let min_val = int_min_bounded it in
+  let max_val = int_max_bounded it in
+  result > max_val || result < min_val
 
 (* Check if subtraction will overflow for a given integer type *)
-val will_overflow_sub : bounded_int_type -> int -> int -> bool
+unfold
+let will_overflow_sub (it: bounded_int_type) (a b: int) : bool =
+  let result = a - b in
+  let min_val = int_min_bounded it in
+  let max_val = int_max_bounded it in
+  result > max_val || result < min_val
 
 (* Check if multiplication will overflow for a given integer type *)
-val will_overflow_mul : bounded_int_type -> int -> int -> bool
+unfold
+let will_overflow_mul (it: bounded_int_type) (a b: int) : bool =
+  let result = a * b in
+  let min_val = int_min_bounded it in
+  let max_val = int_max_bounded it in
+  result > max_val || result < min_val
 
 (* Check if division will overflow (only for INT_MIN / -1 in signed types) *)
-val will_overflow_div : bounded_int_type -> int -> d:int{d <> 0} -> bool
+unfold
+let will_overflow_div (it: bounded_int_type) (a: int) (d: int{d <> 0}) : bool =
+  if Unsigned? it.sign then false  (* Unsigned division never overflows *)
+  else
+    (* Only overflow case for signed: INT_MIN / -1 *)
+    let min_val = int_min_bounded it in
+    a = min_val && d = -1
 
 (** ----------------------------------------------------------------------------
     Overflow specification lemmas
@@ -592,16 +675,16 @@ val float_sqrt_nan_prop : x:float_repr ->
 (* Infinity + finite = Infinity (same sign) *)
 val float_add_infinity_finite : x:float_repr -> y:float_repr ->
     Lemma (requires is_infinity_f64 x /\ is_normal_f64 y)
-          (ensures match float_add x y with
+          (ensures (match float_add x y with
                    | PrimSuccess r -> is_infinity_f64 r
-                   | _ -> False)
+                   | _ -> False))
 
 (* Infinity + Infinity (same sign) = Infinity *)
 val float_add_infinity_same_sign : x:float_repr -> y:float_repr ->
     Lemma (requires is_pos_infinity_f64 x /\ is_pos_infinity_f64 y)
-          (ensures match float_add x y with
+          (ensures (match float_add x y with
                    | PrimSuccess r -> is_pos_infinity_f64 r
-                   | _ -> False)
+                   | _ -> False))
 
 (* Infinity - Infinity (same sign) = NaN *)
 val float_sub_infinity_same : x:float_repr -> y:float_repr ->
@@ -610,8 +693,7 @@ val float_sub_infinity_same : x:float_repr -> y:float_repr ->
           (ensures PrimNaN? (float_sub x y))
 
 (* 0 / 0 = NaN *)
-val float_div_zero_zero :
-    Lemma (PrimNaN? (float_div pos_zero_f64 pos_zero_f64))
+val float_div_zero_zero : unit -> Lemma (PrimNaN? (float_div pos_zero_f64 pos_zero_f64))
 
 (* finite / 0 = Infinity *)
 val float_div_finite_zero : x:float_repr ->
@@ -784,13 +866,13 @@ val float_to_int_infinity : it:bounded_int_type -> f:float_repr ->
 
 (* Addition correctness: result equals mathematical sum when no overflow *)
 val int_add_correct : it:bounded_int_type -> x:int -> y:int ->
-    Lemma (ensures match int_add_result it x y with
+    Lemma (ensures (match int_add_result it x y with
                    | PrimSuccess z -> z == x + y /\
                                       z >= int_min_bounded it /\
                                       z <= int_max_bounded it
                    | PrimOverflow -> x + y < int_min_bounded it \/
                                     x + y > int_max_bounded it
-                   | _ -> False)
+                   | _ -> False))
 
 (* Addition commutativity: x + y == y + x *)
 val int_add_comm : it:bounded_int_type -> x:int -> y:int ->
@@ -824,13 +906,13 @@ val add_checked_assoc : it:bounded_int_type -> x:int -> y:int -> z:int ->
 
 (* Subtraction correctness *)
 val int_sub_correct : it:bounded_int_type -> x:int -> y:int ->
-    Lemma (ensures match int_sub_result it x y with
+    Lemma (ensures (match int_sub_result it x y with
                    | PrimSuccess z -> z == x - y /\
                                       z >= int_min_bounded it /\
                                       z <= int_max_bounded it
                    | PrimOverflow -> x - y < int_min_bounded it \/
                                     x - y > int_max_bounded it
-                   | _ -> False)
+                   | _ -> False))
 
 (* Subtraction anti-commutativity: x - y == -(y - x) *)
 val int_sub_anti_comm : it:bounded_int_type -> x:int -> y:int ->
@@ -842,13 +924,13 @@ val int_sub_anti_comm : it:bounded_int_type -> x:int -> y:int ->
 
 (* Multiplication correctness *)
 val int_mul_correct : it:bounded_int_type -> x:int -> y:int ->
-    Lemma (ensures match int_mul_result it x y with
+    Lemma (ensures (match int_mul_result it x y with
                    | PrimSuccess z -> z == x * y /\
                                       z >= int_min_bounded it /\
                                       z <= int_max_bounded it
                    | PrimOverflow -> x * y < int_min_bounded it \/
                                     x * y > int_max_bounded it
-                   | _ -> False)
+                   | _ -> False))
 
 (* Multiplication commutativity *)
 val int_mul_comm : it:bounded_int_type -> x:int -> y:int ->
@@ -893,11 +975,11 @@ val int_div_zero : it:bounded_int_type -> x:int ->
 
 (* Division by non-zero succeeds (unless signed overflow) *)
 val int_div_nonzero : it:bounded_int_type -> x:int -> d:int{d <> 0} ->
-    Lemma (ensures match int_div_result it x d with
+    Lemma (ensures (match int_div_result it x d with
                    | PrimDivByZero -> False
                    | PrimOverflow -> it.sign = Signed /\
                                     x = int_min_bounded it /\ d = -1
-                   | PrimSuccess _ -> True)
+                   | PrimSuccess _ -> True))
 
 (* Unsigned division never overflows *)
 val unsigned_div_no_overflow : it:bounded_int_type{it.sign = Unsigned} ->
@@ -907,10 +989,10 @@ val unsigned_div_no_overflow : it:bounded_int_type{it.sign = Unsigned} ->
 (* Division quotient bounds *)
 val int_div_bounds : it:bounded_int_type -> x:range_t it -> d:int{d <> 0} ->
     Lemma (requires ~(will_overflow_div it x d))
-          (ensures match int_div_result it x d with
+          (ensures (match int_div_result it x d with
                    | PrimSuccess q -> q >= int_min_bounded it /\
                                      q <= int_max_bounded it
-                   | _ -> False)
+                   | _ -> False))
 
 (** ----------------------------------------------------------------------------
     Integer Modulo Soundness

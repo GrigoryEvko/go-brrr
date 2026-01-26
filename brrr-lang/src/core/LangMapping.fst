@@ -25,7 +25,7 @@ open Values
 open FStar.List.Tot
 open FStar.Classical
 
-(** Z3 solver options for SMT tractability - following HACL*/EverParse patterns
+(** Z3 solver options for SMT tractability - following HACL-star/EverParse patterns
     - z3rlimit 50: reasonable timeout for most proofs
     - fuel 0: disable recursive function unfolding by default
     - ifuel 0: disable inductive type case analysis by default

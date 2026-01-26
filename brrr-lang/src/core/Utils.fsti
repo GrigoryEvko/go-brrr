@@ -2,7 +2,7 @@
  * BrrrLang.Core.Utils - Interface
  *
  * Shared utility functions used across multiple Brrr-Lang modules.
- * Following HACL*/EverParse patterns for shared library code.
+ * Following HACL-star/EverParse patterns for shared library code.
  *
  * This module eliminates code duplication by providing:
  *   - List manipulation utilities (zip, find, filter, dedup)

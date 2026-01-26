@@ -135,6 +135,19 @@ impl Literal {
         matches!(self, Self::Int(_, _) | Self::Float(_, _))
     }
 
+    /// Get the BrrrType of this literal
+    pub fn brrr_type(&self) -> crate::types::BrrrType {
+        use crate::types::{BrrrType, NumericType, PrimKind};
+        match self {
+            Self::Unit => BrrrType::Prim(PrimKind::Unit),
+            Self::Bool(_) => BrrrType::Prim(PrimKind::Bool),
+            Self::Int(_, int_ty) => BrrrType::Numeric(NumericType::Int(*int_ty)),
+            Self::Float(_, prec) => BrrrType::Numeric(NumericType::Float(*prec)),
+            Self::String(_) => BrrrType::Prim(PrimKind::String),
+            Self::Char(_) => BrrrType::Prim(PrimKind::Char),
+        }
+    }
+
     /// Format as text
     pub fn format(&self) -> String {
         match self {

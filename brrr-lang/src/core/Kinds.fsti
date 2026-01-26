@@ -8,7 +8,7 @@
  * INTERFACE SPECIFICATION
  * ============================================================================
  *
- * This interface follows HACL*/EverParse patterns:
+ * This interface follows HACL-star/EverParse patterns:
  * - Public type declarations with full constructors visible
  * - Val signatures for functions with pre/post conditions
  * - SMTPat triggers for automatic lemma application in SMT proofs
@@ -19,7 +19,7 @@
  * ============================================================================
  *
  * Kinds classify types by their "arity":
- *   - KStar (*)       : proper types (inhabited by values)
+ *   - KStar (Type)    : proper types (inhabited by values)
  *   - KArrow k1 k2    : type constructor kind (takes k1, returns k2)
  *   - KRow            : effect row kind (row-polymorphic effects)
  *   - KRegion         : lifetime/region kind (region polymorphism)
@@ -50,7 +50,7 @@ open Utils  (* Shared utilities - zip_lists, all_distinct, etc. *)
 open BrrrTypes
 
 (** ============================================================================
-    Z3 SOLVER OPTIONS - Following HACL*/EverParse patterns
+    Z3 SOLVER OPTIONS - Following HACL-star/EverParse patterns
     ============================================================================ *)
 
 #set-options "--z3rlimit 50 --fuel 0 --ifuel 0"
@@ -209,10 +209,10 @@ val kind_size_pos : k:kind ->
     Returns None if the type is ill-kinded or references unknown types.
     ============================================================================ *)
 
-(** Kind for wrapper types (Option, Vec, etc.): * -> * *)
+(** Kind for wrapper types (Option, Vec, etc.): Type -> Type *)
 val wrapper_type_kind : kind
 
-(** Kind for Result type: * -> * -> * *)
+(** Kind for Result type: Type -> Type -> Type *)
 val result_type_kind : kind
 
 (** Infer kind with explicit named type environment.
@@ -574,7 +574,7 @@ val variance_of_params_env : venv:variance_env -> v:type_var -> ps:list param_ty
     VARIANCE CONTEXT (for Higher-Kinded Polymorphism)
     ============================================================================
 
-    When a type variable represents a type constructor (like F : * -> *),
+    When a type variable represents a type constructor (like F : Type -> Type),
     we need to track the variance of its parameters.
     ============================================================================ *)
 
@@ -643,22 +643,22 @@ val well_formed_constructor : tc:type_constructor -> bool
     FUNCTOR AND MONAD INSTANCES
     ============================================================================ *)
 
-(** A Functor instance for F : * -> *.
+(** A Functor instance for F : Type -> Type.
     Provides fmap : (a -> b) -> F a -> F b. *)
 noeq type functor_instance = {
   fi_constructor : type_constructor
 }
 
-(** Check if a type constructor can be a Functor (has kind * -> *). *)
+(** Check if a type constructor can be a Functor (has kind Type -> Type). *)
 val is_functor_candidate : tc:type_constructor -> bool
 
-(** A Monad instance for M : * -> *.
+(** A Monad instance for M : Type -> Type.
     Provides return : a -> M a and bind : M a -> (a -> M b) -> M b. *)
 noeq type monad_instance = {
   mi_constructor : type_constructor
 }
 
-(** Check if a type constructor can be a Monad (has kind * -> *). *)
+(** Check if a type constructor can be a Monad (has kind Type -> Type). *)
 val is_monad_candidate : tc:type_constructor -> bool
 
 (** Functor constraint kind: (Type -> Type) -> Type. *)
@@ -821,14 +821,14 @@ val kind_compatible : t:brrr_type -> expected_kind:kind -> ctx:kind_ctx -> bool
     KINDED TYPE CONSTRUCTORS - Standard Library
     ============================================================================ *)
 
-(** Option as a kinded type constructor: * -> *. *)
+(** Option as a kinded type constructor: Type -> Type. *)
 val option_constructor : kinded_type
 
-(** Vec as a kinded type constructor: * -> *. *)
+(** Vec as a kinded type constructor: Type -> Type. *)
 val vec_constructor : kinded_type
 
-(** Result as a kinded type constructor: * -> * -> *. *)
+(** Result as a kinded type constructor: Type -> Type -> Type. *)
 val result_constructor : kinded_type
 
-(** Map as a kinded type constructor: * -> * -> *. *)
+(** Map as a kinded type constructor: Type -> Type -> Type. *)
 val map_constructor : kinded_type

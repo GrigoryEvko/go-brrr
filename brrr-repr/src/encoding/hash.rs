@@ -6,12 +6,13 @@
 use xxhash_rust::xxh3::Xxh3;
 
 use crate::api::BrrrModule;
+use crate::decl::FullDeclaration;
 use crate::types::BrrrType;
 
 /// Compute content hash of a module
 ///
 /// Returns a 128-bit xxh3 hash for integrity verification.
-/// The hash includes module name, version, files, types, and expressions.
+/// The hash includes module name, version, files, types, expressions, and declarations.
 pub fn content_hash(module: &BrrrModule) -> [u8; 16] {
     let mut hasher = Xxh3::new();
 
@@ -35,6 +36,12 @@ pub fn content_hash(module: &BrrrModule) -> [u8; 16] {
     hash_u32(&mut hasher, module.exprs.len() as u32);
     for expr in &module.exprs {
         hash_u8(&mut hasher, expr.value.discriminant());
+    }
+
+    // Hash declarations (using discriminant for structure)
+    hash_u32(&mut hasher, module.declarations.len() as u32);
+    for decl in &module.declarations {
+        hash_declaration(&mut hasher, decl);
     }
 
     hasher.digest128().to_le_bytes()
@@ -104,6 +111,72 @@ fn hash_str(hasher: &mut Xxh3, s: &str) {
     hasher.update(s.as_bytes());
 }
 
+fn hash_declaration(hasher: &mut Xxh3, decl: &FullDeclaration) {
+    // Hash discriminant to identify declaration type
+    let discriminant = match decl {
+        FullDeclaration::Function(_) => 0u8,
+        FullDeclaration::Type(_) => 1,
+        FullDeclaration::Trait(_) => 2,
+        FullDeclaration::Impl(_) => 3,
+        FullDeclaration::Const { .. } => 4,
+        FullDeclaration::Static { .. } => 5,
+        FullDeclaration::Module { .. } => 6,
+        FullDeclaration::Use { .. } => 7,
+        FullDeclaration::Extern { .. } => 8,
+    };
+    hash_u8(hasher, discriminant);
+
+    // Hash additional structural information based on declaration type
+    match decl {
+        FullDeclaration::Function(f) => {
+            hash_u32(hasher, f.params.len() as u32);
+            hash_u8(hasher, f.is_unsafe as u8);
+            hash_u8(hasher, f.is_async as u8);
+            hash_u8(hasher, f.is_const as u8);
+            hash_type(hasher, &f.return_type);
+        }
+        FullDeclaration::Type(typedef) => {
+            let type_discriminant = match typedef {
+                crate::decl::TypeDef::Alias { .. } => 0u8,
+                crate::decl::TypeDef::Newtype { .. } => 1,
+                crate::decl::TypeDef::Struct(_) => 2,
+                crate::decl::TypeDef::Enum(_) => 3,
+            };
+            hash_u8(hasher, type_discriminant);
+        }
+        FullDeclaration::Trait(t) => {
+            hash_u32(hasher, t.methods.len() as u32);
+            hash_u32(hasher, t.super_traits.len() as u32);
+            hash_u32(hasher, t.assoc_types.len() as u32);
+        }
+        FullDeclaration::Impl(i) => {
+            hash_u8(hasher, i.trait_ref.is_some() as u8);
+            hash_u32(hasher, i.methods.len() as u32);
+            hash_type(hasher, &i.self_type);
+        }
+        FullDeclaration::Const { ty, .. } => {
+            hash_type(hasher, ty);
+        }
+        FullDeclaration::Static { ty, is_mut, .. } => {
+            hash_type(hasher, ty);
+            hash_u8(hasher, *is_mut as u8);
+        }
+        FullDeclaration::Module { declarations, .. } => {
+            hash_u32(hasher, declarations.len() as u32);
+            // Recursively hash nested declarations
+            for nested_decl in declarations {
+                hash_declaration(hasher, nested_decl);
+            }
+        }
+        FullDeclaration::Use { path, .. } => {
+            hash_u32(hasher, path.len() as u32);
+        }
+        FullDeclaration::Extern { items, .. } => {
+            hash_u32(hasher, items.len() as u32);
+        }
+    }
+}
+
 fn hash_type(hasher: &mut Xxh3, ty: &BrrrType) {
     hash_u8(hasher, ty.discriminant());
 
@@ -116,6 +189,11 @@ fn hash_type(hasher: &mut Xxh3, ty: &BrrrType) {
         }
         BrrrType::Wrap(kind, inner) => {
             hash_u8(hasher, *kind as u8);
+            hash_type(hasher, inner);
+        }
+        BrrrType::SizedArray(size, inner) => {
+            // Hash size as u64 (usize varies by platform)
+            hasher.update(&(*size as u64).to_le_bytes());
             hash_type(hasher, inner);
         }
         BrrrType::Modal(kind, inner) => {
@@ -172,6 +250,17 @@ fn hash_type(hasher: &mut Xxh3, ty: &BrrrType) {
             for variant in &e.variants {
                 hash_u32(hasher, variant.fields.len() as u32);
             }
+        }
+        BrrrType::Interface(iface) => {
+            hash_u32(hasher, iface.methods.len() as u32);
+            for method in &iface.methods {
+                hash_u32(hasher, method.params.len() as u32);
+                for param in &method.params {
+                    hash_type(hasher, &param.ty);
+                }
+                hash_type(hasher, &method.return_type);
+            }
+            hash_u32(hasher, iface.embedded.len() as u32);
         }
     }
 }

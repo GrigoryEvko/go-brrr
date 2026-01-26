@@ -7,6 +7,7 @@ FSTAR = fstar.exe
 # F* include paths
 INCLUDE_PATHS = \
 	--include $(FSTAR_HOME)/ulib \
+	--include axioms \
 	--include core \
 	--include analysis \
 	--include security \
@@ -25,6 +26,9 @@ FSTAR_OPTIONS = \
 	$(Z3_OPTIONS)
 
 # Source files in dependency order
+AXIOM_SOURCES = \
+	axioms/Axioms.fst
+
 CORE_SOURCES = \
 	core/Primitives.fst \
 	core/Modes.fst \
@@ -55,7 +59,7 @@ PHYSICAL_SOURCES = \
 ALL_SOURCES = $(CORE_SOURCES) $(ANALYSIS_SOURCES) $(SECURITY_SOURCES) $(PHYSICAL_SOURCES)
 
 # Currently implemented
-IMPLEMENTED = $(CORE_SOURCES)
+IMPLEMENTED = $(AXIOM_SOURCES) $(CORE_SOURCES)
 
 # Targets
 .PHONY: all verify verify-core clean extract stats

@@ -383,25 +383,20 @@ impl EffectOp {
     pub fn commutes_with(&self, other: &Self) -> bool {
         // Effects on different resources commute
         match (self, other) {
-            // Same location effects don't commute
-            (Self::Read(l1), Self::Write(l2))
-            | (Self::Write(l1), Self::Read(l2))
-            | (Self::Write(l1), Self::Write(l2)) => !l1.may_alias(l2),
+            // Same location effects don't commute (except Read-Read)
+            (Self::Write(l1), Self::Read(l2) | Self::Write(l2))
+            | (Self::Read(l1), Self::Write(l2)) => !l1.may_alias(l2),
 
             // Read-read commutes
             (Self::Read(_), Self::Read(_)) => true,
 
             // Same channel effects don't commute
-            (Self::Send(c1, _), Self::Recv(c2, _))
-            | (Self::Recv(c1, _), Self::Send(c2, _))
-            | (Self::Send(c1, _), Self::Send(c2, _))
-            | (Self::Recv(c1, _), Self::Recv(c2, _)) => c1 != c2,
+            (Self::Send(c1, _) | Self::Recv(c1, _), Self::Send(c2, _) | Self::Recv(c2, _)) => {
+                c1 != c2
+            }
 
             // Same lock effects don't commute
-            (Self::Lock(l1), Self::Lock(l2))
-            | (Self::Unlock(l1), Self::Unlock(l2))
-            | (Self::Lock(l1), Self::Unlock(l2))
-            | (Self::Unlock(l1), Self::Lock(l2)) => l1 != l2,
+            (Self::Lock(l1) | Self::Unlock(l1), Self::Lock(l2) | Self::Unlock(l2)) => l1 != l2,
 
             // Different categories generally commute (conservative)
             _ => self.category() != other.category(),

@@ -31,20 +31,32 @@ type taint_kind =
   | TaintPathTraversal : taint_kind
   | TaintSSRF          : taint_kind
 
-(** Taint kind equality *)
-val taint_kind_eq : taint_kind -> taint_kind -> bool
+(**
+ * Taint kind equality - decidable.
+ * Using unfold makes this visible to normalizer, simplifying proofs to ().
+ *)
+[@(strict_on_arguments [0;1])]
+unfold
+let taint_kind_eq (k1 k2: taint_kind) : bool =
+  match k1, k2 with
+  | TaintSQLi, TaintSQLi -> true
+  | TaintXSS, TaintXSS -> true
+  | TaintCMDi, TaintCMDi -> true
+  | TaintPathTraversal, TaintPathTraversal -> true
+  | TaintSSRF, TaintSSRF -> true
+  | _, _ -> false
 
-(** taint_kind_eq is reflexive *)
+(** taint_kind_eq is reflexive - trivial with unfold *)
 val taint_kind_eq_refl : k:taint_kind ->
     Lemma (ensures taint_kind_eq k k = true)
           [SMTPat (taint_kind_eq k k)]
 
-(** taint_kind_eq is symmetric *)
+(** taint_kind_eq is symmetric - trivial with unfold *)
 val taint_kind_eq_sym : k1:taint_kind -> k2:taint_kind ->
     Lemma (requires taint_kind_eq k1 k2 = true)
           (ensures taint_kind_eq k2 k1 = true)
 
-(** taint_kind_eq implies Leibniz equality *)
+(** taint_kind_eq implies Leibniz equality - trivial with unfold *)
 val taint_kind_eq_implies_eq : k1:taint_kind -> k2:taint_kind ->
     Lemma (requires taint_kind_eq k1 k2 = true)
           (ensures k1 = k2)
@@ -61,13 +73,29 @@ type taint_status =
   | Untainted : taint_status
   | Tainted   : list taint_kind -> taint_status
 
-(** Check if taint status is untainted *)
-val is_untainted : taint_status -> bool
+(**
+ * Check if taint status is untainted.
+ * Empty Tainted list is also considered untainted.
+ *)
+unfold
+let is_untainted (t: taint_status) : bool =
+  match t with
+  | Untainted -> true
+  | Tainted [] -> true
+  | Tainted _ -> false
 
-(** Normalize taint status (empty Tainted becomes Untainted) *)
-val normalize_taint : taint_status -> taint_status
+(**
+ * Normalize taint status (empty Tainted becomes Untainted).
+ * Ensures canonical representation for equality checks.
+ *)
+unfold
+let normalize_taint (t: taint_status) : taint_status =
+  match t with
+  | Untainted -> Untainted
+  | Tainted [] -> Untainted
+  | Tainted ks -> Tainted ks
 
-(** Check if taint status contains a specific kind *)
+(** Check if taint status contains a specific kind - recursive, kept as val *)
 val taint_contains : taint_status -> taint_kind -> bool
 
 (** ============================================================================

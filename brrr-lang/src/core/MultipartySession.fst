@@ -41,7 +41,7 @@ open BrrrTypes
 open Expressions (* Import label type from canonical source *)
 open SessionTypes (* Binary session types for local-to-session conversion *)
 
-(* Z3 solver options for SMT tractability - following HACL*/EverParse patterns *)
+(* Z3 solver options for SMT tractability - following HACL-star/EverParse patterns *)
 #set-options "--z3rlimit 50 --fuel 0 --ifuel 0"
 
 (** ============================================================================
@@ -1996,7 +1996,7 @@ let well_formed_local (l: local_type) : bool =
     These lemmas establish fundamental properties of the projection function
     that are essential for proving the soundness of multiparty session types.
 
-    Following HACL*/EverParse patterns:
+    Following HACL-star/EverParse patterns:
     - SMTPat triggers for automatic application
     - Grouped by property category
     - Z3 options tuned for tractability

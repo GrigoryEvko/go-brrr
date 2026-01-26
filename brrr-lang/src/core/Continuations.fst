@@ -352,7 +352,8 @@ val dc_right_identity : #a:Type -> #r:Type -> m:dc a r ->
   Lemma (ensures dc_bind m dc_return == m)
   [SMTPat (dc_bind m dc_return)]
 
-let rec dc_right_identity #a #r m =
+let dc_right_identity #a #r m =
+  (* No recursion needed - proof by case analysis on m *)
   match m with
   | DCPure x -> ()
   | DCShift p k ->
@@ -457,7 +458,7 @@ let dc_reset_fuel_pure #a p x fuel = ()
    For DCShift, the relationship is more complex due to potential looping. *)
 val dc_reset_fuel_sufficient : #a:Type -> p:prompt_id -> m:dc a a -> fuel:nat ->
   Lemma (requires fuel > 0 /\ DCPure? m)
-        (ensures dc_reset_fuel p m fuel == Some (DCPure?.v m))
+        (ensures dc_reset_fuel p m fuel == Some (DCPure?._0 m))
 
 let dc_reset_fuel_sufficient #a p m fuel =
   match m with
@@ -695,11 +696,11 @@ noeq type cps_result = {
 
 (* Build a lambda expression for continuation *)
 let mk_cont_lambda (k_var: var_id) (arg_ty: brrr_type) (body: expr) : expr =
-  ELambda [(k_var, arg_ty)] body
+  mk_expr_dummy (ELambda [(k_var, arg_ty)] body)
 
 (* Build application of continuation to value *)
 let mk_cont_app (k: expr) (v: expr) : expr =
-  ECall k [v]
+  mk_expr_dummy (ECall k [v])
 
 (** ============================================================================
     CPS TRANSFORMATION OF EXPRESSIONS
@@ -722,11 +723,11 @@ let mk_cont_app (k: expr) (v: expr) : expr =
 
 (* CPS transform a simple value (literal or variable) - just apply continuation *)
 let cps_transform_value (v: expr) (k_var: var_id) : expr =
-  mk_cont_app (EVar k_var) v
+  mk_cont_app (e_var k_var) v
 
 (* CPS transform helper: check if expression is a simple value *)
 let is_simple_value (e: expr) : bool =
-  match e with
+  match e.loc_value with
   | ELit _ | EVar _ | EGlobal _ -> true
   | _ -> false
 
@@ -737,27 +738,27 @@ let is_simple_value (e: expr) : bool =
    Termination: decreases on expr_size e *)
 let rec cps_transform (e: expr) (k_var: var_id) (st: cps_state)
     : Tot cps_result (decreases %[expr_size e; 0]) =
-  match e with
+  match e.loc_value with
   (* Values: apply continuation directly *)
   | ELit _ | EVar _ | EGlobal _ ->
-      { cps_expr = mk_cont_app (EVar k_var) e; cps_state = st }
+      { cps_expr = mk_cont_app (e_var k_var) e; cps_state = st }
 
   (* Unary operation: transform operand, then apply op and pass to k *)
   | EUnary op e' ->
       let (v_var, st1) = fresh_val_var st in
-      let inner = mk_cont_app (EVar k_var) (EUnary op (EVar v_var)) in
+      let inner = mk_cont_app (e_var k_var) (mk_expr_dummy (EUnary op (e_var v_var))) in
       let res = cps_transform e' v_var st1 in
-      { cps_expr = ELet (PatVar v_var) None res.cps_expr inner; cps_state = res.cps_state }
+      { cps_expr = mk_expr_dummy (ELet (p_var v_var) None res.cps_expr inner); cps_state = res.cps_state }
 
   (* Binary operation: CPS transform both operands left-to-right *)
   | EBinary op e1 e2 ->
       let (v1_var, st1) = fresh_val_var st in
       let (v2_var, st2) = fresh_val_var st1 in
       (* Transform e2 in continuation of e1 *)
-      let result_expr = mk_cont_app (EVar k_var) (EBinary op (EVar v1_var) (EVar v2_var)) in
+      let result_expr = mk_cont_app (e_var k_var) (mk_expr_dummy (EBinary op (e_var v1_var) (e_var v2_var))) in
       let e2_res = cps_transform e2 v2_var st2 in
-      let inner2 = ELet (PatVar v2_var) None e2_res.cps_expr result_expr in
-      let e1_body = ELambda [(v1_var, st.cps_answer_type)] inner2 in
+      let inner2 = mk_expr_dummy (ELet (p_var v2_var) None e2_res.cps_expr result_expr) in
+      let e1_body = mk_expr_dummy (ELambda [(v1_var, st.cps_answer_type)] inner2) in
       let e1_res = cps_transform e1 v1_var { e2_res.cps_state with cps_answer_type = st.cps_answer_type } in
       { cps_expr = e1_res.cps_expr; cps_state = e1_res.cps_state }
 
@@ -770,7 +771,7 @@ let rec cps_transform (e: expr) (k_var: var_id) (st: cps_state)
       begin match args with
       | [] ->
           (* Nullary call: just apply continuation to result *)
-          let result_expr = mk_cont_app (EVar k_var) (ECall (EVar f_var) []) in
+          let result_expr = mk_cont_app (e_var k_var) (e_call (e_var f_var) []) in
           { cps_expr = fn_res.cps_expr; cps_state = fn_res.cps_state }
       | arg :: rest ->
           (* Has arguments: transform each argument *)
@@ -778,10 +779,10 @@ let rec cps_transform (e: expr) (k_var: var_id) (st: cps_state)
           let call_expr =
             if List.Tot.length rest = 0 then
               (* Pass continuation as extra argument in CPS *)
-              ECall (EVar f_var) [EVar a_var; EVar k_var]
+              e_call (e_var f_var) [e_var a_var; e_var k_var]
             else
               (* Multi-arg: simplified - just apply continuation to call *)
-              mk_cont_app (EVar k_var) (ECall (EVar f_var) (EVar a_var :: rest))
+              mk_cont_app (e_var k_var) (e_call (e_var f_var) (e_var a_var :: rest))
           in
           let arg_res = cps_transform arg a_var st2 in
           { cps_expr = fn_res.cps_expr; cps_state = arg_res.cps_state }
@@ -794,8 +795,8 @@ let rec cps_transform (e: expr) (k_var: var_id) (st: cps_state)
       let body_res = cps_transform body k'_var st1 in
       (* Add continuation parameter to lambda *)
       let new_params = params @ [(k'_var, t_pure_func [st.cps_answer_type] st.cps_answer_type)] in
-      let cps_lambda = ELambda new_params body_res.cps_expr in
-      { cps_expr = mk_cont_app (EVar k_var) cps_lambda; cps_state = body_res.cps_state }
+      let cps_lambda = mk_expr_dummy (ELambda new_params body_res.cps_expr) in
+      { cps_expr = mk_cont_app (e_var k_var) cps_lambda; cps_state = body_res.cps_state }
 
   (* Let binding: CPS transform bound expression, then body
      [| let x = e1 in e2 |] k = [| e1 |] (x -> [| e2 |] k) *)
@@ -805,8 +806,8 @@ let rec cps_transform (e: expr) (k_var: var_id) (st: cps_state)
         | Some t -> t
         | None -> t_dynamic
       in
-      let e2_lambda = match pat with
-        | PatVar x -> ELambda [(x, bound_ty)] e2_res.cps_expr
+      let e2_lambda = match pat.loc_value with
+        | PatVar x -> mk_expr_dummy (ELambda [(x, bound_ty)] e2_res.cps_expr)
         | _ -> e2_res.cps_expr  (* Simplified: only handle simple var patterns *)
       in
       let (x_var, st1) = fresh_val_var e2_res.cps_state in
@@ -819,8 +820,8 @@ let rec cps_transform (e: expr) (k_var: var_id) (st: cps_state)
       let (c_var, st1) = fresh_val_var st in
       let then_res = cps_transform then_e k_var st1 in
       let else_res = cps_transform else_e k_var then_res.cps_state in
-      let branch_expr = EIf (EVar c_var) then_res.cps_expr else_res.cps_expr in
-      let cond_body = ELambda [(c_var, t_bool)] branch_expr in
+      let branch_expr = mk_expr_dummy (EIf (e_var c_var) then_res.cps_expr else_res.cps_expr) in
+      let cond_body = mk_expr_dummy (ELambda [(c_var, t_bool)] branch_expr) in
       let cond_res = cps_transform cond c_var else_res.cps_state in
       { cps_expr = cond_res.cps_expr; cps_state = cond_res.cps_state }
 
@@ -833,23 +834,23 @@ let rec cps_transform (e: expr) (k_var: var_id) (st: cps_state)
       let (v_var, st1) = fresh_val_var st in
       let e2_res = cps_transform e2 k_var st1 in
       let e1_res = cps_transform e1 v_var e2_res.cps_state in
-      { cps_expr = ESeq e1_res.cps_expr e2_res.cps_expr; cps_state = e1_res.cps_state }
+      { cps_expr = e_seq e1_res.cps_expr e2_res.cps_expr; cps_state = e1_res.cps_state }
 
   (* Other expressions: simplified - just apply continuation *)
   | _ ->
-      { cps_expr = mk_cont_app (EVar k_var) e; cps_state = st }
+      { cps_expr = mk_cont_app (e_var k_var) e; cps_state = st }
 
 (* CPS transform a block of expressions *)
 and cps_transform_block (es: list expr) (k_var: var_id) (st: cps_state)
     : Tot cps_result (decreases %[expr_list_size es; 1]) =
   match es with
-  | [] -> { cps_expr = mk_cont_app (EVar k_var) e_unit; cps_state = st }
+  | [] -> { cps_expr = mk_cont_app (e_var k_var) e_unit; cps_state = st }
   | [e] -> cps_transform e k_var st
   | e :: rest ->
       let (v_var, st1) = fresh_val_var st in
       let rest_res = cps_transform_block rest k_var st1 in
       let e_res = cps_transform e v_var rest_res.cps_state in
-      { cps_expr = ESeq e_res.cps_expr rest_res.cps_expr; cps_state = e_res.cps_state }
+      { cps_expr = e_seq e_res.cps_expr rest_res.cps_expr; cps_state = e_res.cps_state }
 
 (** ============================================================================
     CPS TRANSFORMATION OF CONTINUATION EXPRESSIONS
@@ -874,12 +875,12 @@ let cps_transform_reset (p: prompt) (e: expr) (k_var: var_id) (st: cps_state) : 
   let (id_var, st1) = fresh_cont_var st in
   let e_res = cps_transform e id_var st1 in
   (* Build identity continuation: lambda x. x *)
-  let id_cont = ELambda [(id_var, st.cps_answer_type)] (EVar id_var) in
+  let id_cont = e_lambda [(id_var, st.cps_answer_type)] (e_var id_var) in
   (* The reset expression (using special marker) *)
   (* In actual implementation, this would be a proper reset construct *)
-  let reset_body = ELet (PatVar id_var) None id_cont e_res.cps_expr in
+  let reset_body = mk_expr_dummy (ELet (p_var id_var) None id_cont e_res.cps_expr) in
   (* Apply current continuation to reset result *)
-  { cps_expr = mk_cont_app (EVar k_var) reset_body; cps_state = e_res.cps_state }
+  { cps_expr = mk_cont_app (e_var k_var) reset_body; cps_state = e_res.cps_state }
 
 (* CPS transform shift: shift<p> (lambda c. e) *)
 let cps_transform_shift (p: prompt) (c_var: var_id) (e: expr) (k_var: var_id) (st: cps_state) : cps_result =
@@ -893,8 +894,8 @@ let cps_transform_shift (p: prompt) (c_var: var_id) (e: expr) (k_var: var_id) (s
   (* Build composed continuation: lambda v. c'(k(v))
      This is what c becomes in the CPS-transformed body *)
   let (v_var, st2) = fresh_val_var st1 in
-  let composed = ELambda [(v_var, st.cps_answer_type)]
-    (mk_cont_app (EVar c'_var) (mk_cont_app (EVar k_var) (EVar v_var))) in
+  let composed = e_lambda [(v_var, st.cps_answer_type)]
+    (mk_cont_app (e_var c'_var) (mk_cont_app (e_var k_var) (e_var v_var))) in
 
   (* Transform body e with c replaced by composed continuation *)
   (* For simplicity, we just use c_var directly - full impl would substitute *)
@@ -902,11 +903,11 @@ let cps_transform_shift (p: prompt) (c_var: var_id) (e: expr) (k_var: var_id) (s
   let e_res = cps_transform e id_var st3 in
 
   (* Build the shift expression: captures c' and runs body *)
-  let shift_body = ELet (PatVar c_var) None composed e_res.cps_expr in
-  let shift_lambda = ELambda [(c'_var, t_pure_func [st.cps_answer_type] st.cps_answer_type)] shift_body in
+  let shift_body = mk_expr_dummy (ELet (p_var c_var) None composed e_res.cps_expr) in
+  let shift_lambda = e_lambda [(c'_var, t_pure_func [st.cps_answer_type] st.cps_answer_type)] shift_body in
 
   (* The shift itself - would be handled specially by the runtime *)
-  { cps_expr = ECall shift_lambda [EVar k_var]; cps_state = e_res.cps_state }
+  { cps_expr = e_call shift_lambda [e_var k_var]; cps_state = e_res.cps_state }
 
 (* CPS transform abort: abort<p> v = shift<p> (lambda _. v) *)
 let cps_transform_abort (p: prompt) (v: expr) (k_var: var_id) (st: cps_state) : cps_result =
@@ -918,9 +919,9 @@ let cps_transform_abort (p: prompt) (v: expr) (k_var: var_id) (st: cps_state) : 
 
   (* Build abort: lambda c'. (lambda x. x) <applied to> v *)
   let abort_body = v_res.cps_expr in
-  let abort_lambda = ELambda [(c'_var, t_pure_func [st.cps_answer_type] st.cps_answer_type)] abort_body in
+  let abort_lambda = e_lambda [(c'_var, t_pure_func [st.cps_answer_type] st.cps_answer_type)] abort_body in
 
-  { cps_expr = ECall abort_lambda [EVar k_var]; cps_state = v_res.cps_state }
+  { cps_expr = e_call abort_lambda [e_var k_var]; cps_state = v_res.cps_state }
 
 (* CPS transform control: control<p> (lambda c. e)
 
@@ -1001,15 +1002,15 @@ let cps_transform_control (p: prompt) (c_var: var_id) (e: expr) (k_var: var_id) 
   let (v_var, st2) = fresh_val_var st1 in
 
   (* control continuation: just c' directly, NOT composed with k *)
-  let control_cont = EVar c'_var in
+  let control_cont = e_var c'_var in
 
   (* Transform body e with c bound to the undelimited continuation *)
   let (id_var, st3) = fresh_cont_var st2 in
   let e_res = cps_transform e id_var st3 in
 
   (* Build the control expression: captures c' and runs body *)
-  let control_body = ELet (PatVar c_var) None control_cont e_res.cps_expr in
-  let control_lambda = ELambda [(c'_var, t_pure_func [st.cps_answer_type] st.cps_answer_type)] control_body in
+  let control_body = mk_expr_dummy (ELet (p_var c_var) None control_cont e_res.cps_expr) in
+  let control_lambda = e_lambda [(c'_var, t_pure_func [st.cps_answer_type] st.cps_answer_type)] control_body in
 
   (* Note: The current continuation k is NOT used in control's CPS!
      This is the key difference from shift.
@@ -1022,7 +1023,7 @@ let cps_transform_control (p: prompt) (c_var: var_id) (e: expr) (k_var: var_id) 
      3. NOT continue with k (the current continuation)
 
      For k to be used, the body must explicitly call it. *)
-  { cps_expr = ECall control_lambda [EVar k_var]; cps_state = e_res.cps_state }
+  { cps_expr = e_call control_lambda [e_var k_var]; cps_state = e_res.cps_state }
 
 (** ============================================================================
     TYPING RULES: T-SHIFT vs T-CONTROL
@@ -1076,7 +1077,7 @@ let control_cont_type (arg_ty: brrr_type) (ans_ty: brrr_type) : brrr_type =
   TFunc {
     params = [{ name = None; ty = arg_ty; mode = MOne }];
     return_type = ans_ty;
-    effects = mk_row [] false;  (* Pure - no effects *)
+    effects = RowEmpty;  (* Pure - no effects *)
     is_unsafe = false
   }
 
@@ -1093,7 +1094,7 @@ val control_cont_is_pure : arg_ty:brrr_type -> ans_ty:brrr_type ->
   Lemma (ensures
           TFunc? (control_cont_type arg_ty ans_ty) /\
           (let TFunc ft = control_cont_type arg_ty ans_ty in
-           row_is_empty ft.effects || row_eq ft.effects (mk_row [] false)))
+           RowEmpty? ft.effects))
 let control_cont_is_pure arg_ty ans_ty =
   (* By definition: control_cont_type creates a function with empty effects *)
   ()
@@ -1184,7 +1185,7 @@ let rec lookup_cps_ctx (x: var_id) (ctx: cps_ctx) : option cps_ctx_entry =
    Note: This is a simplified typing predicate for CPS transformation proofs.
    For full typing, see TypeChecker.infer_type. *)
 let rec well_typed_value (v: expr) (ty: brrr_type) : prop =
-  match v with
+  match v.loc_value with
   | ELit LitUnit -> ty == t_unit
   | ELit (LitBool _) -> ty == t_bool
   | ELit (LitInt _ it) -> ty == t_int it
@@ -1410,7 +1411,7 @@ let shift_introduces_prompt p k_var e =
 (* Check if continuation linearity is respected in expression *)
 let rec check_cont_linearity (e: expr) (cont_vars: list (var_id & mode))
     : Tot bool (decreases e) =
-  match e with
+  match e.loc_value with
   | EVar x ->
       (* Using a continuation variable: check its mode *)
       (match assoc x cont_vars with
@@ -1457,9 +1458,9 @@ let consume_cont_var (x: var_id) (cont_vars: list (var_id & mode)) : list (var_i
 
 (* Count occurrences of a variable in an expression *)
 let rec count_var_occurrences (x: var_id) (e: expr) : Tot nat (decreases e) =
-  match e with
+  match e.loc_value with
   | EVar y -> if x = y then 1 else 0
-  | ELit _ | EGlobal _ | EContinue | EHole | EError _ -> 0
+  | ELit _ | EGlobal _ | EContinue _ | EHole | EError _ -> 0
   | EUnary _ e' -> count_var_occurrences x e'
   | EBinary _ e1 e2 -> count_var_occurrences x e1 + count_var_occurrences x e2
   | ECall fn args -> count_var_occurrences x fn + count_var_list x args
@@ -1468,8 +1469,9 @@ let rec count_var_occurrences (x: var_id) (e: expr) : Tot nat (decreases e) =
       if List.Tot.existsb (fun (p, _) -> p = x) params then 0
       else count_var_occurrences x body
   | EIf c t f -> count_var_occurrences x c + count_var_occurrences x t + count_var_occurrences x f
-  | ELet (PatVar y) _ e1 e2 ->
-      count_var_occurrences x e1 + (if x = y then 0 else count_var_occurrences x e2)
+  | ELet pat _ e1 e2 ->
+      let shadowed = (match pat.loc_value with | PatVar y -> x = y | _ -> false) in
+      count_var_occurrences x e1 + (if shadowed then 0 else count_var_occurrences x e2)
   | ESeq e1 e2 -> count_var_occurrences x e1 + count_var_occurrences x e2
   | EBlock es -> count_var_list x es
   | _ -> 0  (* Simplified for other cases *)
@@ -1732,7 +1734,7 @@ let wrap_function_body (fn_name: string) (body: expr) : cont_expr =
 (* Wrap loop body with break/continue resets *)
 let wrap_loop_body (label: string) (body: expr) : cont_expr =
   CEReset (break_prompt label)
-    (EBlock [])  (* Would contain the loop iteration with continue reset *)
+    (e_block [])  (* Would contain the loop iteration with continue reset *)
 
 (** ============================================================================
     OPERATIONAL SEMANTICS FOR DELIMITED CONTROL
@@ -1810,18 +1812,18 @@ let rec frame_context_size (ctx: frame_context) : nat =
 let plug_frame (f: eval_frame) (e: expr) : expr =
   match f with
   | EFrameHole -> e
-  | EFrameUnary op -> EUnary op e
-  | EFrameBinL op e2 -> EBinary op e e2
-  | EFrameBinR op v1 -> EBinary op v1 e
-  | EFrameCall args -> ECall e args
-  | EFrameCallArg fn pre post -> ECall fn (pre @ [e] @ post)
-  | EFrameIf t f -> EIf e t f
-  | EFrameLet x ty e2 -> ELet (PatVar x) ty e e2
-  | EFrameSeq e2 -> ESeq e e2
+  | EFrameUnary op -> mk_expr_dummy (EUnary op e)
+  | EFrameBinL op e2 -> mk_expr_dummy (EBinary op e e2)
+  | EFrameBinR op v1 -> mk_expr_dummy (EBinary op v1 e)
+  | EFrameCall args -> mk_expr_dummy (ECall e args)
+  | EFrameCallArg fn pre post -> mk_expr_dummy (ECall fn (pre @ [e] @ post))
+  | EFrameIf t f -> mk_expr_dummy (EIf e t f)
+  | EFrameLet x ty e2 -> mk_expr_dummy (ELet (p_var x) ty e e2)
+  | EFrameSeq e2 -> mk_expr_dummy (ESeq e e2)
   | EFrameReset _ -> e  (* Reset is transparent when plugging *)
-  | EFrameField fld -> EField e fld
-  | EFrameIndex idx -> EIndex e idx
-  | EFrameIndexVal v -> EIndex v e
+  | EFrameField fld -> mk_expr_dummy (EField e fld)
+  | EFrameIndex idx -> mk_expr_dummy (EIndex e idx)
+  | EFrameIndexVal v -> mk_expr_dummy (EIndex v e)
 
 (* Plug expression into frame context (folding from inside out) *)
 let rec plug_frame_context (ctx: frame_context) (e: expr) : Tot expr (decreases ctx) =
@@ -1882,14 +1884,14 @@ noeq type eval_context =
 let rec plug_context (ctx: eval_context) (e: expr) : Tot expr (decreases ctx) =
   match ctx with
   | ECtxHole -> e
-  | ECtxUnary op inner -> EUnary op (plug_context inner e)
-  | ECtxBinL op inner e2 -> EBinary op (plug_context inner e) e2
-  | ECtxBinR op e1 inner -> EBinary op e1 (plug_context inner e)
-  | ECtxCall inner args -> ECall (plug_context inner e) args
-  | ECtxCallArg fn pre inner post -> ECall fn (pre @ [plug_context inner e] @ post)
-  | ECtxIf inner then_e else_e -> EIf (plug_context inner e) then_e else_e
-  | ECtxLet pat ty inner body -> ELet pat ty (plug_context inner e) body
-  | ECtxSeq inner e2 -> ESeq (plug_context inner e) e2
+  | ECtxUnary op inner -> mk_expr_dummy (EUnary op (plug_context inner e))
+  | ECtxBinL op inner e2 -> mk_expr_dummy (EBinary op (plug_context inner e) e2)
+  | ECtxBinR op e1 inner -> mk_expr_dummy (EBinary op e1 (plug_context inner e))
+  | ECtxCall inner args -> mk_expr_dummy (ECall (plug_context inner e) args)
+  | ECtxCallArg fn pre inner post -> mk_expr_dummy (ECall fn (pre @ [plug_context inner e] @ post))
+  | ECtxIf inner then_e else_e -> mk_expr_dummy (EIf (plug_context inner e) then_e else_e)
+  | ECtxLet pat ty inner body -> mk_expr_dummy (ELet pat ty (plug_context inner e) body)
+  | ECtxSeq inner e2 -> mk_expr_dummy (ESeq (plug_context inner e) e2)
   | ECtxReset p inner -> plug_context inner e  (* Reset is transparent *)
 
 (* Check if legacy context contains a reset for the given prompt *)
@@ -1978,7 +1980,7 @@ let mk_config (e: expr) : cont_config =
 
 (* Check if expression is a value (irreducible) *)
 let is_value (e: expr) : bool =
-  match e with
+  match e.loc_value with
   | ELit _ -> true
   | ELambda _ _ -> true
   | EClosure _ _ _ -> true
@@ -1998,50 +2000,50 @@ let rec reify_frame_context (ctx: frame_context) (arg_var: var_id) (ty: brrr_typ
   match ctx with
   | [] ->
       (* Empty context: identity continuation *)
-      ELambda [(arg_var, ty)] (EVar arg_var)
+      e_lambda [(arg_var, ty)] (e_var arg_var)
   | frame :: rest ->
       (* Non-empty: compose frame with rest *)
-      let inner_expr = plug_frame frame (EVar arg_var) in
+      let inner_expr = plug_frame frame (e_var arg_var) in
       let rest_cont = reify_frame_context rest arg_var ty in
-      ELambda [(arg_var, ty)] (ECall rest_cont [inner_expr])
+      e_lambda [(arg_var, ty)] (e_call rest_cont [inner_expr])
 
 (* Substitute a variable with an expression in the target expression.
    This is needed for shift to substitute the captured continuation. *)
 let rec subst_var_in_expr (x: var_id) (replacement: expr) (e: expr)
     : Tot expr (decreases e) =
-  match e with
+  match e.loc_value with
   | EVar y -> if x = y then replacement else e
-  | ELit _ | EGlobal _ | EContinue | EHole | EError _ -> e
-  | EUnary op e' -> EUnary op (subst_var_in_expr x replacement e')
+  | ELit _ | EGlobal _ | EContinue _ | EHole | EError _ -> e
+  | EUnary op e' -> mk_expr_dummy (EUnary op (subst_var_in_expr x replacement e'))
   | EBinary op e1 e2 ->
-      EBinary op (subst_var_in_expr x replacement e1)
-                 (subst_var_in_expr x replacement e2)
+      mk_expr_dummy (EBinary op (subst_var_in_expr x replacement e1)
+                                (subst_var_in_expr x replacement e2))
   | ECall fn args ->
-      ECall (subst_var_in_expr x replacement fn)
-            (subst_var_list x replacement args)
+      mk_expr_dummy (ECall (subst_var_in_expr x replacement fn)
+                           (subst_var_list x replacement args))
   | ELambda params body ->
       (* Check if x is shadowed by a parameter *)
       if List.Tot.existsb (fun (p, _) -> p = x) params then e
-      else ELambda params (subst_var_in_expr x replacement body)
+      else mk_expr_dummy (ELambda params (subst_var_in_expr x replacement body))
   | EIf c t f ->
-      EIf (subst_var_in_expr x replacement c)
-          (subst_var_in_expr x replacement t)
-          (subst_var_in_expr x replacement f)
+      mk_expr_dummy (EIf (subst_var_in_expr x replacement c)
+                         (subst_var_in_expr x replacement t)
+                         (subst_var_in_expr x replacement f))
   | ELet pat ty e1 e2 ->
       let e1' = subst_var_in_expr x replacement e1 in
-      let binds_x = match pat with PatVar y -> x = y | _ -> false in
-      if binds_x then ELet pat ty e1' e2
-      else ELet pat ty e1' (subst_var_in_expr x replacement e2)
+      let binds_x = (match pat.loc_value with | PatVar y -> x = y | _ -> false) in
+      if binds_x then mk_expr_dummy (ELet pat ty e1' e2)
+      else mk_expr_dummy (ELet pat ty e1' (subst_var_in_expr x replacement e2))
   | ESeq e1 e2 ->
-      ESeq (subst_var_in_expr x replacement e1)
-           (subst_var_in_expr x replacement e2)
-  | EBlock es -> EBlock (subst_var_list x replacement es)
-  | EField e' fld -> EField (subst_var_in_expr x replacement e') fld
+      mk_expr_dummy (ESeq (subst_var_in_expr x replacement e1)
+                          (subst_var_in_expr x replacement e2))
+  | EBlock es -> mk_expr_dummy (EBlock (subst_var_list x replacement es))
+  | EField e' fld -> mk_expr_dummy (EField (subst_var_in_expr x replacement e') fld)
   | EIndex e1 e2 ->
-      EIndex (subst_var_in_expr x replacement e1)
-             (subst_var_in_expr x replacement e2)
-  | ETuple es -> ETuple (subst_var_list x replacement es)
-  | EArray es -> EArray (subst_var_list x replacement es)
+      mk_expr_dummy (EIndex (subst_var_in_expr x replacement e1)
+                            (subst_var_in_expr x replacement e2))
+  | ETuple es -> mk_expr_dummy (ETuple (subst_var_list x replacement es))
+  | EArray es -> mk_expr_dummy (EArray (subst_var_list x replacement es))
   | _ -> e  (* Other cases: simplified, return unchanged *)
 
 and subst_var_list (x: var_id) (replacement: expr) (es: list expr)
@@ -2064,7 +2066,7 @@ noeq type cont_step_result =
    - Shift: capture continuation up to matching reset
    - Other: standard evaluation rules *)
 let step_cont (cfg: cont_config) : cont_step_result =
-  match cfg.cc_expr with
+  match cfg.cc_expr.loc_value with
   (* Values: check if we have more context to process *)
   | ELit _ | ELambda _ _ | EClosure _ _ _ ->
       (match cfg.cc_context with
@@ -2099,7 +2101,7 @@ let step_cont (cfg: cont_config) : cont_step_result =
   (* Conditional: evaluate condition *)
   | EIf cond then_e else_e ->
       if is_value cond then
-        (match cond with
+        (match cond.loc_value with
          | ELit (LitBool true) -> ContStep { cfg with cc_expr = then_e }
          | ELit (LitBool false) -> ContStep { cfg with cc_expr = else_e }
          | _ -> ContStuck)
@@ -2107,12 +2109,15 @@ let step_cont (cfg: cont_config) : cont_step_result =
         ContStep { cc_expr = cond; cc_context = EFrameIf then_e else_e :: cfg.cc_context }
 
   (* Let binding: evaluate bound expression *)
-  | ELet (PatVar x) ty e1 e2 ->
-      if is_value e1 then
-        (* Substitute value into body *)
-        ContStep { cc_expr = subst_var_in_expr x e1 e2; cc_context = cfg.cc_context }
-      else
-        ContStep { cc_expr = e1; cc_context = EFrameLet x ty e2 :: cfg.cc_context }
+  | ELet pat ty e1 e2 ->
+      (match pat.loc_value with
+       | PatVar x ->
+           if is_value e1 then
+             (* Substitute value into body *)
+             ContStep { cc_expr = subst_var_in_expr x e1 e2; cc_context = cfg.cc_context }
+           else
+             ContStep { cc_expr = e1; cc_context = EFrameLet x ty e2 :: cfg.cc_context }
+       | _ -> ContStuck)
 
   (* Sequence: evaluate first, discard result *)
   | ESeq e1 e2 ->
@@ -2121,15 +2126,12 @@ let step_cont (cfg: cont_config) : cont_step_result =
       else
         ContStep { cc_expr = e1; cc_context = EFrameSeq e2 :: cfg.cc_context }
 
-  (* Other let patterns: simplified *)
-  | ELet _ _ _ _ -> ContStuck
-
   (* All other expressions: stuck (would need full evaluator) *)
   | _ -> ContStuck
 
 (* Perform one step of reduction for reset (legacy interface) *)
 let step_reset (p: prompt) (body: expr) : cont_step_result =
-  match body with
+  match body.loc_value with
   (* R-Value: reset<p> v => v *)
   | ELit _ | EVar _ | ELambda _ _ -> ContValue body
 
@@ -2265,7 +2267,7 @@ let step_cont_expr (cfg: cont_expr_config) : cont_expr_step_result =
   | CEApplyCont k_expr v_expr ->
       if is_value k_expr && is_value v_expr then
         (* Apply the continuation function to the value *)
-        CEToExpr (ECall k_expr [v_expr]) cfg.cec_context
+        CEToExpr (e_call k_expr [v_expr]) cfg.cec_context
       else if is_value k_expr then
         (* Evaluate v first *)
         CEStuck  (* Would need to track evaluation of v *)
@@ -2335,9 +2337,9 @@ let plug_frame_context_empty e = expr_eq_refl e
 val reify_empty_context_is_identity : arg_var:var_id -> ty:brrr_type ->
   Lemma (ensures
           expr_eq (reify_frame_context [] arg_var ty)
-                  (ELambda [(arg_var, ty)] (EVar arg_var)) = true)
+                  (e_lambda [(arg_var, ty)] (e_var arg_var)) = true)
 let reify_empty_context_is_identity arg_var ty =
-  expr_eq_refl (ELambda [(arg_var, ty)] (EVar arg_var))
+  expr_eq_refl (e_lambda [(arg_var, ty)] (e_var arg_var))
 
 (** ============================================================================
     SAFETY PROPERTIES
@@ -2636,7 +2638,7 @@ let run_cps_transform (e: expr) (answer_ty: brrr_type) : expr =
   let (k_var, st1) = fresh_cont_var st in
   let result = cps_transform e k_var st1 in
   (* Wrap in lambda taking initial continuation *)
-  ELambda [(k_var, t_pure_func [answer_ty] answer_ty)] result.cps_expr
+  e_lambda [(k_var, t_pure_func [answer_ty] answer_ty)] result.cps_expr
 
 (* Evaluate a DC computation with identity continuation *)
 let run_dc (#a: Type) (p: prompt_id) (m: dc a a) : a =

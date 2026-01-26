@@ -149,16 +149,9 @@ type effect_op =
   | ELockSimple  : effect_op                      (* Unparameterized lock *)
   | ENewCh       : effect_op                      (* Unparameterized channel create *)
 
-(* Abstract location equality *)
-let abstract_loc_eq (l1 l2: abstract_loc) : bool =
-  match l1, l2 with
-  | LocConcrete n1, LocConcrete n2 -> n1 = n2
-  | LocAbstract s1, LocAbstract s2 -> s1 = s2
-  | LocParam p1, LocParam p2 -> p1 = p2
-  | LocUnknown, LocUnknown -> true
-  | _, _ -> false
+(* abstract_loc_eq is now defined with unfold let in Effects.fsti *)
 
-(* Effect type equality *)
+(* Effect type equality - recursive, implementation required *)
 let rec effect_type_eq (t1 t2: effect_type) : bool =
   match t1, t2 with
   | ETUnit, ETUnit -> true
@@ -193,82 +186,8 @@ let rec string_list_eq (l1 l2: list string) : bool =
   | h1 :: t1, h2 :: t2 -> h1 = h2 && string_list_eq t1 t2
   | _, _ -> false
 
-(* Effect equality - handles all parameterized and unparameterized variants *)
-(* Per .fsti order: before effect_type_id *)
-let effect_op_eq (e1 e2: effect_op) : bool =
-  match e1, e2 with
-  (* Memory effects - location-parameterized *)
-  | ERead loc1, ERead loc2 -> abstract_loc_eq loc1 loc2
-  | EWrite loc1, EWrite loc2 -> abstract_loc_eq loc1 loc2
-  | EAlloc, EAlloc -> true
-  | EFree loc1, EFree loc2 -> abstract_loc_eq loc1 loc2
-
-  (* Control effects *)
-  | EThrow t1, EThrow t2 -> t1 = t2
-  | ECatch t1, ECatch t2 -> t1 = t2
-  | EPanic, EPanic -> true
-  | EAsync, EAsync -> true
-  (* Parameterized yield: compare both yield and resume types *)
-  | EYield y1 r1, EYield y2 r2 -> effect_type_eq y1 y2 && effect_type_eq r1 r2
-  | EDiv, EDiv -> true
-  | EShift, EShift -> true
-  | EAbort, EAbort -> true
-
-  (* I/O effects *)
-  | EInput s1, EInput s2 -> s1 = s2  (* Structural equality on io_source *)
-  | EOutput s1, EOutput s2 -> s1 = s2  (* Structural equality on io_sink *)
-  | EIO, EIO -> true
-  | ENet, ENet -> true
-  | EFS, EFS -> true
-  | EFileRead p1, EFileRead p2 -> p1 = p2
-  | EFileWrite p1, EFileWrite p2 -> p1 = p2
-  | ERandom, ERandom -> true
-  | EClock, EClock -> true
-
-  (* Concurrency effects - lock-parameterized *)
-  | ESpawn, ESpawn -> true
-  | EJoin, EJoin -> true
-  | ELock l1, ELock l2 -> l1 = l2
-  | EUnlock l1, EUnlock l2 -> l1 = l2
-  | EAtomic, EAtomic -> true
-
-  (* Session effects - fully parameterized *)
-  | ESend c1 t1, ESend c2 t2 -> c1 = c2 && effect_type_eq t1 t2
-  | ERecv c1 t1, ERecv c2 t2 -> c1 = c2 && effect_type_eq t1 t2
-  | ESelect c1 l1, ESelect c2 l2 -> c1 = c2 && l1 = l2
-  | EBranch c1 ls1, EBranch c2 ls2 -> c1 = c2 && string_list_eq ls1 ls2
-  | EChanCreate c1 t1 b1, EChanCreate c2 t2 b2 -> c1 = c2 && effect_type_eq t1 t2 && b1 = b2
-  | EChanClose c1, EChanClose c2 -> c1 = c2
-  | EDelegate c1 t1, EDelegate c2 t2 -> c1 = c2 && t1 = t2
-
-  (* Resource effects *)
-  | EAcquire r1, EAcquire r2 -> r1 = r2
-  | ERelease r1, ERelease r2 -> r1 = r2
-  | EUse r1, EUse r2 -> r1 = r2
-
-  (* State effects *)
-  | EState, EState -> true
-  | ESTRead r1, ESTRead r2 -> r1 = r2
-  | ESTWrite r1, ESTWrite r2 -> r1 = r2
-  | ESTNew, ESTNew -> true
-
-  (* FFI effects *)
-  | EUnsafe, EUnsafe -> true
-  | EFFI, EFFI -> true
-
-  (* Legacy unparameterized *)
-  | EReadSimple, EReadSimple -> true
-  | EWriteSimple, EWriteSimple -> true
-  | ELockSimple, ELockSimple -> true
-  | ENewCh, ENewCh -> true
-
-  (* No match *)
-  | _, _ -> false
-
-(* Convert effect_type to effect_type (identity, for API consistency) *)
-(* Per .fsti order: after effect_op_eq *)
-inline_for_extraction noextract
-let effect_type_id (t: effect_type) : effect_type = t
+(* effect_op_eq is now defined with unfold let in Effects.fsti *)
+(* effect_type_id is now defined with inline_for_extraction let in Effects.fsti *)
 
 (** ============================================================================
     EFFECT ROWS
@@ -434,16 +353,11 @@ let rec no_row_var (r: effect_row) : bool =
 let row_equiv (r1 r2: effect_row) : prop =
   forall (e:effect_op). has_effect e r1 = has_effect e r2
 
-(* abstract_loc_eq is reflexive *)
+(* abstract_loc_eq is reflexive - trivial with unfold *)
 val abstract_loc_eq_refl : l:abstract_loc ->
   Lemma (abstract_loc_eq l l = true)
         [SMTPat (abstract_loc_eq l l)]
-let abstract_loc_eq_refl l =
-  match l with
-  | LocConcrete _ -> ()
-  | LocAbstract _ -> ()
-  | LocParam _ -> ()
-  | LocUnknown -> ()
+let abstract_loc_eq_refl l = ()  (* Z3 sees unfold body directly *)
 
 (* effect_type_eq is reflexive *)
 val effect_type_eq_refl : t:effect_type ->
@@ -538,16 +452,10 @@ let rec row_eq_sym r1 r2 =
   | RowExt e1 rest1, RowExt e2 rest2 -> row_eq_sym rest1 rest2
   | _, _ -> ()
 
-(* abstract_loc_eq is symmetric - per .fsti order: in SYMMETRY section *)
+(* abstract_loc_eq is symmetric - trivial with unfold *)
 val abstract_loc_eq_sym : l1:abstract_loc -> l2:abstract_loc ->
   Lemma (abstract_loc_eq l1 l2 = abstract_loc_eq l2 l1)
-let abstract_loc_eq_sym l1 l2 =
-  match l1, l2 with
-  | LocConcrete _, LocConcrete _ -> ()
-  | LocAbstract _, LocAbstract _ -> ()
-  | LocParam _, LocParam _ -> ()
-  | LocUnknown, LocUnknown -> ()
-  | _, _ -> ()
+let abstract_loc_eq_sym l1 l2 = ()  (* Z3 sees unfold body directly *)
 
 (* effect_type_eq is symmetric - per .fsti order: in SYMMETRY section *)
 val effect_type_eq_sym : t1:effect_type -> t2:effect_type ->

@@ -1,0 +1,31 @@
+# F* build artifacts
+_cache/
+_output/
+.depend
+
+# F* verified module cache
+*.checked
+*.checked.lax
+
+# F* Z3 proof hints
+*.hints
+hints/
+
+# F* Karamel extraction
+*.krml
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+*.bbl
+*.blg
+*.toc
+
+# Editor backup files
+*~
+\#*\#
+.#*

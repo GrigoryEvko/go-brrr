@@ -1,0 +1,237 @@
+[package]
+name = "go-brrr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Token-efficient code analysis for LLMs"
+readme = "README.md"
+keywords = ["code-analysis", "llm", "ast", "tree-sitter", "tokenization"]
+categories = ["development-tools", "command-line-utilities", "text-processing"]
+authors = ["Grigory Evko <grigory@evko.io>"]
+documentation = "https://github.com/GrigoryEvko/go-brrr"
+homepage = "https://github.com/GrigoryEvko/go-brrr"
+exclude = [
+    "data/",
+    "target/",
+    ".brrr/",
+    ".brrr_index/",
+    "rustc-ice-*",
+    "design*.md",
+    "docs/",
+    "apply_bug_fixes.py",
+    "*.sarif",
+    "*.profraw",
+    "*.profdata",
+    "flamegraph.svg",
+]
+
+[dependencies]
+# CLI argument parsing
+clap = { version = "4", features = ["derive", "env"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Tree-sitter for AST parsing
+# Note: tree-sitter 0.24 is compatible with tree-sitter-* 0.23 language crates
+tree-sitter = "0.26"
+tree-sitter-python = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-java = "0.23"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+
+# Vector search for semantic indexing
+usearch = "2"
+
+# gRPC for TEI (Text Embeddings Inference) integration
+tonic = "0.12"
+prost = "0.13"
+
+# Parallelism
+rayon = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+# File system traversal
+walkdir = "2"
+ignore = "0.4"
+
+# High-performance hash maps
+fxhash = "0.2"
+rustc-hash = "2"
+
+# SIMD-accelerated hashing (xxh3)
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+# Stack-allocated small vectors (avoids heap for small collections)
+smallvec = "1.13"
+
+# SHA-256 hashing for daemon socket paths
+sha2 = "0.10"
+
+# Faster synchronization primitives
+parking_lot = "0.12"
+
+# Regular expressions
+regex = "1"
+
+# SIMD operations for pattern matching (portable across x86_64/aarch64)
+wide = "0.7"
+
+# SIMD-accelerated byte search (null byte detection in path validation)
+memchr = "2"
+
+# SIMD-accelerated UTF-8 validation
+simdutf8 = "0.1"
+
+# Multi-pattern string matching (Aho-Corasick algorithm)
+aho-corasick = "1"
+
+# Random number generation for jitter in retry backoff
+rand = "0.8"
+
+# Native HuggingFace tokenizer (Qwen3-Embedding)
+# Features: http (download from HuggingFace Hub), fancy-regex (required for SysRegex)
+tokenizers = { version = "0.21", default-features = false, features = ["http", "fancy-regex"] }
+
+# Lazy static initialization
+once_cell = "1"
+
+# Progress bars and spinners
+indicatif = "0.17"
+
+# Compile-time perfect hash functions for O(1) keyword lookups
+phf = { version = "0.11", features = ["macros"] }
+
+# High-performance allocator
+tikv-jemallocator = "0.6"
+
+# LRU cache for query embeddings
+lru = "0.12"
+
+# Required by tree-sitter
+streaming-iterator = "0.1"
+
+# Atomic file operations (temp file + rename pattern)
+tempfile = "3"
+
+# Cross-platform disk space checking
+fs2 = "0.4"
+
+# Command existence checking in PATH
+which = "7"
+
+# =============================================================================
+# HIGH-PERFORMANCE DATA STRUCTURES (2026)
+# =============================================================================
+
+# Integer-key hashmaps - zero-cost hashing for HashMap<usize, _>
+nohash-hasher = "0.2"
+
+# SIMD-accelerated bitsets for visited/seen sets (~10x faster, 8x less RAM)
+fixedbitset = "0.5"
+
+# String interning - dedup strings, 4-byte Spur keys (~5x memory reduction)
+lasso = { version = "0.7", features = ["multi-threaded", "ahasher"] }
+
+# Bump arena allocation for AST/CFG/DFG nodes (~2x faster alloc)
+bumpalo = { version = "3.19", features = ["collections"] }
+
+# Generational arena indices for graphs - stable keys, cache-friendly
+slotmap = "1.1"
+
+# Concurrent HashMap with AVX2 SIMD for parallel analysis
+scc = "3"
+
+# Brrr IR representation engine
+brrr-repr = { version = "0.1.0", path = "../brrr-repr" }
+
+# Translation from source languages to Brrr IR
+brrr-translate = { version = "0.1.0", path = "../brrr-translate" }
+
+[build-dependencies]
+tonic-build = "0.12"
+prost-build = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
+pretty_assertions = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+rand = "0.8"
+serde_json = "1"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[[bench]]
+name = "ast_parsing"
+harness = false
+
+[[bench]]
+name = "ast_extraction"
+harness = false
+
+[[bench]]
+name = "flow_analysis"
+harness = false
+
+[[bench]]
+name = "semantic"
+harness = false
+
+[[bench]]
+name = "callgraph"
+harness = false
+
+[[bench]]
+name = "e2e"
+harness = false
+
+[lib]
+name = "go_brrr"
+path = "src/lib.rs"
+
+[[bin]]
+name = "brrr"
+path = "src/main.rs"
+
+[[example]]
+name = "test_java"
+path = "examples/test_java.rs"
+
+[features]
+default = []
+# Enable TEI gRPC client
+tei = []
+# Enable all language parsers
+all-languages = []
+
+[lints.rust]
+unsafe_code = "warn"
+missing_docs = "allow"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"

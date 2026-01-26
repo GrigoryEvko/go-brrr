@@ -4,7 +4,7 @@
  * Public interface for the Brrr-Lang type system.
  * Based on brrr_lang_spec_v0.4.tex Parts II-III.
  *
- * This interface follows HACL*/EverParse patterns:
+ * This interface follows HACL-star/EverParse patterns:
  *   - unfold for simple type aliases (enables inlining for verification)
  *   - inline_for_extraction for extracted type constructors (C/Rust extraction)
  *   - [@(strict_on_arguments [n])] for strict argument evaluation
@@ -25,7 +25,7 @@ open Modes
 open Effects
 open FStar.List.Tot
 
-(* Z3 solver options for SMT tractability - following HACL*/EverParse patterns
+(* Z3 solver options for SMT tractability - following HACL-star/EverParse patterns
    - z3rlimit 50: reasonable timeout for most proofs
    - fuel 0: disable recursive function unfolding by default
    - ifuel 0: disable inductive type unfolding by default *)

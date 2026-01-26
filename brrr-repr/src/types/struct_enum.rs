@@ -203,6 +203,156 @@ impl VariantType {
     }
 }
 
+/// Interface/trait type definition (for Go interfaces, TypeScript interfaces, etc.)
+///
+/// Represents a structural interface type with method signatures and embedded interfaces.
+/// Maps to Go:
+/// ```go
+/// type Reader interface {
+///     Read(p []byte) (n int, err error)
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InterfaceType {
+    /// Interface name (may be synthetic for anonymous interfaces)
+    pub name: Spur,
+    /// Method signatures defined in this interface
+    pub methods: Vec<MethodSig>,
+    /// Embedded interfaces (interface composition)
+    pub embedded: Vec<Spur>,
+}
+
+impl InterfaceType {
+    /// Create a new interface type
+    pub fn new(name: Spur) -> Self {
+        Self {
+            name,
+            methods: Vec::new(),
+            embedded: Vec::new(),
+        }
+    }
+
+    /// Create an interface with methods
+    pub fn with_methods(name: Spur, methods: Vec<MethodSig>) -> Self {
+        Self {
+            name,
+            methods,
+            embedded: Vec::new(),
+        }
+    }
+
+    /// Create an interface with embedded interfaces
+    pub fn with_embedded(name: Spur, embedded: Vec<Spur>) -> Self {
+        Self {
+            name,
+            methods: Vec::new(),
+            embedded,
+        }
+    }
+
+    /// Add a method to the interface
+    pub fn add_method(&mut self, method: MethodSig) {
+        self.methods.push(method);
+    }
+
+    /// Add an embedded interface
+    pub fn add_embedded(&mut self, embedded: Spur) {
+        self.embedded.push(embedded);
+    }
+
+    /// Check if this is an empty interface (Go's `interface{}` / `any`)
+    pub fn is_empty(&self) -> bool {
+        self.methods.is_empty() && self.embedded.is_empty()
+    }
+
+    /// Get method by name
+    pub fn get_method(&self, name: Spur) -> Option<&MethodSig> {
+        self.methods.iter().find(|m| m.name == name)
+    }
+
+    /// Number of methods (not counting embedded interfaces)
+    pub fn method_count(&self) -> usize {
+        self.methods.len()
+    }
+
+    /// Number of embedded interfaces
+    pub fn embedded_count(&self) -> usize {
+        self.embedded.len()
+    }
+}
+
+/// Method signature within an interface
+///
+/// Represents a method's type signature without implementation.
+/// Maps to Go method spec: `Read(p []byte) (n int, err error)`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MethodSig {
+    /// Method name
+    pub name: Spur,
+    /// Parameter types (without receiver - interface methods have implicit receiver)
+    pub params: Vec<MethodParam>,
+    /// Return type (may be tuple for multiple returns)
+    pub return_type: BrrrType,
+}
+
+impl MethodSig {
+    /// Create a new method signature
+    pub fn new(name: Spur, params: Vec<MethodParam>, return_type: BrrrType) -> Self {
+        Self {
+            name,
+            params,
+            return_type,
+        }
+    }
+
+    /// Create a method with no parameters returning unit
+    pub fn unit(name: Spur) -> Self {
+        Self {
+            name,
+            params: Vec::new(),
+            return_type: BrrrType::UNIT,
+        }
+    }
+
+    /// Create a method with parameters returning unit
+    pub fn void(name: Spur, params: Vec<MethodParam>) -> Self {
+        Self {
+            name,
+            params,
+            return_type: BrrrType::UNIT,
+        }
+    }
+
+    /// Get arity (number of parameters)
+    pub fn arity(&self) -> usize {
+        self.params.len()
+    }
+}
+
+/// Parameter within a method signature
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MethodParam {
+    /// Optional parameter name
+    pub name: Option<Spur>,
+    /// Parameter type
+    pub ty: BrrrType,
+}
+
+impl MethodParam {
+    /// Create a named parameter
+    pub fn named(name: Spur, ty: BrrrType) -> Self {
+        Self {
+            name: Some(name),
+            ty,
+        }
+    }
+
+    /// Create an unnamed parameter
+    pub fn unnamed(ty: BrrrType) -> Self {
+        Self { name: None, ty }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +405,96 @@ mod tests {
         assert_eq!(e.variant_count(), 2);
         assert!(!e.is_simple()); // Some has data
         assert!(e.get_variant(none).unwrap().is_unit());
+    }
+
+    #[test]
+    fn test_interface_type_empty() {
+        let mut rodeo = Rodeo::default();
+        let name = intern(&mut rodeo, "EmptyInterface");
+
+        let iface = InterfaceType::new(name);
+
+        assert!(iface.is_empty());
+        assert_eq!(iface.method_count(), 0);
+        assert_eq!(iface.embedded_count(), 0);
+    }
+
+    #[test]
+    fn test_interface_type_with_methods() {
+        let mut rodeo = Rodeo::default();
+        let reader = intern(&mut rodeo, "Reader");
+        let read = intern(&mut rodeo, "Read");
+        let p_name = intern(&mut rodeo, "p");
+
+        // Read(p []byte) (n int, err error)
+        let params = vec![MethodParam::named(
+            p_name,
+            BrrrType::Wrap(
+                crate::types::WrapperKind::Slice,
+                Box::new(BrrrType::Numeric(crate::types::NumericType::Int(
+                    crate::types::IntType::U8,
+                ))),
+            ),
+        )];
+        let return_type = BrrrType::Tuple(vec![
+            BrrrType::Numeric(crate::types::NumericType::Int(crate::types::IntType::I64)),
+            BrrrType::Named(intern(&mut rodeo, "Error")),
+        ]);
+
+        let method = MethodSig::new(read, params, return_type);
+        let iface = InterfaceType::with_methods(reader, vec![method]);
+
+        assert!(!iface.is_empty());
+        assert_eq!(iface.method_count(), 1);
+        assert!(iface.get_method(read).is_some());
+        assert_eq!(iface.get_method(read).unwrap().arity(), 1);
+    }
+
+    #[test]
+    fn test_interface_type_with_embedded() {
+        let mut rodeo = Rodeo::default();
+        let read_writer = intern(&mut rodeo, "ReadWriter");
+        let reader = intern(&mut rodeo, "Reader");
+        let writer = intern(&mut rodeo, "Writer");
+        let close = intern(&mut rodeo, "Close");
+
+        // ReadWriter embeds Reader and Writer, adds Close() method
+        let mut iface = InterfaceType::with_embedded(read_writer, vec![reader, writer]);
+        iface.add_method(MethodSig::unit(close));
+
+        assert!(!iface.is_empty());
+        assert_eq!(iface.method_count(), 1);
+        assert_eq!(iface.embedded_count(), 2);
+    }
+
+    #[test]
+    fn test_method_sig() {
+        let mut rodeo = Rodeo::default();
+        let name = intern(&mut rodeo, "DoSomething");
+        let param = intern(&mut rodeo, "x");
+
+        // Method with one int param returning bool
+        let params = vec![MethodParam::named(
+            param,
+            BrrrType::Numeric(crate::types::NumericType::Int(crate::types::IntType::I32)),
+        )];
+        let method = MethodSig::new(name, params, BrrrType::BOOL);
+
+        assert_eq!(method.arity(), 1);
+        assert_eq!(method.return_type, BrrrType::BOOL);
+    }
+
+    #[test]
+    fn test_method_param() {
+        let mut rodeo = Rodeo::default();
+        let name = intern(&mut rodeo, "value");
+
+        let named = MethodParam::named(name, BrrrType::STRING);
+        assert!(named.name.is_some());
+        assert_eq!(named.ty, BrrrType::STRING);
+
+        let unnamed = MethodParam::unnamed(BrrrType::BOOL);
+        assert!(unnamed.name.is_none());
+        assert_eq!(unnamed.ty, BrrrType::BOOL);
     }
 }

@@ -125,14 +125,39 @@ val string_of_located_error : located_error -> string
 type located_ident = with_meta_t string
 
 (** ============================================================================
+    MULTI-CHANNEL SELECT TYPES (Go-style select on multiple channels)
+    ============================================================================ *)
+
+(* Action to perform when a multi-channel select branch is chosen.
+   Similar to Go's select statement:
+   - SelectSend: send a value of the given type
+   - SelectRecv: receive a value of the expected type
+   - SelectDefault: default case (no I/O, for non-blocking select) *)
+type select_action =
+  | SelectSend : payload:brrr_type -> select_action
+  | SelectRecv : expected:brrr_type -> select_action
+  | SelectDefault : select_action
+
+(* A branch in a multi-channel select.
+   Each branch specifies:
+   - Which channel to operate on
+   - What action to take if this branch is selected
+   - The continuation session type after the action *)
+noeq type select_branch = {
+  sb_channel : channel_name;
+  sb_action  : select_action;
+  sb_cont    : session_type
+}
+
+(** ============================================================================
     SESSION TYPE DEFINITION
     ============================================================================ *)
 
-(* Session type grammar - S ::= !t.S | ?t.S | +{l_i:S_i} | &{l_i:S_i} | uX.S | X | end
+(* Session type grammar - S ::= !t.S | ?t.S | +{l_i:S_i} | &{l_i:S_i} | uX.S | X | end | select{...}
 
    noeq required because brrr_type contains function types with effect_row,
    making structural equality undecidable. *)
-noeq type session_type =
+and session_type =
   | SSend   : payload:brrr_type -> continuation:session_type -> session_type
   | SRecv   : payload:brrr_type -> continuation:session_type -> session_type
   | SSelect : branches:list (label & session_type) -> session_type
@@ -140,6 +165,8 @@ noeq type session_type =
   | SRec    : var:session_var -> body:session_type -> session_type
   | SVar    : var:session_var -> session_type
   | SEnd    : session_type
+  (* Multi-channel select: choose from multiple channel operations *)
+  | SSelectMulti : branches:list select_branch -> session_type
 
 (* Located session type: session type with source location *)
 type located_session = with_meta_t session_type
@@ -161,9 +188,27 @@ val unlocated_session : s:session_type -> located_session
 val session_branches_size : branches:list (label & session_type) ->
   Tot nat (decreases branches)
 
+(* Compute structural size of select branches *)
+val select_branches_size : branches:list select_branch ->
+  Tot nat (decreases branches)
+
 (* Compute structural size of a session type *)
 val session_size : s:session_type ->
   Tot nat (decreases s)
+
+(** ============================================================================
+    MULTI-CHANNEL SELECT DUALITY
+    ============================================================================ *)
+
+(* Compute the dual of a select action *)
+val dual_action : a:select_action -> select_action
+
+(* Compute the dual of a select branch *)
+val dual_select_branch : b:select_branch -> select_branch
+
+(* Compute the dual of select branches *)
+val dual_select_branches : branches:list select_branch ->
+  Tot (list select_branch) (decreases branches)
 
 (** ============================================================================
     SESSION DUALITY - The Core Property
@@ -178,13 +223,23 @@ val dual_branches : branches:list (label & session_type) ->
    - Send becomes Receive (and vice versa)
    - Internal choice (Select) becomes External choice (Branch) (and vice versa)
    - Recursion and variables are preserved (dual distributes through them)
-   - End is self-dual *)
+   - End is self-dual
+   - SSelectMulti: each branch's action is dualized (send<->recv) *)
 val dual : s:session_type ->
   Tot session_type (decreases s)
 
 (** ============================================================================
-    DUALITY INVOLUTION THEOREM
+    DUALITY INVOLUTION THEOREMS
     ============================================================================ *)
+
+(* Lemma: dual_action is an involution *)
+val dual_action_involutive : a:select_action ->
+  Lemma (ensures dual_action (dual_action a) == a)
+
+(* Helper lemma: dual_select_branches is an involution *)
+val dual_select_branches_involutive : branches:list select_branch ->
+  Lemma (ensures dual_select_branches (dual_select_branches branches) == branches)
+        (decreases branches)
 
 (* Helper lemma: dual_branches is an involution *)
 val dual_branches_involutive : branches:list (label & session_type) ->
@@ -202,6 +257,16 @@ val dual_involutive : s:session_type ->
     SESSION TYPE EQUALITY
     ============================================================================ *)
 
+(* Structural equality for select actions *)
+val select_action_eq : a1:select_action -> a2:select_action -> bool
+
+(* Structural equality for select branches *)
+val select_branch_eq : b1:select_branch -> b2:select_branch -> bool
+
+(* Structural equality for select branch lists *)
+val select_branches_eq : bs1:list select_branch -> bs2:list select_branch ->
+  Tot bool (decreases bs1)
+
 (* Structural equality for session type branch lists *)
 val session_branches_eq : bs1:list (label & session_type) -> bs2:list (label & session_type) ->
   Tot bool (decreases bs1)
@@ -210,17 +275,48 @@ val session_branches_eq : bs1:list (label & session_type) -> bs2:list (label & s
 val session_eq : s1:session_type -> s2:session_type ->
   Tot bool (decreases s1)
 
+(* Select action equality is reflexive *)
+val select_action_eq_refl : a:select_action ->
+  Lemma (ensures select_action_eq a a = true)
+
+(* Select branches equality is reflexive *)
+val select_branches_eq_refl : bs:list select_branch ->
+  Lemma (ensures select_branches_eq bs bs = true)
+        (decreases bs)
+
 (* Session equality is reflexive *)
 val session_eq_refl : s:session_type ->
   Lemma (ensures session_eq s s = true)
         (decreases s)
         [SMTPat (session_eq s s)]
 
+(* Select action equality is symmetric *)
+val select_action_eq_sym : a1:select_action -> a2:select_action ->
+  Lemma (requires select_action_eq a1 a2 = true)
+        (ensures select_action_eq a2 a1 = true)
+
+(* Select branches equality is symmetric *)
+val select_branches_eq_sym : bs1:list select_branch -> bs2:list select_branch ->
+  Lemma (requires select_branches_eq bs1 bs2 = true)
+        (ensures select_branches_eq bs2 bs1 = true)
+        (decreases bs1)
+
 (* Session equality is symmetric *)
 val session_eq_sym : s1:session_type -> s2:session_type ->
   Lemma (requires session_eq s1 s2 = true)
         (ensures session_eq s2 s1 = true)
         (decreases s1)
+
+(* Select action equality is transitive *)
+val select_action_eq_trans : a1:select_action -> a2:select_action -> a3:select_action ->
+  Lemma (requires select_action_eq a1 a2 = true /\ select_action_eq a2 a3 = true)
+        (ensures select_action_eq a1 a3 = true)
+
+(* Select branches equality is transitive *)
+val select_branches_eq_trans : bs1:list select_branch -> bs2:list select_branch -> bs3:list select_branch ->
+  Lemma (requires select_branches_eq bs1 bs2 = true /\ select_branches_eq bs2 bs3 = true)
+        (ensures select_branches_eq bs1 bs3 = true)
+        (decreases bs1)
 
 (* Session equality is transitive *)
 val session_eq_trans : s1:session_type -> s2:session_type -> s3:session_type ->
@@ -247,6 +343,10 @@ val dual_preserves_eq : s1:session_type -> s2:session_type ->
 val free_session_vars_branches : branches:list (label & session_type) ->
   Tot (list session_var) (decreases branches)
 
+(* Collect free session variables from select branch list *)
+val free_session_vars_select_branches : branches:list select_branch ->
+  Tot (list session_var) (decreases branches)
+
 (* Collect free session variables in a session type *)
 val free_session_vars : s:session_type ->
   Tot (list session_var) (decreases s)
@@ -264,6 +364,10 @@ val is_free_in : x:session_var -> s:session_type -> bool
 (* Substitute a session variable in a branch list *)
 val subst_session_branches : x:session_var -> replacement:session_type ->
   branches:list (label & session_type) -> Tot (list (label & session_type)) (decreases branches)
+
+(* Substitute a session variable in a select branch list *)
+val subst_session_select_branches : x:session_var -> replacement:session_type ->
+  branches:list select_branch -> Tot (list select_branch) (decreases branches)
 
 (* Substitute a session variable with a session type *)
 val subst_session : x:session_var -> replacement:session_type -> s:session_type ->
@@ -285,11 +389,17 @@ val is_rec_type : s:session_type -> bool
 (* Check if variable x is guarded in session type s *)
 val is_guarded : x:session_var -> s:session_type -> bool
 
+(* Check contractivity of select branch list *)
+val is_contractive_select_branches : branches:list select_branch -> bool
+
 (* Check contractivity of branch list *)
 val is_contractive_branches : branches:list (label & session_type) -> bool
 
 (* Check if recursive types are contractive *)
 val is_contractive : s:session_type -> bool
+
+(* Check well-formedness of select branch list *)
+val is_wellformed_select_branches : branches:list select_branch -> bool
 
 (* Well-formed session type: closed and contractive *)
 val is_wellformed : s:session_type -> bool
@@ -630,8 +740,16 @@ val priority_compare : p1:priority -> p2:priority -> int
 val priority_lt : p1:priority -> p2:priority -> bool
 val priority_le : p1:priority -> p2:priority -> bool
 
+(* Prioritized select branch for multi-channel select *)
+noeq type pri_select_branch = {
+  psb_channel : channel_name;
+  psb_action  : select_action;
+  psb_pri     : priority;       (* Priority of this branch *)
+  psb_cont    : pri_session
+}
+
 (* Prioritized session type grammar *)
-noeq type pri_session =
+and pri_session =
   | PriSend   : pri:priority -> payload:brrr_type -> continuation:pri_session -> pri_session
   | PriRecv   : pri:priority -> payload:brrr_type -> continuation:pri_session -> pri_session
   | PriSelect : pri:priority -> branches:list (label & pri_session) -> pri_session
@@ -639,12 +757,14 @@ noeq type pri_session =
   | PriRec    : var:session_var -> body:pri_session -> pri_session
   | PriVar    : var:session_var -> pri_session
   | PriEnd    : pri_session
+  | PriSelectMulti : pri:priority -> branches:list pri_select_branch -> pri_session
 
 (** ============================================================================
     PRIORITIZED SESSION SIZE
     ============================================================================ *)
 
 val pri_session_size : s:pri_session -> Tot nat (decreases s)
+val pri_select_branches_size : branches:list pri_select_branch -> Tot nat (decreases branches)
 
 (** ============================================================================
     PRIORITY EXTRACTION
@@ -698,12 +818,21 @@ val priorities_strictly_increasing : s:pri_session -> Tot bool (decreases s)
 val pri_dual_branches : branches:list (label & pri_session) ->
   Tot (list (label & pri_session)) (decreases branches)
 
+(* Compute dual of prioritized select branches *)
+val pri_dual_select_branches : branches:list pri_select_branch ->
+  Tot (list pri_select_branch) (decreases branches)
+
 (* Compute dual of prioritized session type *)
 val pri_dual : s:pri_session -> Tot pri_session (decreases s)
 
 (* Helper lemma: pri_dual_branches is an involution *)
 val pri_dual_branches_involutive : branches:list (label & pri_session) ->
   Lemma (ensures pri_dual_branches (pri_dual_branches branches) == branches)
+        (decreases branches)
+
+(* Helper lemma: pri_dual_select_branches is an involution *)
+val pri_dual_select_branches_involutive : branches:list pri_select_branch ->
+  Lemma (ensures pri_dual_select_branches (pri_dual_select_branches branches) == branches)
         (decreases branches)
 
 (* Priority dual is an involution *)

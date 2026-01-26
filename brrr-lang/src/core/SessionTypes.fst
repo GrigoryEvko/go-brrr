@@ -172,10 +172,35 @@ let string_of_located_error (e: located_error) : string =
 type located_ident = with_meta_t string
 
 (** ============================================================================
+    MULTI-CHANNEL SELECT TYPES (Go-style select on multiple channels)
+    ============================================================================ *)
+
+(* Action to perform when a multi-channel select branch is chosen.
+   Similar to Go's select statement:
+   - SelectSend: send a value of the given type
+   - SelectRecv: receive a value of the expected type
+   - SelectDefault: default case (no I/O, for non-blocking select) *)
+type select_action =
+  | SelectSend : payload:brrr_type -> select_action
+  | SelectRecv : expected:brrr_type -> select_action
+  | SelectDefault : select_action
+
+(* A branch in a multi-channel select.
+   Each branch specifies:
+   - Which channel to operate on
+   - What action to take if this branch is selected
+   - The continuation session type after the action *)
+noeq type select_branch = {
+  sb_channel : channel_name;
+  sb_action  : select_action;
+  sb_cont    : session_type
+}
+
+(** ============================================================================
     SESSION TYPE DEFINITION
     ============================================================================ *)
 
-(* Session type grammar - S ::= !t.S | ?t.S | +{l_i:S_i} | &{l_i:S_i} | uX.S | X | end
+(* Session type grammar - S ::= !t.S | ?t.S | +{l_i:S_i} | &{l_i:S_i} | uX.S | X | end | select{...}
 
    Constructors:
    - SSend: Send type t then continue with S (corresponds to !t.S)
@@ -185,6 +210,7 @@ type located_ident = with_meta_t string
    - SRec: Recursive session type (corresponds to uX.S)
    - SVar: Session type variable (corresponds to X)
    - SEnd: Session termination (corresponds to end)
+   - SSelectMulti: Multi-channel select (Go-style select statement)
 
    N-ary labeled choice:
    - SSelect branches: The endpoint selects one of the labeled branches to follow.
@@ -197,7 +223,7 @@ type located_ident = with_meta_t string
    - Multiparty session local types (LBranch/LSelect use labeled n-ary branches)
    - Spec projection rules that yield labeled n-ary choice: ⊕_i l_i.S and &_i l_i.S
 *)
-noeq type session_type =
+and session_type =
   | SSend   : payload:brrr_type -> continuation:session_type -> session_type
   | SRecv   : payload:brrr_type -> continuation:session_type -> session_type
   | SSelect : branches:list (label & session_type) -> session_type
@@ -205,6 +231,10 @@ noeq type session_type =
   | SRec    : var:session_var -> body:session_type -> session_type
   | SVar    : var:session_var -> session_type
   | SEnd    : session_type
+  (* Multi-channel select: choose from multiple channel operations.
+     Like Go's select statement - wait on multiple channels and proceed
+     with whichever is ready first. *)
+  | SSelectMulti : branches:list select_branch -> session_type
 
 (* Located session type: session type with source location for error reporting *)
 type located_session = with_meta_t session_type
@@ -230,6 +260,12 @@ let rec session_branches_size (branches: list (label & session_type)) : Tot nat 
   | [] -> 0
   | (_, s) :: rest -> session_size s + session_branches_size rest
 
+(* Compute the structural size of select branches *)
+and select_branches_size (branches: list select_branch) : Tot nat (decreases branches) =
+  match branches with
+  | [] -> 0
+  | b :: rest -> session_size b.sb_cont + select_branches_size rest
+
 (* Compute the structural size of a session type - used for termination measures *)
 and session_size (s: session_type) : Tot nat (decreases s) =
   match s with
@@ -240,13 +276,43 @@ and session_size (s: session_type) : Tot nat (decreases s) =
   | SRec _ body -> 1 + session_size body
   | SVar _ -> 1
   | SEnd -> 1
+  | SSelectMulti branches -> 1 + select_branches_size branches
+
+(** ============================================================================
+    MULTI-CHANNEL SELECT DUALITY
+    ============================================================================ *)
+
+(* Compute the dual of a select action.
+   - SelectSend t becomes SelectRecv t (dual endpoint receives what we send)
+   - SelectRecv t becomes SelectSend t (dual endpoint sends what we receive)
+   - SelectDefault remains SelectDefault (no I/O to dualize) *)
+let dual_action (a: select_action) : select_action =
+  match a with
+  | SelectSend t -> SelectRecv t
+  | SelectRecv t -> SelectSend t
+  | SelectDefault -> SelectDefault
+
+(* Compute the dual of a select branch.
+   The channel name is preserved; only the action is dualized. *)
+let dual_select_branch (b: select_branch) : select_branch = {
+  sb_channel = b.sb_channel;
+  sb_action = dual_action b.sb_action;
+  sb_cont = dual b.sb_cont
+}
+
+(* Compute the dual of select branches *)
+and dual_select_branches (branches: list select_branch)
+    : Tot (list select_branch) (decreases branches) =
+  match branches with
+  | [] -> []
+  | b :: rest -> dual_select_branch b :: dual_select_branches rest
 
 (** ============================================================================
     SESSION DUALITY
     ============================================================================ *)
 
 (* Compute the dual of session type branches - preserves labels, dualizes continuations *)
-let rec dual_branches (branches: list (label & session_type))
+and dual_branches (branches: list (label & session_type))
     : Tot (list (label & session_type)) (decreases branches) =
   match branches with
   | [] -> []
@@ -259,6 +325,7 @@ let rec dual_branches (branches: list (label & session_type))
    - Recursion and variables are preserved (dual distributes through them)
    - End is self-dual
    - Labels in n-ary choice are preserved; only the choice polarity changes
+   - SSelectMulti: each branch's action is dualized (send<->recv)
 
    This ensures that if one endpoint has type S, the other has type dual(S),
    and their interactions are complementary. *)
@@ -271,13 +338,33 @@ and dual (s: session_type) : Tot session_type (decreases s) =
   | SRec x body -> SRec x (dual body)
   | SVar x -> SVar x
   | SEnd -> SEnd
+  | SSelectMulti branches -> SSelectMulti (dual_select_branches branches)
 
 (** ============================================================================
-    DUALITY INVOLUTION THEOREM
+    DUALITY INVOLUTION THEOREMS
     ============================================================================ *)
 
+(* Lemma: dual_action is an involution *)
+let dual_action_involutive (a: select_action)
+    : Lemma (ensures dual_action (dual_action a) == a) =
+  match a with
+  | SelectSend _ -> ()
+  | SelectRecv _ -> ()
+  | SelectDefault -> ()
+
+(* Helper lemma: dual_select_branches is an involution on select branch lists *)
+let rec dual_select_branches_involutive (branches: list select_branch)
+    : Lemma (ensures dual_select_branches (dual_select_branches branches) == branches)
+            (decreases branches) =
+  match branches with
+  | [] -> ()
+  | b :: rest ->
+      dual_action_involutive b.sb_action;
+      dual_involutive b.sb_cont;
+      dual_select_branches_involutive rest
+
 (* Helper lemma: dual_branches is an involution on branch lists *)
-let rec dual_branches_involutive (branches: list (label & session_type))
+and dual_branches_involutive (branches: list (label & session_type))
     : Lemma (ensures dual_branches (dual_branches branches) == branches) (decreases branches) =
   match branches with
   | [] -> ()
@@ -316,6 +403,12 @@ let rec dual_branches_involutive (branches: list (label & session_type))
      = dual(SRec x (dual body))            [by def of dual]
      = SRec x (dual(dual body))            [by def of dual]
      = SRec x body                         [by IH on body]
+
+   - S = SSelectMulti branches:
+       dual(dual(SSelectMulti branches))
+     = dual(SSelectMulti (dual_select_branches branches))
+     = SSelectMulti (dual_select_branches (dual_select_branches branches))
+     = SSelectMulti branches               [by IH on branches]
 *)
 and dual_involutive (s: session_type)
     : Lemma (ensures dual (dual s) == s) (decreases s) =
@@ -327,13 +420,36 @@ and dual_involutive (s: session_type)
   | SRec _ body -> dual_involutive body
   | SVar _ -> ()
   | SEnd -> ()
+  | SSelectMulti branches -> dual_select_branches_involutive branches
 
 (** ============================================================================
     SESSION TYPE EQUALITY
     ============================================================================ *)
 
+(* Structural equality for select actions *)
+let select_action_eq (a1 a2: select_action) : bool =
+  match a1, a2 with
+  | SelectSend t1, SelectSend t2 -> type_eq t1 t2
+  | SelectRecv t1, SelectRecv t2 -> type_eq t1 t2
+  | SelectDefault, SelectDefault -> true
+  | _, _ -> false
+
+(* Structural equality for select branches (uses session_eq, defined below) *)
+let select_branch_eq (b1 b2: select_branch) : bool =
+  b1.sb_channel = b2.sb_channel &&
+  select_action_eq b1.sb_action b2.sb_action &&
+  session_eq b1.sb_cont b2.sb_cont
+
+(* Structural equality for select branch lists *)
+and select_branches_eq (bs1 bs2: list select_branch) : Tot bool (decreases bs1) =
+  match bs1, bs2 with
+  | [], [] -> true
+  | b1 :: r1, b2 :: r2 ->
+      select_branch_eq b1 b2 && select_branches_eq r1 r2
+  | _, _ -> false
+
 (* Structural equality for session type branch lists *)
-let rec session_branches_eq (bs1 bs2: list (label & session_type)) : Tot bool (decreases bs1) =
+and session_branches_eq (bs1 bs2: list (label & session_type)) : Tot bool (decreases bs1) =
   match bs1, bs2 with
   | [], [] -> true
   | (l1, s1) :: r1, (l2, s2) :: r2 ->
@@ -355,10 +471,30 @@ and session_eq (s1 s2: session_type) : Tot bool (decreases s1) =
       x1 = x2 && session_eq body1 body2
   | SVar x1, SVar x2 -> x1 = x2
   | SEnd, SEnd -> true
+  | SSelectMulti bs1, SSelectMulti bs2 ->
+      select_branches_eq bs1 bs2
   | _, _ -> false
 
+(* Select action equality is reflexive *)
+let select_action_eq_refl (a: select_action)
+    : Lemma (ensures select_action_eq a a = true) =
+  match a with
+  | SelectSend t -> type_eq_refl t
+  | SelectRecv t -> type_eq_refl t
+  | SelectDefault -> ()
+
+(* Select branches equality is reflexive *)
+let rec select_branches_eq_refl (bs: list select_branch)
+    : Lemma (ensures select_branches_eq bs bs = true) (decreases bs) =
+  match bs with
+  | [] -> ()
+  | b :: rest ->
+      select_action_eq_refl b.sb_action;
+      session_eq_refl b.sb_cont;
+      select_branches_eq_refl rest
+
 (* Session branches equality is reflexive - mutually recursive with session_eq_refl *)
-let rec session_branches_eq_refl (bs: list (label & session_type))
+and session_branches_eq_refl (bs: list (label & session_type))
     : Lemma (ensures session_branches_eq bs bs = true) (decreases bs) =
   match bs with
   | [] -> ()
@@ -375,6 +511,7 @@ and session_eq_refl (s: session_type)
   | SRec _ body -> session_eq_refl body
   | SVar _ -> ()
   | SEnd -> ()
+  | SSelectMulti bs -> select_branches_eq_refl bs
 
 (* SMTPat trigger wrapper for session_eq_refl - enables automatic Z3 proof application *)
 val session_eq_refl_trigger : s:session_type ->
@@ -382,8 +519,31 @@ val session_eq_refl_trigger : s:session_type ->
         [SMTPat (session_eq s s)]
 let session_eq_refl_trigger s = session_eq_refl s
 
+(* Select action equality is symmetric *)
+let select_action_eq_sym (a1 a2: select_action)
+    : Lemma (requires select_action_eq a1 a2 = true)
+            (ensures select_action_eq a2 a1 = true) =
+  match a1, a2 with
+  | SelectSend t1, SelectSend t2 -> type_eq_sym t1 t2
+  | SelectRecv t1, SelectRecv t2 -> type_eq_sym t1 t2
+  | SelectDefault, SelectDefault -> ()
+  | _, _ -> ()
+
+(* Select branches equality is symmetric *)
+let rec select_branches_eq_sym (bs1 bs2: list select_branch)
+    : Lemma (requires select_branches_eq bs1 bs2 = true)
+            (ensures select_branches_eq bs2 bs1 = true)
+            (decreases bs1) =
+  match bs1, bs2 with
+  | [], [] -> ()
+  | b1 :: r1, b2 :: r2 ->
+      select_action_eq_sym b1.sb_action b2.sb_action;
+      session_eq_sym b1.sb_cont b2.sb_cont;
+      select_branches_eq_sym r1 r2
+  | _, _ -> ()
+
 (* Session branches equality is symmetric - mutually recursive with session_eq_sym *)
-let rec session_branches_eq_sym (bs1 bs2: list (label & session_type))
+and session_branches_eq_sym (bs1 bs2: list (label & session_type))
     : Lemma (requires session_branches_eq bs1 bs2 = true)
             (ensures session_branches_eq bs2 bs1 = true)
             (decreases bs1) =
@@ -408,6 +568,7 @@ and session_eq_sym (s1 s2: session_type)
   | SRec _ body1, SRec _ body2 -> session_eq_sym body1 body2
   | SVar _, SVar _ -> ()
   | SEnd, SEnd -> ()
+  | SSelectMulti bs1, SSelectMulti bs2 -> select_branches_eq_sym bs1 bs2
   | _, _ -> ()
 
 (* Session equality is transitive.
@@ -418,10 +579,33 @@ and session_eq_sym (s1 s2: session_type)
    have the same list structure, so pattern matching decreases both. *)
 #push-options "--z3rlimit 150 --fuel 4 --ifuel 2"
 
+(* Select action equality is transitive *)
+let select_action_eq_trans (a1 a2 a3: select_action)
+    : Lemma (requires select_action_eq a1 a2 = true /\ select_action_eq a2 a3 = true)
+            (ensures select_action_eq a1 a3 = true) =
+  match a1, a2, a3 with
+  | SelectSend t1, SelectSend t2, SelectSend t3 -> type_eq_trans t1 t2 t3
+  | SelectRecv t1, SelectRecv t2, SelectRecv t3 -> type_eq_trans t1 t2 t3
+  | SelectDefault, SelectDefault, SelectDefault -> ()
+  | _, _, _ -> ()
+
+(* Select branches equality is transitive *)
+let rec select_branches_eq_trans (bs1 bs2 bs3: list select_branch)
+    : Lemma (requires select_branches_eq bs1 bs2 = true /\ select_branches_eq bs2 bs3 = true)
+            (ensures select_branches_eq bs1 bs3 = true)
+            (decreases bs1) =
+  match bs1, bs2, bs3 with
+  | [], [], [] -> ()
+  | b1 :: r1, b2 :: r2, b3 :: r3 ->
+      select_action_eq_trans b1.sb_action b2.sb_action b3.sb_action;
+      session_eq_trans b1.sb_cont b2.sb_cont b3.sb_cont;
+      select_branches_eq_trans r1 r2 r3
+  | _, _, _ -> ()
+
 (* Session branches equality is transitive.
    Proof by structural induction on bs1. When session_branches_eq bs1 bs2 = true,
    both lists have the same structure, so matching bs1 determines bs2's structure. *)
-let rec session_branches_eq_trans (bs1 bs2 bs3: list (label & session_type))
+and session_branches_eq_trans (bs1 bs2 bs3: list (label & session_type))
     : Lemma (requires session_branches_eq bs1 bs2 = true /\ session_branches_eq bs2 bs3 = true)
             (ensures session_branches_eq bs1 bs3 = true)
             (decreases bs1) =
@@ -460,6 +644,8 @@ and session_eq_trans (s1 s2 s3: session_type)
       session_eq_trans body1 body2 body3
   | SVar _, SVar _, SVar _ -> ()
   | SEnd, SEnd, SEnd -> ()
+  | SSelectMulti bs1, SSelectMulti bs2, SSelectMulti bs3 ->
+      select_branches_eq_trans bs1 bs2 bs3
   | _, _, _ -> ()
 #pop-options
 
@@ -474,6 +660,13 @@ let rec free_session_vars_branches (branches: list (label & session_type))
   | [] -> []
   | (_, s) :: rest -> free_session_vars s @ free_session_vars_branches rest
 
+(* Collect free session variables from select branch list *)
+and free_session_vars_select_branches (branches: list select_branch)
+    : Tot (list session_var) (decreases branches) =
+  match branches with
+  | [] -> []
+  | b :: rest -> free_session_vars b.sb_cont @ free_session_vars_select_branches rest
+
 (* Collect free session variables in a session type *)
 and free_session_vars (s: session_type) : Tot (list session_var) (decreases s) =
   match s with
@@ -486,6 +679,7 @@ and free_session_vars (s: session_type) : Tot (list session_var) (decreases s) =
       filter (fun v -> v <> x) (free_session_vars body)
   | SVar x -> [x]
   | SEnd -> []
+  | SSelectMulti branches -> free_session_vars_select_branches branches
 
 (* Check if a session type is closed (no free variables) *)
 let is_closed_session (s: session_type) : bool =
@@ -508,6 +702,16 @@ let rec subst_session_branches (x: session_var) (replacement: session_type)
   | (lbl, s) :: rest ->
       (lbl, subst_session x replacement s) :: subst_session_branches x replacement rest
 
+(* Substitute a session variable in a select branch list *)
+and subst_session_select_branches (x: session_var) (replacement: session_type)
+    (branches: list select_branch)
+    : Tot (list select_branch) (decreases branches) =
+  match branches with
+  | [] -> []
+  | b :: rest ->
+      { b with sb_cont = subst_session x replacement b.sb_cont }
+      :: subst_session_select_branches x replacement rest
+
 (* Substitute a session variable with a session type *)
 and subst_session (x: session_var) (replacement: session_type) (s: session_type)
     : Tot session_type (decreases s) =
@@ -521,6 +725,7 @@ and subst_session (x: session_var) (replacement: session_type) (s: session_type)
       else SRec y (subst_session x replacement body)
   | SVar y -> if y = x then replacement else SVar y
   | SEnd -> SEnd
+  | SSelectMulti branches -> SSelectMulti (subst_session_select_branches x replacement branches)
 
 (* Unfold a recursive session type by substituting the body for the variable *)
 let unfold_rec (s: session_type) : session_type =
@@ -532,12 +737,36 @@ let unfold_rec (s: session_type) : session_type =
     DUAL PRESERVES EQUALITY
     ============================================================================ *)
 
-(* If two branch lists are equal, their duals are equal *)
-val dual_preserves_branches_eq : bs1:list (label & session_type) -> bs2:list (label & session_type) ->
-  Lemma (requires session_branches_eq bs1 bs2 = true)
-        (ensures session_branches_eq (dual_branches bs1) (dual_branches bs2) = true)
+(* If two select actions are equal, their duals are equal *)
+val dual_action_preserves_eq : a1:select_action -> a2:select_action ->
+  Lemma (requires select_action_eq a1 a2 = true)
+        (ensures select_action_eq (dual_action a1) (dual_action a2) = true)
+let dual_action_preserves_eq a1 a2 =
+  match a1, a2 with
+  | SelectSend t1, SelectSend t2 -> ()
+  | SelectRecv t1, SelectRecv t2 -> ()
+  | SelectDefault, SelectDefault -> ()
+  | _, _ -> ()
+
+(* If two select branch lists are equal, their duals are equal *)
+val dual_preserves_select_branches_eq : bs1:list select_branch -> bs2:list select_branch ->
+  Lemma (requires select_branches_eq bs1 bs2 = true)
+        (ensures select_branches_eq (dual_select_branches bs1) (dual_select_branches bs2) = true)
         (decreases bs1)
-let rec dual_preserves_branches_eq bs1 bs2 =
+let rec dual_preserves_select_branches_eq bs1 bs2 =
+  match bs1, bs2 with
+  | [], [] -> ()
+  | b1 :: r1, b2 :: r2 ->
+      dual_action_preserves_eq b1.sb_action b2.sb_action;
+      dual_preserves_eq b1.sb_cont b2.sb_cont;
+      dual_preserves_select_branches_eq r1 r2
+  | _, _ -> ()
+
+(* If two branch lists are equal, their duals are equal *)
+and dual_preserves_branches_eq (bs1 bs2: list (label & session_type))
+    : Lemma (requires session_branches_eq bs1 bs2 = true)
+            (ensures session_branches_eq (dual_branches bs1) (dual_branches bs2) = true)
+            (decreases bs1) =
   match bs1, bs2 with
   | [], [] -> ()
   | (l1, s1) :: r1, (l2, s2) :: r2 ->
@@ -560,6 +789,7 @@ and dual_preserves_eq (s1 s2: session_type)
       dual_preserves_eq body1 body2
   | SVar _, SVar _ -> ()
   | SEnd, SEnd -> ()
+  | SSelectMulti bs1, SSelectMulti bs2 -> dual_preserves_select_branches_eq bs1 bs2
   | _, _ -> ()
 
 (** ============================================================================
@@ -738,14 +968,21 @@ let rec is_guarded (x: session_var) (s: session_type) : bool =
   | SRecv _ _ -> true  (* x is guarded behind recv *)
   | SSelect _ -> true  (* x is guarded behind select *)
   | SBranch _ -> true  (* x is guarded behind branch *)
+  | SSelectMulti _ -> true  (* x is guarded behind multi-select *)
   | SRec y body ->
       if y = x then true  (* x is rebound *)
       else is_guarded x body
   | SVar y -> y <> x  (* Unguarded occurrence of x *)
   | SEnd -> true
 
+(* Check contractivity of select branch list *)
+let rec is_contractive_select_branches (branches: list select_branch) : bool =
+  match branches with
+  | [] -> true
+  | b :: rest -> is_contractive b.sb_cont && is_contractive_select_branches rest
+
 (* Check contractivity of branch list *)
-let rec is_contractive_branches (branches: list (label & session_type)) : bool =
+and is_contractive_branches (branches: list (label & session_type)) : bool =
   match branches with
   | [] -> true
   | (_, s) :: rest -> is_contractive s && is_contractive_branches rest
@@ -760,6 +997,11 @@ and is_contractive (s: session_type) : bool =
   | SRec x body -> is_guarded x body && is_contractive body
   | SVar _ -> true
   | SEnd -> true
+  | SSelectMulti branches -> is_contractive_select_branches branches
+
+(* Check well-formedness of select branch list *)
+let is_wellformed_select_branches (branches: list select_branch) : bool =
+  is_contractive_select_branches branches
 
 (* Well-formed session type: closed and contractive *)
 let is_wellformed (s: session_type) : bool =
@@ -1020,6 +1262,14 @@ and session_subtype_co (s1 s2: session_type) (vis: visited_set) (fuel: nat)
     | SBranch bs1, SBranch bs2 ->
         all_labels_present bs2 bs1 && session_branches_subtype_co bs2 bs1 vis' fuel'
 
+    (* SSelectMulti: structural comparison of select branches
+       For multi-channel select, we require matching structure:
+       - Same channels in same order
+       - Compatible actions (send/recv types match)
+       - Subtype continuations *)
+    | SSelectMulti bs1, SSelectMulti bs2 ->
+        select_branches_subtype_co bs1 bs2 vis' fuel'
+
     (* Session variables: equal variables are subtypes *)
     | SVar x1, SVar x2 -> x1 = x2
 
@@ -1027,6 +1277,29 @@ and session_subtype_co (s1 s2: session_type) (vis: visited_set) (fuel: nat)
     | SEnd, SEnd -> true
 
     (* All other combinations: not subtypes *)
+    | _, _ -> false
+
+(* Check if select actions are subtypes (structural equality for actions) *)
+and select_action_subtype (a1 a2: select_action) : bool =
+  match a1, a2 with
+  | SelectSend t1, SelectSend t2 -> subtype t1 t2
+  | SelectRecv t1, SelectRecv t2 -> subtype t2 t1  (* Contravariant in receive *)
+  | SelectDefault, SelectDefault -> true
+  | _, _ -> false
+
+(* Check if select branches are subtypes *)
+and select_branches_subtype_co (bs1 bs2: list select_branch)
+    (vis: visited_set) (fuel: nat)
+    : Tot bool (decreases fuel) =
+  if fuel = 0 then false
+  else
+    match bs1, bs2 with
+    | [], [] -> true
+    | b1 :: r1, b2 :: r2 ->
+        b1.sb_channel = b2.sb_channel &&
+        select_action_subtype b1.sb_action b2.sb_action &&
+        session_subtype_co b1.sb_cont b2.sb_cont vis (fuel - 1) &&
+        select_branches_subtype_co r1 r2 vis (fuel - 1)
     | _, _ -> false
 #pop-options
 
@@ -1060,6 +1333,21 @@ let rec session_branches_eq_co (bs1 bs2: list (label & session_type))
         session_branches_eq_co r1 r2 vis (fuel - 1)
     | _, _ -> false
 
+(* Coinductive equality for select branch lists *)
+and select_branches_eq_co (bs1 bs2: list select_branch)
+    (vis: visited_set) (fuel: nat)
+    : Tot bool (decreases fuel) =
+  if fuel = 0 then false
+  else
+    match bs1, bs2 with
+    | [], [] -> true
+    | b1 :: r1, b2 :: r2 ->
+        b1.sb_channel = b2.sb_channel &&
+        select_action_eq b1.sb_action b2.sb_action &&
+        session_eq_co b1.sb_cont b2.sb_cont vis (fuel - 1) &&
+        select_branches_eq_co r1 r2 vis (fuel - 1)
+    | _, _ -> false
+
 and session_eq_co (s1 s2: session_type) (vis: visited_set) (fuel: nat)
     : Tot bool (decreases fuel) =
   if fuel = 0 then false
@@ -1082,6 +1370,8 @@ and session_eq_co (s1 s2: session_type) (vis: visited_set) (fuel: nat)
         session_branches_eq_co bs1 bs2 vis' fuel'
     | SBranch bs1, SBranch bs2 ->
         session_branches_eq_co bs1 bs2 vis' fuel'
+    | SSelectMulti bs1, SSelectMulti bs2 ->
+        select_branches_eq_co bs1 bs2 vis' fuel'
     | SVar x1, SVar x2 -> x1 = x2
     | SEnd, SEnd -> true
     | _, _ -> false
@@ -1223,6 +1513,20 @@ let rec fuel_monotone_branches bs1 bs2 vis fuel1 fuel2 =
           fuel_monotone s1 s2 vis (fuel1 - 1) (fuel2 - 1);
           fuel_monotone_branches rest1 bs2 vis (fuel1 - 1) (fuel2 - 1)
 
+(* Fuel monotonicity for select branches *)
+and fuel_monotone_select_branches (bs1 bs2: list select_branch)
+    (vis: visited_set) (fuel1: nat) (fuel2: nat{fuel2 >= fuel1})
+    : Lemma (requires select_branches_subtype_co bs1 bs2 vis fuel1 = true)
+            (ensures select_branches_subtype_co bs1 bs2 vis fuel2 = true)
+            (decreases fuel1) =
+  if fuel1 = 0 then ()
+  else match bs1, bs2 with
+  | [], [] -> ()
+  | b1 :: r1, b2 :: r2 ->
+      fuel_monotone b1.sb_cont b2.sb_cont vis (fuel1 - 1) (fuel2 - 1);
+      fuel_monotone_select_branches r1 r2 vis (fuel1 - 1) (fuel2 - 1)
+  | _, _ -> ()
+
 (* Fuel monotonicity: more fuel preserves true results.
    If subtype_co returns true with less fuel, it returns true with more.
 
@@ -1267,6 +1571,8 @@ and fuel_monotone (s1 s2: session_type) (vis: visited_set) (fuel1: nat) (fuel2: 
         fuel_monotone_branches bs1 bs2 vis' fuel1' fuel2'
     | SBranch bs1, SBranch bs2 ->
         fuel_monotone_branches bs2 bs1 vis' fuel1' fuel2'
+    | SSelectMulti bs1, SSelectMulti bs2 ->
+        fuel_monotone_select_branches bs1 bs2 vis' fuel1' fuel2'
     | SVar x1, SVar x2 -> ()
     | SEnd, SEnd -> ()
     | _, _ -> ()  (* Impossible: precondition requires true *)
@@ -1412,6 +1718,25 @@ and merge_session (s1 s2: session_type) : Tot (option session_type) (decreases s
   | SVar x1, SVar x2 ->
       if x1 = x2 then Some (SVar x1) else None
 
+  (* SSelectMulti: merge if same channel/action structure with mergeable continuations *)
+  | SSelectMulti bs1, SSelectMulti bs2 ->
+      (match merge_session_select_branches bs1 bs2 with
+       | Some bs -> Some (SSelectMulti bs)
+       | None -> None)
+
+  | _, _ -> None
+
+(* Merge two select branch lists if they are compatible *)
+and merge_session_select_branches (bs1 bs2: list select_branch)
+    : Tot (option (list select_branch)) (decreases bs1) =
+  match bs1, bs2 with
+  | [], [] -> Some []
+  | b1 :: r1, b2 :: r2 ->
+      if b1.sb_channel = b2.sb_channel && select_action_eq b1.sb_action b2.sb_action then
+        match merge_session b1.sb_cont b2.sb_cont, merge_session_select_branches r1 r2 with
+        | Some cont, Some rest -> Some ({ b1 with sb_cont = cont } :: rest)
+        | _, _ -> None
+      else None
   | _, _ -> None
 
 (** ============================================================================
@@ -1433,6 +1758,17 @@ let rec dual_dual_branches_session_eq branches =
       dual_dual_session_eq s;
       dual_dual_branches_session_eq rest
 
+(* Lemma: dual of dual of select branches is structurally equal to original *)
+and dual_dual_select_branches_session_eq (branches: list select_branch)
+    : Lemma (ensures select_branches_eq (dual_select_branches (dual_select_branches branches)) branches = true)
+            (decreases branches) =
+  match branches with
+  | [] -> ()
+  | b :: rest ->
+      dual_action_involutive b.sb_action;
+      dual_dual_session_eq b.sb_cont;
+      dual_dual_select_branches_session_eq rest
+
 (* Lemma: dual of dual is structurally equal to original *)
 and dual_dual_session_eq (s: session_type)
     : Lemma (ensures session_eq (dual (dual s)) s = true)
@@ -1452,6 +1788,8 @@ and dual_dual_session_eq (s: session_type)
       dual_dual_session_eq body
   | SVar _ -> ()
   | SEnd -> ()
+  | SSelectMulti branches ->
+      dual_dual_select_branches_session_eq branches
 
 (* Lemma: are_dual is symmetric *)
 val are_dual_sym : s1:session_type -> s2:session_type ->
@@ -1526,6 +1864,12 @@ let rec session_branches_depth (branches: list (label & session_type)) : Tot nat
   | [] -> 0
   | (_, s) :: rest -> max (session_depth s) (session_branches_depth rest)
 
+(* Compute maximum depth of select branches *)
+and select_branches_depth (branches: list select_branch) : Tot nat (decreases branches) =
+  match branches with
+  | [] -> 0
+  | b :: rest -> max (session_depth b.sb_cont) (select_branches_depth rest)
+
 (* Compute the depth of a session type (max nesting level) *)
 and session_depth (s: session_type) : Tot nat (decreases s) =
   match s with
@@ -1536,6 +1880,7 @@ and session_depth (s: session_type) : Tot nat (decreases s) =
   | SRec _ body -> 1 + session_depth body
   | SVar _ -> 0
   | SEnd -> 0
+  | SSelectMulti branches -> 1 + select_branches_depth branches
 
 (** ============================================================================
     ADDITIONAL PROPERTIES
@@ -1552,18 +1897,30 @@ let rec dual_preserves_guarded x s =
   | SRecv _ _ -> ()  (* dual is SSend which is also guarded *)
   | SSelect _ -> ()  (* dual is SBranch which is also guarded *)
   | SBranch _ -> ()  (* dual is SSelect which is also guarded *)
+  | SSelectMulti _ -> ()  (* dual is SSelectMulti which is also guarded *)
   | SRec y body ->
       if y = x then ()
       else dual_preserves_guarded x body
   | SVar _ -> ()  (* is_guarded (SVar y) = (y <> x), same for dual *)
   | SEnd -> ()
 
-(* Dual preserves contractivity for branches *)
-val dual_preserves_contractive_branches : branches:list (label & session_type) ->
-  Lemma (requires is_contractive_branches branches = true)
-        (ensures is_contractive_branches (dual_branches branches) = true)
+(* Dual preserves contractivity for select branches *)
+val dual_preserves_contractive_select_branches : branches:list select_branch ->
+  Lemma (requires is_contractive_select_branches branches = true)
+        (ensures is_contractive_select_branches (dual_select_branches branches) = true)
         (decreases branches)
-let rec dual_preserves_contractive_branches branches =
+let rec dual_preserves_contractive_select_branches branches =
+  match branches with
+  | [] -> ()
+  | b :: rest ->
+      dual_preserves_contractive b.sb_cont;
+      dual_preserves_contractive_select_branches rest
+
+(* Dual preserves contractivity for branches *)
+and dual_preserves_contractive_branches (branches: list (label & session_type))
+    : Lemma (requires is_contractive_branches branches = true)
+            (ensures is_contractive_branches (dual_branches branches) = true)
+            (decreases branches) =
   match branches with
   | [] -> ()
   | (_, s) :: rest ->
@@ -1587,17 +1944,29 @@ and dual_preserves_contractive (s: session_type)
       dual_preserves_contractive body
   | SVar _ -> ()
   | SEnd -> ()
+  | SSelectMulti branches -> dual_preserves_contractive_select_branches branches
 
 (** ============================================================================
     DUAL PRESERVES FREE VARIABLES AND CLOSEDNESS
     ============================================================================ *)
 
-(* Dual preserves free variables in branches - the set of free variables is identical *)
-val dual_preserves_free_vars_branches : branches:list (label & session_type) ->
-  Lemma (ensures free_session_vars_branches (dual_branches branches) ==
-                 free_session_vars_branches branches)
+(* Dual preserves free variables in select branches - the set of free variables is identical *)
+val dual_preserves_free_vars_select_branches : branches:list select_branch ->
+  Lemma (ensures free_session_vars_select_branches (dual_select_branches branches) ==
+                 free_session_vars_select_branches branches)
         (decreases branches)
-let rec dual_preserves_free_vars_branches branches =
+let rec dual_preserves_free_vars_select_branches branches =
+  match branches with
+  | [] -> ()
+  | b :: rest ->
+      dual_preserves_free_vars b.sb_cont;
+      dual_preserves_free_vars_select_branches rest
+
+(* Dual preserves free variables in branches - the set of free variables is identical *)
+and dual_preserves_free_vars_branches (branches: list (label & session_type))
+    : Lemma (ensures free_session_vars_branches (dual_branches branches) ==
+                     free_session_vars_branches branches)
+            (decreases branches) =
   match branches with
   | [] -> ()
   | (_, s) :: rest ->
@@ -1616,6 +1985,7 @@ and dual_preserves_free_vars (s: session_type)
   | SRec _ body -> dual_preserves_free_vars body
   | SVar _ -> ()
   | SEnd -> ()
+  | SSelectMulti branches -> dual_preserves_free_vars_select_branches branches
 
 (* Dual preserves closedness: if s is closed, dual s is closed *)
 val dual_preserves_closed : s:session_type ->
@@ -1632,18 +2002,6 @@ let dual_preserves_wellformed s =
   (* is_wellformed s = is_closed_session s && is_contractive s *)
   dual_preserves_closed s;
   dual_preserves_contractive s
-
-(** ============================================================================
-    SESSION SUBTYPING REFLEXIVITY
-    ============================================================================ *)
-
-(* Session subtyping is reflexive *)
-val session_subtype_refl : s:session_type ->
-  Lemma (ensures session_subtype s s = true)
-        (decreases s)
-        [SMTPat (session_subtype s s)]
-let session_subtype_refl s =
-  session_eq_refl s
 
 (** ============================================================================
     SESSION SUBTYPING TRANSITIVITY
@@ -1682,9 +2040,10 @@ val session_eq_implies_subtype : s1:session_type -> s2:session_type ->
 let session_eq_implies_subtype s1 s2 =
   session_eq_implies_subtype_co s1 s2 [] default_subtype_fuel
 
-(* Helper: reflexivity - every type subtypes itself *)
+(* Session subtyping is reflexive *)
 val session_subtype_refl : s:session_type ->
   Lemma (ensures session_subtype s s = true)
+        [SMTPat (session_subtype s s)]
 let session_subtype_refl s =
   session_eq_refl s;
   session_eq_implies_subtype s s
@@ -1697,7 +2056,7 @@ let session_subtype_trans s1 s2 s3 =
   if session_eq s1 s3 then
     (* s1 = s3 structurally => s1 <: s3 by reflexivity *)
     session_eq_implies_subtype s1 s3
-  else if session_eq s1 s2 then
+  else if session_eq s1 s2 then begin
     (* s1 = s2 => we need s2 <: s3, which is the second premise
        Since s1 = s2 and session_subtype is sound, s1 <: s3. *)
     session_eq_sym s1 s2;
@@ -1707,7 +2066,8 @@ let session_subtype_trans s1 s2 s3 =
        Since s1 = s2 structurally, and s2 <: s3, we have s1 <: s3
        by substituting s1 for s2 in the subtype derivation. *)
     ()
-  else if session_eq s2 s3 then
+  end
+  else if session_eq s2 s3 then begin
     (* s2 = s3 => we need s1 <: s2, which is the first premise
        By session_eq s2 s3, s1 <: s2 implies s1 <: s3. *)
     session_eq_trans s1 s2 s3;
@@ -1715,6 +2075,7 @@ let session_subtype_trans s1 s2 s3 =
        However, from s2 = s3 and s1 <: s2, we get s1 <: s3
        by substituting s3 for s2 in the subtype derivation. *)
     ()
+  end
   else
     (* General case: rely on the soundness of the coinductive algorithm.
        The algorithm computes an underapproximation of semantic subtyping.
@@ -1831,10 +2192,21 @@ let dual_reverses_subtype s1 s2 =
     ============================================================================ *)
 
 (* The dual operation preserves branch list size *)
-val dual_preserves_branches_size : branches:list (label & session_type) ->
-  Lemma (ensures session_branches_size (dual_branches branches) = session_branches_size branches)
+(* The dual operation preserves select branch list size *)
+val dual_preserves_select_branches_size : branches:list select_branch ->
+  Lemma (ensures select_branches_size (dual_select_branches branches) = select_branches_size branches)
         (decreases branches)
-let rec dual_preserves_branches_size branches =
+let rec dual_preserves_select_branches_size branches =
+  match branches with
+  | [] -> ()
+  | b :: rest ->
+      dual_preserves_size b.sb_cont;
+      dual_preserves_select_branches_size rest
+
+(* The dual operation preserves branch list size *)
+and dual_preserves_branches_size (branches: list (label & session_type))
+    : Lemma (ensures session_branches_size (dual_branches branches) = session_branches_size branches)
+            (decreases branches) =
   match branches with
   | [] -> ()
   | (_, s) :: rest ->
@@ -1853,6 +2225,7 @@ and dual_preserves_size (s: session_type)
   | SRec _ body -> dual_preserves_size body
   | SVar _ -> ()
   | SEnd -> ()
+  | SSelectMulti branches -> dual_preserves_select_branches_size branches
 
 (** ============================================================================
     PRIORITY-BASED SESSION TYPES FOR DEADLOCK FREEDOM
@@ -1893,10 +2266,22 @@ let priority_lt (p1 p2: priority) : bool = p1 < p2
 let priority_le (p1 p2: priority) : bool = p1 <= p2
 
 (** ============================================================================
+    PRIORITIZED MULTI-CHANNEL SELECT TYPES
+    ============================================================================ *)
+
+(* Prioritized select branch for multi-channel select with priority annotations *)
+noeq type pri_select_branch = {
+  psb_channel : channel_name;
+  psb_action  : select_action;
+  psb_pri     : priority;       (* Priority of this branch *)
+  psb_cont    : pri_session
+}
+
+(** ============================================================================
     PRIORITIZED SESSION TYPE
     ============================================================================ *)
 
-(* Prioritized session type grammar - S^n ::= !^n t.S | ?^n t.S | (+)^n {l_i:S_i} | (&)^n {l_i:S_i} | end
+(* Prioritized session type grammar - S^n ::= !^n t.S | ?^n t.S | (+)^n {l_i:S_i} | (&)^n {l_i:S_i} | end | select^n {...}
 
    Each action carries a priority annotation that determines the ordering
    constraints for deadlock freedom.
@@ -1909,13 +2294,14 @@ let priority_le (p1 p2: priority) : bool = p1 <= p2
    - PriRec: Recursive prioritized session type (priority on recursive bound)
    - PriVar: Prioritized session type variable
    - PriEnd: Session termination (no priority needed)
+   - PriSelectMulti: Multi-channel select with priority annotations on each branch
 
    Note: The priority on an action represents when that action is "due" to happen.
    Lower priority numbers indicate actions that should happen first.
 
    N-ary labeled choice aligns with the non-prioritized session type structure.
 *)
-noeq type pri_session =
+and pri_session =
   | PriSend   : pri:priority -> payload:brrr_type -> continuation:pri_session -> pri_session
   | PriRecv   : pri:priority -> payload:brrr_type -> continuation:pri_session -> pri_session
   | PriSelect : pri:priority -> branches:list (label & pri_session) -> pri_session
@@ -1923,6 +2309,8 @@ noeq type pri_session =
   | PriRec    : var:session_var -> body:pri_session -> pri_session
   | PriVar    : var:session_var -> pri_session
   | PriEnd    : pri_session
+  (* Multi-channel select with prioritized branches *)
+  | PriSelectMulti : pri:priority -> branches:list pri_select_branch -> pri_session
 
 (** ============================================================================
     PRIORITIZED SESSION TYPE SIZE (for termination proofs)
@@ -1934,6 +2322,12 @@ let rec pri_session_branches_size (branches: list (label & pri_session)) : Tot n
   | [] -> 0
   | (_, s) :: rest -> pri_session_size s + pri_session_branches_size rest
 
+(* Compute structural size of prioritized select branches *)
+and pri_select_branches_size (branches: list pri_select_branch) : Tot nat (decreases branches) =
+  match branches with
+  | [] -> 0
+  | b :: rest -> pri_session_size b.psb_cont + pri_select_branches_size rest
+
 (* Compute structural size of prioritized session type *)
 and pri_session_size (s: pri_session) : Tot nat (decreases s) =
   match s with
@@ -1944,6 +2338,7 @@ and pri_session_size (s: pri_session) : Tot nat (decreases s) =
   | PriRec _ body -> 1 + pri_session_size body
   | PriVar _ -> 1
   | PriEnd -> 1
+  | PriSelectMulti _ branches -> 1 + pri_select_branches_size branches
 
 (** ============================================================================
     PRIORITY EXTRACTION
@@ -1957,6 +2352,7 @@ let rec first_priority (s: pri_session) : Tot (option priority) (decreases s) =
   | PriRecv p _ _ -> Some p
   | PriSelect p _ -> Some p
   | PriBranch p _ -> Some p
+  | PriSelectMulti p _ -> Some p
   | PriRec _ body -> first_priority body  (* Look through recursion *)
   | PriVar _ -> None
   | PriEnd -> None
@@ -1970,6 +2366,28 @@ let rec min_priority_branches (branches: list (label & pri_session))
       let m1 = min_priority s in
       let m2 = min_priority_branches rest in
       (match m1, m2 with
+       | Some p1, Some p2 -> Some (if p1 < p2 then p1 else p2)
+       | Some p1, None -> Some p1
+       | None, Some p2 -> Some p2
+       | None, None -> None)
+
+(* Get minimum priority across prioritized select branches *)
+and min_priority_pri_select_branches (branches: list pri_select_branch)
+    : Tot (option priority) (decreases branches) =
+  match branches with
+  | [] -> None
+  | b :: rest ->
+      let branch_pri = Some b.psb_pri in
+      let cont_min = min_priority b.psb_cont in
+      let rest_min = min_priority_pri_select_branches rest in
+      let this_min =
+        match branch_pri, cont_min with
+        | Some p1, Some p2 -> Some (if p1 < p2 then p1 else p2)
+        | Some p1, None -> Some p1
+        | None, Some p2 -> Some p2
+        | None, None -> None
+      in
+      (match this_min, rest_min with
        | Some p1, Some p2 -> Some (if p1 < p2 then p1 else p2)
        | Some p1, None -> Some p1
        | None, Some p2 -> Some p2
@@ -1996,6 +2414,10 @@ and min_priority (s: pri_session) : Tot (option priority) (decreases s) =
       (match min_priority_branches branches with
        | Some branch_min -> Some (if p < branch_min then p else branch_min)
        | None -> Some p)
+  | PriSelectMulti p branches ->
+      (match min_priority_pri_select_branches branches with
+       | Some branch_min -> Some (if p < branch_min then p else branch_min)
+       | None -> Some p)
   | PriRec _ body -> min_priority body
   | PriVar _ -> None
   | PriEnd -> None
@@ -2009,6 +2431,28 @@ let rec max_priority_branches (branches: list (label & pri_session))
       let m1 = max_priority s in
       let m2 = max_priority_branches rest in
       (match m1, m2 with
+       | Some p1, Some p2 -> Some (if p1 > p2 then p1 else p2)
+       | Some p1, None -> Some p1
+       | None, Some p2 -> Some p2
+       | None, None -> None)
+
+(* Get maximum priority across prioritized select branches *)
+and max_priority_pri_select_branches (branches: list pri_select_branch)
+    : Tot (option priority) (decreases branches) =
+  match branches with
+  | [] -> None
+  | b :: rest ->
+      let branch_pri = Some b.psb_pri in
+      let cont_max = max_priority b.psb_cont in
+      let rest_max = max_priority_pri_select_branches rest in
+      let this_max =
+        match branch_pri, cont_max with
+        | Some p1, Some p2 -> Some (if p1 > p2 then p1 else p2)
+        | Some p1, None -> Some p1
+        | None, Some p2 -> Some p2
+        | None, None -> None
+      in
+      (match this_max, rest_max with
        | Some p1, Some p2 -> Some (if p1 > p2 then p1 else p2)
        | Some p1, None -> Some p1
        | None, Some p2 -> Some p2
@@ -2034,6 +2478,10 @@ and max_priority (s: pri_session) : Tot (option priority) (decreases s) =
       (match max_priority_branches branches with
        | Some branch_max -> Some (if p > branch_max then p else branch_max)
        | None -> Some p)
+  | PriSelectMulti p branches ->
+      (match max_priority_pri_select_branches branches with
+       | Some branch_max -> Some (if p > branch_max then p else branch_max)
+       | None -> Some p)
   | PriRec _ body -> max_priority body
   | PriVar _ -> None
   | PriEnd -> None
@@ -2045,6 +2493,13 @@ let rec all_priorities_branches (branches: list (label & pri_session))
   | [] -> []
   | (_, s) :: rest -> all_priorities s @ all_priorities_branches rest
 
+(* Collect all priorities from prioritized select branches *)
+and all_priorities_pri_select_branches (branches: list pri_select_branch)
+    : Tot (list priority) (decreases branches) =
+  match branches with
+  | [] -> []
+  | b :: rest -> b.psb_pri :: all_priorities b.psb_cont @ all_priorities_pri_select_branches rest
+
 (* Collect all priorities used in a session type *)
 and all_priorities (s: pri_session) : Tot (list priority) (decreases s) =
   match s with
@@ -2052,6 +2507,7 @@ and all_priorities (s: pri_session) : Tot (list priority) (decreases s) =
   | PriRecv p _ cont -> p :: all_priorities cont
   | PriSelect p branches -> p :: all_priorities_branches branches
   | PriBranch p branches -> p :: all_priorities_branches branches
+  | PriSelectMulti p branches -> p :: all_priorities_pri_select_branches branches
   | PriRec _ body -> all_priorities body
   | PriVar _ -> []
   | PriEnd -> []
@@ -2137,6 +2593,18 @@ let rec pri_dual_branches (branches: list (label & pri_session))
   | [] -> []
   | (lbl, s) :: rest -> (lbl, pri_dual s) :: pri_dual_branches rest
 
+(* Compute dual of prioritized select branches *)
+and pri_dual_select_branches (branches: list pri_select_branch)
+    : Tot (list pri_select_branch) (decreases branches) =
+  match branches with
+  | [] -> []
+  | b :: rest ->
+      { psb_channel = b.psb_channel;
+        psb_action = dual_action b.psb_action;
+        psb_pri = b.psb_pri;
+        psb_cont = pri_dual b.psb_cont }
+      :: pri_dual_select_branches rest
+
 (* Compute dual of prioritized session type.
    The dual swaps send/receive and select/branch while preserving priorities.
 
@@ -2150,6 +2618,7 @@ and pri_dual (s: pri_session) : Tot pri_session (decreases s) =
   | PriRecv p t cont -> PriSend p t (pri_dual cont)
   | PriSelect p branches -> PriBranch p (pri_dual_branches branches)
   | PriBranch p branches -> PriSelect p (pri_dual_branches branches)
+  | PriSelectMulti p branches -> PriSelectMulti p (pri_dual_select_branches branches)
   | PriRec x body -> PriRec x (pri_dual body)
   | PriVar x -> PriVar x
   | PriEnd -> PriEnd
@@ -2163,6 +2632,17 @@ let rec pri_dual_branches_involutive (branches: list (label & pri_session))
       pri_dual_involutive s;
       pri_dual_branches_involutive rest
 
+(* Theorem: Priority dual of select branches is an involution *)
+and pri_dual_select_branches_involutive (branches: list pri_select_branch)
+    : Lemma (ensures pri_dual_select_branches (pri_dual_select_branches branches) == branches)
+            (decreases branches) =
+  match branches with
+  | [] -> ()
+  | b :: rest ->
+      dual_action_involutive b.psb_action;
+      pri_dual_involutive b.psb_cont;
+      pri_dual_select_branches_involutive rest
+
 (* Theorem: Priority dual is an involution - pri_dual(pri_dual(S)) == S *)
 and pri_dual_involutive (s: pri_session)
     : Lemma (ensures pri_dual (pri_dual s) == s) (decreases s) =
@@ -2171,6 +2651,7 @@ and pri_dual_involutive (s: pri_session)
   | PriRecv _ _ cont -> pri_dual_involutive cont
   | PriSelect _ branches -> pri_dual_branches_involutive branches
   | PriBranch _ branches -> pri_dual_branches_involutive branches
+  | PriSelectMulti _ branches -> pri_dual_select_branches_involutive branches
   | PriRec _ body -> pri_dual_involutive body
   | PriVar _ -> ()
   | PriEnd -> ()
@@ -2185,6 +2666,17 @@ let rec pri_dual_preserves_min_priority_branches (branches: list (label & pri_se
       pri_dual_preserves_min_priority s;
       pri_dual_preserves_min_priority_branches rest
 
+(* Dual preserves min_priority of prioritized select branches *)
+and pri_dual_preserves_min_priority_pri_select_branches (branches: list pri_select_branch)
+    : Lemma (ensures min_priority_pri_select_branches (pri_dual_select_branches branches) ==
+                     min_priority_pri_select_branches branches)
+            (decreases branches) =
+  match branches with
+  | [] -> ()
+  | b :: rest ->
+      pri_dual_preserves_min_priority b.psb_cont;
+      pri_dual_preserves_min_priority_pri_select_branches rest
+
 (* Dual preserves min_priority *)
 and pri_dual_preserves_min_priority (s: pri_session)
     : Lemma (ensures min_priority (pri_dual s) == min_priority s) (decreases s) =
@@ -2193,6 +2685,7 @@ and pri_dual_preserves_min_priority (s: pri_session)
   | PriRecv _ _ cont -> pri_dual_preserves_min_priority cont
   | PriSelect _ branches -> pri_dual_preserves_min_priority_branches branches
   | PriBranch _ branches -> pri_dual_preserves_min_priority_branches branches
+  | PriSelectMulti _ branches -> pri_dual_preserves_min_priority_pri_select_branches branches
   | PriRec _ body -> pri_dual_preserves_min_priority body
   | PriVar _ -> ()
   | PriEnd -> ()

@@ -2,7 +2,7 @@
  * BrrrLang.Core.MultipartySession - Interface
  *
  * Public interface for multiparty session types.
- * Following HACL*/EverParse patterns for .fsti/.fst separation.
+ * Following HACL-star/EverParse patterns for .fsti/.fst separation.
  *
  * This interface exports:
  * - Global and local type definitions

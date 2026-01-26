@@ -1786,9 +1786,9 @@ noeq type atomic_work_counter = {
 }
 
 (* Create work counter *)
-let create_work_counter (total: nat) : atomic_work_counter = {
+let create_work_counter (n_total: nat) : atomic_work_counter = {
   awc_current = make_atomic 0;
-  awc_total = total
+  awc_total = n_total
 }
 
 (* Atomically claim next work item.

@@ -161,11 +161,13 @@ impl ParamType {
     }
 
     /// Create an affine parameter (used at most once)
+    /// Note: Affine semantics (can drop) is tracked via ExtendedMode.
+    /// Base Mode is One since the resource starts with one available use.
     pub fn affine(name: Option<Spur>, ty: BrrrType) -> Self {
         Self {
             name,
             ty,
-            mode: Mode::Many,
+            mode: Mode::One, // Affine starts as One, can transition to Zero (dropped)
         }
     }
 
@@ -219,7 +221,9 @@ mod tests {
         let linear = ParamType::linear(None, BrrrType::STRING);
         assert_eq!(linear.mode, Mode::One);
 
+        // Affine uses Mode::One as base mode (starts with one use available)
+        // The "affine" property (can drop) is tracked via ExtendedMode
         let affine = ParamType::affine(None, BrrrType::STRING);
-        assert_eq!(affine.mode, Mode::Many);
+        assert_eq!(affine.mode, Mode::One);
     }
 }

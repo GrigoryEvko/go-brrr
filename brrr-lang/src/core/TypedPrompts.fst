@@ -273,10 +273,10 @@ val prompt_fresh :
   lin1:cont_linearity ->
   answer_ty2:brrr_type ->
   lin2:cont_linearity ->
-  Lemma (ensures
+  Lemma (ensures (
     let fp1 = newPrompt st1 answer_ty1 lin1 in
     let fp2 = newPrompt fp1.fp_state answer_ty2 lin2 in
-    fp1.fp_index <> fp2.fp_index)
+    fp1.fp_index <> fp2.fp_index))
 
 let prompt_fresh st1 answer_ty1 lin1 answer_ty2 lin2 =
   (* Proof: fp1.fp_index = st1.ps_next_index

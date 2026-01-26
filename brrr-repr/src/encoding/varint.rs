@@ -115,6 +115,7 @@ pub fn decode_varint_from<R: Read>(reader: &mut R) -> Result<u64, DecodeError> {
 
 /// Compute the number of bytes needed to encode a value.
 #[inline]
+#[allow(dead_code)] // API completeness - useful for pre-allocation
 pub const fn varint_size(value: u64) -> usize {
     if value == 0 {
         return 1;

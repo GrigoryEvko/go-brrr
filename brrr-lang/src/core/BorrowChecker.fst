@@ -16,7 +16,7 @@
  *)
 module BorrowChecker
 
-(* Z3 solver options for SMT tractability - following HACL*/EverParse patterns *)
+(* Z3 solver options for SMT tractability - following HACL-star/EverParse patterns *)
 #set-options "--z3rlimit 50 --fuel 0 --ifuel 0"
 
 open FStar.List.Tot
@@ -466,13 +466,42 @@ let find_loan (id: loan_id) (st: borrow_state) : option loan =
     PATTERN BINDING EXTRACTION
     ============================================================================ *)
 
+(* Pattern size for termination measure - defined locally for BorrowChecker *)
+let rec bc_pattern_size (p: pattern) : Tot nat (decreases p) =
+  match p.loc_value with
+  | PatWild | PatVar _ | PatLit _ -> 1
+  | PatRest _ -> 1
+  | PatTuple pats -> 1 + bc_pattern_list_size pats
+  | PatStruct _ fps -> 1 + bc_field_pattern_list_size fps
+  | PatVariant _ _ pats -> 1 + bc_pattern_list_size pats
+  | PatOr p1 p2 -> 1 + bc_pattern_size p1 + bc_pattern_size p2
+  | PatGuard p' _ -> 1 + bc_pattern_size p'
+  | PatRef p' -> 1 + bc_pattern_size p'
+  | PatBox p' -> 1 + bc_pattern_size p'
+  | PatAs p' _ -> 1 + bc_pattern_size p'
+
+and bc_pattern_list_size (pats: list pattern) : Tot nat (decreases pats) =
+  match pats with
+  | [] -> 0
+  | p :: rest -> bc_pattern_size p + bc_pattern_list_size rest
+
+and bc_field_pattern_list_size (fps: list (string & pattern)) : Tot nat (decreases fps) =
+  match fps with
+  | [] -> 0
+  | (_, p) :: rest -> bc_pattern_size p + bc_field_pattern_list_size rest
+
 (* Extract all variable bindings from a pattern with their types *)
 let rec pattern_bindings (p: pattern) (default_ty: brrr_type)
-    : Tot (list (var_id & brrr_type)) (decreases p) =
-  match p with
+    : Tot (list (var_id & brrr_type)) (decreases bc_pattern_size p) =
+  match p.loc_value with
   | PatWild -> []  (* Wildcard binds nothing *)
   | PatVar x -> [(x, default_ty)]  (* Single variable binding *)
   | PatLit _ -> []  (* Literals bind nothing *)
+  | PatRest None -> []  (* ...  binds nothing *)
+  | PatRest (Some x) -> [(x, default_ty)]  (* ...rest binds rest *)
+  | PatAs p' x ->
+      (* p @ x - binds x to entire match, plus inner bindings *)
+      (x, default_ty) :: pattern_bindings p' default_ty
   | PatTuple ps ->
       (* Tuple pattern - recursively extract from each sub-pattern *)
       pattern_bindings_list ps default_ty
@@ -482,7 +511,7 @@ let rec pattern_bindings (p: pattern) (default_ty: brrr_type)
   | PatVariant _ _ ps ->
       (* Variant pattern - extract from payload patterns *)
       pattern_bindings_list ps default_ty
-  | PatOr p1 p2 ->
+  | PatOr p1 _ ->
       (* Or pattern - both branches must bind same variables *)
       (* Take bindings from first branch (checker should verify they match) *)
       pattern_bindings p1 default_ty
@@ -497,14 +526,14 @@ let rec pattern_bindings (p: pattern) (default_ty: brrr_type)
       pattern_bindings p' default_ty
 
 and pattern_bindings_list (ps: list pattern) (default_ty: brrr_type)
-    : Tot (list (var_id & brrr_type)) (decreases ps) =
+    : Tot (list (var_id & brrr_type)) (decreases bc_pattern_list_size ps) =
   match ps with
   | [] -> []
   | p :: rest ->
       pattern_bindings p default_ty @ pattern_bindings_list rest default_ty
 
 and pattern_bindings_struct_fields (fields: list (string & pattern)) (default_ty: brrr_type)
-    : Tot (list (var_id & brrr_type)) (decreases fields) =
+    : Tot (list (var_id & brrr_type)) (decreases bc_field_pattern_list_size fields) =
   match fields with
   | [] -> []
   | (_, p) :: rest ->
@@ -838,7 +867,7 @@ let rec borrow_check_expr (fuel: nat) (e: expr) (st: borrow_state)
     : Tot bc_result (decreases fuel) =
   if fuel = 0 then None  (* Out of fuel *)
   else
-    match e with
+    match e.loc_value with
     (* Literals don't affect borrow state *)
     | ELit _ -> Some st
 
@@ -860,7 +889,7 @@ let rec borrow_check_expr (fuel: nat) (e: expr) (st: borrow_state)
         (match op with
          | OpRef ->
              (* &e - create shared borrow *)
-             (match e' with
+             (match e'.loc_value with
               | EVar x ->
                   (match begin_shared_borrow x st with
                    | Some (_, st') -> Some st'
@@ -870,7 +899,7 @@ let rec borrow_check_expr (fuel: nat) (e: expr) (st: borrow_state)
                   borrow_check_expr (fuel - 1) e' st)
          | OpRefMut ->
              (* &mut e - create exclusive borrow *)
-             (match e' with
+             (match e'.loc_value with
               | EVar x ->
                   (match begin_exclusive_borrow x st with
                    | Some (_, st') -> Some st'
@@ -962,7 +991,9 @@ let rec borrow_check_expr (fuel: nat) (e: expr) (st: borrow_state)
                 - PatOr p1 p2: variables from either branch (must match)
                 - PatGuard p _: variables from guarded pattern
                 - PatRef/PatBox p: variables from inner pattern
-                - PatWild/PatLit: no variables bound *)
+                - PatAs p x: binds x to entire match, plus inner bindings
+                - PatRest (Some x): binds rest to x in slice patterns
+                - PatWild/PatLit/PatRest None: no variables bound *)
              let default_ty = match ty_opt with Some t -> t | None -> t_dynamic in
              let st2 = add_pattern_bindings pat default_ty MOne st1 in
              let st3 = enter_scope st2 in
@@ -985,7 +1016,7 @@ let rec borrow_check_expr (fuel: nat) (e: expr) (st: borrow_state)
 
     (* Assignment *)
     | EAssign lhs rhs ->
-        (match lhs with
+        (match lhs.loc_value with
          | EVar x ->
              (* Direct assignment to variable *)
              (match find_var x st with
@@ -1036,7 +1067,7 @@ let rec borrow_check_expr (fuel: nat) (e: expr) (st: borrow_state)
 
     (* Explicit borrow *)
     | EBorrow e' ->
-        (match e' with
+        (match e'.loc_value with
          | EVar x ->
              (match begin_shared_borrow x st with
               | Some (_, st') -> Some st'
@@ -1045,7 +1076,7 @@ let rec borrow_check_expr (fuel: nat) (e: expr) (st: borrow_state)
 
     (* Explicit mutable borrow *)
     | EBorrowMut e' ->
-        (match e' with
+        (match e'.loc_value with
          | EVar x ->
              (match begin_exclusive_borrow x st with
               | Some (_, st') -> Some st'
@@ -1054,13 +1085,13 @@ let rec borrow_check_expr (fuel: nat) (e: expr) (st: borrow_state)
 
     (* Explicit move *)
     | EMove e' ->
-        (match e' with
+        (match e'.loc_value with
          | EVar x -> check_move x st
          | _ -> borrow_check_expr (fuel - 1) e' st)
 
     (* Explicit drop *)
     | EDrop e' ->
-        (match e' with
+        (match e'.loc_value with
          | EVar x -> check_drop x st
          | _ -> borrow_check_expr (fuel - 1) e' st)
 
@@ -1082,13 +1113,13 @@ let rec borrow_check_expr (fuel: nat) (e: expr) (st: borrow_state)
          | None -> None)
 
     (* Loop constructs *)
-    | ELoop body ->
+    | ELoop _ body ->
         let st1 = enter_scope st in
         (match borrow_check_expr (fuel - 1) body st1 with
          | Some st2 -> exit_scope st2
          | None -> None)
 
-    | EWhile cond body ->
+    | EWhile _ cond body ->
         (match borrow_check_expr (fuel - 1) cond st with
          | Some st1 ->
              let st2 = enter_scope st1 in
@@ -1097,7 +1128,7 @@ let rec borrow_check_expr (fuel: nat) (e: expr) (st: borrow_state)
               | None -> None)
          | None -> None)
 
-    | EFor x iter body ->
+    | EFor _ x iter body ->
         (match borrow_check_expr (fuel - 1) iter st with
          | Some st1 ->
              let st2 = add_var x t_dynamic MOne st1 in
@@ -1108,12 +1139,12 @@ let rec borrow_check_expr (fuel: nat) (e: expr) (st: borrow_state)
          | None -> None)
 
     (* Control flow *)
-    | EBreak opt_e ->
+    | EBreak _ opt_e ->
         (match opt_e with
          | Some e' -> borrow_check_expr (fuel - 1) e' st
          | None -> Some st)
 
-    | EContinue -> Some st
+    | EContinue _ -> Some st
 
     | EReturn opt_e ->
         (match opt_e with
@@ -1207,6 +1238,15 @@ let rec borrow_check_expr (fuel: nat) (e: expr) (st: borrow_state)
 
     (* Global reference - always available *)
     | EGlobal _ -> Some st
+
+    (* Async/Spawn - check inner expression *)
+    | EAsync e' -> borrow_check_expr (fuel - 1) e' st
+    | ESpawn e' -> borrow_check_expr (fuel - 1) e' st
+
+    (* Delimited continuations - check expressions *)
+    | EResume _ e' -> borrow_check_expr (fuel - 1) e' st
+    | EReset _ e' -> borrow_check_expr (fuel - 1) e' st
+    | EShift _ _ e' -> borrow_check_expr (fuel - 1) e' st
 
     (* Holes and errors *)
     | EHole -> Some st

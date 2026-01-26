@@ -91,16 +91,6 @@ let taint_kind_eq (k1 k2: taint_kind) : bool =
   | TkCustom s1, TkCustom s2 -> s1 = s2
   | _, _ -> false
 
-(** taint_kind_eq is reflexive *)
-let taint_kind_eq_refl (k: taint_kind)
-    : Lemma (ensures taint_kind_eq k k = true)
-            [SMTPat (taint_kind_eq k k)] =
-  match k with
-  | TkSQLi -> () | TkXSS -> () | TkCMDi -> () | TkPathTraversal -> ()
-  | TkSSRF -> () | TkLDAPi -> () | TkXMLi -> () | TkHeaderi -> ()
-  | TkLogi -> () | TkTemplatei -> () | TkDeserial -> () | TkRedirect -> ()
-  | TkCustom _ -> ()
-
 (** ============================================================================
     SECURITY LABELS
     ============================================================================
@@ -281,6 +271,16 @@ let sec_label_meet (l1 l2: sec_label) : sec_label = {
     SECURITY LABEL LATTICE LAWS
     ============================================================================ *)
 
+(** taint_kind_eq is reflexive *)
+let taint_kind_eq_refl (k: taint_kind)
+    : Lemma (ensures taint_kind_eq k k = true)
+            [SMTPat (taint_kind_eq k k)] =
+  match k with
+  | TkSQLi -> () | TkXSS -> () | TkCMDi -> () | TkPathTraversal -> ()
+  | TkSSRF -> () | TkLDAPi -> () | TkXMLi -> () | TkHeaderi -> ()
+  | TkLogi -> () | TkTemplatei -> () | TkDeserial -> () | TkRedirect -> ()
+  | TkCustom _ -> ()
+
 (** conf_leq is reflexive *)
 let conf_leq_refl (c: confidentiality)
     : Lemma (ensures conf_leq c c = true)
@@ -373,29 +373,7 @@ let sec_label_leq_trans (l1 l2 l3: sec_label)
   taint_set_subset_trans l1.taints l2.taints l3.taints
 
 (** ============================================================================
-    ANTISYMMETRY LEMMAS
-    ============================================================================ *)
-
-(** conf_leq is antisymmetric *)
-let conf_leq_antisym (c1 c2: confidentiality)
-    : Lemma (requires conf_leq c1 c2 = true /\ conf_leq c2 c1 = true)
-            (ensures c1 = c2) =
-  match c1, c2 with
-  | CPublic, CPublic -> ()
-  | CSecret, CSecret -> ()
-  | _, _ -> ()
-
-(** integ_leq is antisymmetric *)
-let integ_leq_antisym (i1 i2: integrity)
-    : Lemma (requires integ_leq i1 i2 = true /\ integ_leq i2 i1 = true)
-            (ensures i1 = i2) =
-  match i1, i2 with
-  | ITrusted, ITrusted -> ()
-  | IUntrusted, IUntrusted -> ()
-  | _, _ -> ()
-
-(** ============================================================================
-    HELPER LEMMAS FOR TAINT SET OPERATIONS
+    TAINT SET UNION HELPER LEMMAS
     ============================================================================ *)
 
 #push-options "--fuel 1 --ifuel 1"
@@ -423,6 +401,47 @@ let rec taint_set_union_includes_right (k: taint_kind) (ks1 ks2: taint_set)
       if taint_in_set k' ks2 then taint_set_union_includes_right k rest ks2
       else taint_set_union_includes_right k rest ks2
 
+(** taint_set_union preserves left operand as subset: ts1 subset (union ts1 ts2)
+ *  This is the set-theoretic property: A subseteq (A union B)
+ *)
+let rec taint_set_union_subset_left (ts1 ts2: taint_set)
+    : Lemma (ensures taint_set_subset ts1 (taint_set_union ts1 ts2) = true)
+            (decreases ts1) =
+  match ts1 with
+  | [] -> ()
+  | k :: rest ->
+      taint_kind_eq_refl k;
+      taint_set_union_includes_left k ts1 ts2;
+      taint_set_union_subset_left rest ts2
+#pop-options
+
+(** ============================================================================
+    ANTISYMMETRY LEMMAS
+    ============================================================================ *)
+
+(** conf_leq is antisymmetric *)
+let conf_leq_antisym (c1 c2: confidentiality)
+    : Lemma (requires conf_leq c1 c2 = true /\ conf_leq c2 c1 = true)
+            (ensures c1 = c2) =
+  match c1, c2 with
+  | CPublic, CPublic -> ()
+  | CSecret, CSecret -> ()
+  | _, _ -> ()
+
+(** integ_leq is antisymmetric *)
+let integ_leq_antisym (i1 i2: integrity)
+    : Lemma (requires integ_leq i1 i2 = true /\ integ_leq i2 i1 = true)
+            (ensures i1 = i2) =
+  match i1, i2 with
+  | ITrusted, ITrusted -> ()
+  | IUntrusted, IUntrusted -> ()
+  | _, _ -> ()
+
+(** ============================================================================
+    HELPER LEMMAS FOR TAINT SET OPERATIONS
+    ============================================================================ *)
+
+#push-options "--fuel 1 --ifuel 1"
 (** taint_set_union is subset of both operands joined *)
 let rec taint_set_union_subset (ks1 ks2 ks3: taint_set)
     : Lemma (requires taint_set_subset ks1 ks3 = true /\ taint_set_subset ks2 ks3 = true)
@@ -780,18 +799,13 @@ let rec taint_set_union_membership (k: taint_kind) (ks1 ks2: taint_set)
       else ()
 #pop-options
 
-(** sec_label_join is commutative up to equivalence *)
+(** sec_label_join is commutative up to set equivalence *)
 let sec_label_join_comm_equiv (l1 l2: sec_label)
-    : Lemma (ensures sec_label_equiv (sec_label_join l1 l2) (sec_label_join l2 l1) = true) =
-  conf_join_comm l1.confidentiality l2.confidentiality;
-  integ_join_comm l1.integrity l2.integrity;
-  taint_set_union_equiv_comm l1.taints l2.taints
-
-(** sec_label_join commutativity for ordering: both directions hold *)
-let sec_label_join_comm_leq (l1 l2: sec_label)
     : Lemma (ensures sec_label_leq (sec_label_join l1 l2) (sec_label_join l2 l1) = true /\
                      sec_label_leq (sec_label_join l2 l1) (sec_label_join l1 l2) = true) =
-  sec_label_join_comm_equiv l1 l2;
+  conf_join_comm l1.confidentiality l2.confidentiality;
+  integ_join_comm l1.integrity l2.integrity;
+  taint_set_union_equiv_comm l1.taints l2.taints;
   sec_label_equiv_leq (sec_label_join l1 l2) (sec_label_join l2 l1)
 
 (** conf_join is idempotent *)
@@ -841,18 +855,13 @@ let integ_meet_comm (i1 i2: integrity)
   | IUntrusted, ITrusted -> ()
   | IUntrusted, IUntrusted -> ()
 
-(** sec_label_meet is commutative up to equivalence *)
+(** sec_label_meet is commutative up to set equivalence *)
 let sec_label_meet_comm_equiv (l1 l2: sec_label)
-    : Lemma (ensures sec_label_equiv (sec_label_meet l1 l2) (sec_label_meet l2 l1) = true) =
-  conf_meet_comm l1.confidentiality l2.confidentiality;
-  integ_meet_comm l1.integrity l2.integrity;
-  taint_set_intersect_equiv_comm l1.taints l2.taints
-
-(** sec_label_meet commutativity for ordering: both directions hold *)
-let sec_label_meet_comm_leq (l1 l2: sec_label)
     : Lemma (ensures sec_label_leq (sec_label_meet l1 l2) (sec_label_meet l2 l1) = true /\
                      sec_label_leq (sec_label_meet l2 l1) (sec_label_meet l1 l2) = true) =
-  sec_label_meet_comm_equiv l1 l2;
+  conf_meet_comm l1.confidentiality l2.confidentiality;
+  integ_meet_comm l1.integrity l2.integrity;
+  taint_set_intersect_equiv_comm l1.taints l2.taints;
   sec_label_equiv_leq (sec_label_meet l1 l2) (sec_label_meet l2 l1)
 
 (** conf_meet is idempotent *)
@@ -982,6 +991,28 @@ noeq type sec_func_type = {
   sf_role        : sec_role;
   sf_is_unsafe   : bool;
 }
+
+(** ============================================================================
+    PC (PROGRAM COUNTER) LABEL
+    ============================================================================
+
+    The PC label tracks the security level of the current control flow.
+    It prevents implicit flows through conditionals.
+    ============================================================================ *)
+
+(** PC label is a security label *)
+type pc_label = sec_label
+
+(** Initial PC (public, trusted) *)
+let initial_pc : pc_label = sec_public_trusted
+
+(** Raise PC when entering branch guarded by secret/tainted condition *)
+let raise_pc (pc: pc_label) (guard_label: sec_label) : pc_label =
+  sec_label_join pc guard_label
+
+(** Check if assignment is allowed: pc join rhs_label <= lhs_label *)
+let check_flow (pc: pc_label) (rhs: sec_label) (lhs: sec_label) : bool =
+  sec_label_leq (sec_label_join pc rhs) lhs
 
 (** ============================================================================
     TAINT EFFECTS
@@ -1147,28 +1178,6 @@ let rec lookup_sec_ctx (x: string) (ctx: sec_ctx) : option sec_type =
   | (y, st) :: rest ->
       if x = y then Some st
       else lookup_sec_ctx x rest
-
-(** ============================================================================
-    PC (PROGRAM COUNTER) LABEL
-    ============================================================================
-
-    The PC label tracks the security level of the current control flow.
-    It prevents implicit flows through conditionals.
-    ============================================================================ *)
-
-(** PC label is a security label *)
-type pc_label = sec_label
-
-(** Initial PC (public, trusted) *)
-let initial_pc : pc_label = sec_public_trusted
-
-(** Raise PC when entering branch guarded by secret/tainted condition *)
-let raise_pc (pc: pc_label) (guard_label: sec_label) : pc_label =
-  sec_label_join pc guard_label
-
-(** Check if assignment is allowed: pc join rhs_label <= lhs_label *)
-let check_flow (pc: pc_label) (rhs: sec_label) (lhs: sec_label) : bool =
-  sec_label_leq (sec_label_join pc rhs) lhs
 
 (** ============================================================================
     TAINT REMOVAL (Sanitization)

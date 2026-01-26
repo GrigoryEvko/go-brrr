@@ -162,6 +162,7 @@ let value_type_name (v: value) : option type_name =
   | VRef _ -> Some "__builtin_ref"
   | VRefMut _ -> Some "__builtin_ref_mut"
   | VClosure _ -> Some "__builtin_closure"
+  | VBoundMethod recv _ -> value_type_name recv  (* Bound method inherits receiver's type *)
   | VUnit -> None (* Unit has no methods *)
 
 (** ============================================================================
@@ -1076,6 +1077,20 @@ and eval_expr (fuel: nat) (e: expr) (st: eval_state)
     (* Continue - with optional label *)
     | EContinue opt_label -> (RCont opt_label, st)
 
+    (* Goto - jump to a labeled statement *)
+    | EGoto lbl -> (RGoto lbl, st)
+
+    (* Labeled statement - executes body, catches RGoto to this label *)
+    | ELabeled lbl body ->
+        let (r, st') = eval_expr (fuel - 1) body st in
+        (match r with
+         | RGoto target_lbl when target_lbl = lbl ->
+             (* Goto to this label caught - for forward jumps, execution continues.
+                For backward jumps in loops, caller handles re-evaluation.
+                Here we return unit as the label point has been reached. *)
+             (ROk VUnit, st')
+         | _ -> (r, st'))  (* All other results propagate (including other gotos) *)
+
     (* Return *)
     | EReturn opt_e ->
         (match opt_e with
@@ -1167,6 +1182,62 @@ and eval_expr (fuel: nat) (e: expr) (st: eval_state)
         (match lookup name st.es_globals with
          | Some v -> (ROk v, st)
          | None -> (RErr (VString ("unbound global: " ^ name)), st))
+
+    (* Method reference (bound method) - creates a closure capturing the receiver.
+       obj.method (without calling) returns a function that takes the remaining args. *)
+    | EMethodRef receiver method_name ->
+        let (r_recv, st1) = eval_expr (fuel - 1) receiver st in
+        (match r_recv with
+         | ROk recv_val ->
+             (match value_type_name recv_val with
+              | None ->
+                  (RErr (VString "cannot get method reference from value without type"), st1)
+              | Some ty_name ->
+                  (match lookup_method_entry ty_name method_name st1.es_methods with
+                   | None ->
+                       (RErr (VString ("unknown method: " ^ ty_name ^ "::" ^ method_name)), st1)
+                   | Some method_cid ->
+                       (* Create a bound method: closure that captures receiver *)
+                       (ROk (VBoundMethod recv_val method_cid), st1)))
+         | _ -> (r_recv, st1))
+
+    (* Type method reference (unbound method) - T::method returns function taking T as first arg.
+       This is the static method lookup, returns the underlying method closure. *)
+    | ETypeMethod type_name method_name ->
+        (match lookup_method_entry type_name method_name st.es_methods with
+         | None ->
+             (RErr (VString ("unknown type method: " ^ type_name ^ "::" ^ method_name)), st)
+         | Some method_cid ->
+             (ROk (VClosure method_cid), st))
+
+    (* Length intrinsic - returns the length of array/string/tuple.
+       Returns an integer value with i64 type for sufficient range. *)
+    | ELen e' ->
+        let (r, st') = eval_expr (fuel - 1) e' st in
+        (match r with
+         | ROk (VArray vs) -> (ROk (VInt (length vs) i64), st')
+         | ROk (VString s) -> (ROk (VInt (String.length s) i64), st')
+         | ROk (VTuple vs) -> (ROk (VInt (length vs) i64), st')
+         | ROk (VStruct _ fs) -> (ROk (VInt (length fs) i64), st')
+         | ROk _ -> (RErr (VString "len: unsupported type (expected array, string, tuple, or struct)"), st')
+         | _ -> (r, st'))
+
+    (* Capacity intrinsic - returns capacity of array/tuple.
+       For fixed-size collections, capacity equals length. *)
+    | ECap e' ->
+        let (r, st') = eval_expr (fuel - 1) e' st in
+        (match r with
+         | ROk (VArray vs) ->
+             (* Array capacity equals its length *)
+             (ROk (VInt (length vs) i64), st')
+         | ROk (VTuple vs) ->
+             (* Tuple capacity equals its length *)
+             (ROk (VInt (length vs) i64), st')
+         | ROk (VString s) ->
+             (* String capacity equals its length *)
+             (ROk (VInt (String.length s) i64), st')
+         | ROk _ -> (RErr (VString "cap: unsupported type (expected array, tuple, or string)"), st')
+         | _ -> (r, st'))
 
     (* =========================================================================
        EFFECT OPERATIONS - Part V: Async/Await, Generators, Effect Handlers
@@ -1506,7 +1577,8 @@ and eval_exprs (fuel: nat) (es: list expr) (st: eval_state)
          | RRet v -> (RRet v, st1)
          | RYield v -> (RYield v, st1)
          | RPerform op args -> (RPerform op args, st1)
-         | RAbort p v -> (RAbort p v, st1))
+         | RAbort p v -> (RAbort p v, st1)
+         | RGoto lbl -> (RGoto lbl, st1))
 
 (* Evaluate field expressions *)
 and eval_field_exprs (fuel: nat) (fields: list (string & expr)) (st: eval_state)
@@ -1530,7 +1602,8 @@ and eval_field_exprs (fuel: nat) (fields: list (string & expr)) (st: eval_state)
          | RRet v -> (RRet v, st1)
          | RYield v -> (RYield v, st1)
          | RPerform op args -> (RPerform op args, st1)
-         | RAbort p v -> (RAbort p v, st1))
+         | RAbort p v -> (RAbort p v, st1)
+         | RGoto lbl -> (RGoto lbl, st1))
 
 (* Evaluate match arms - uses context-aware pattern matching for guards and refs.
    IMPORTANT: Pattern bindings are scoped to the arm body. After evaluating the body,
@@ -1740,6 +1813,24 @@ and match_pattern_with_context (fuel: nat) (p: pattern) (v: value) (st: eval_sta
          | Some x -> (Some [(x, v)], st)  (* Bind entire value *)
          | None -> (Some [], st))  (* Ignore *)
 
+    (* PatType: Runtime type pattern - matches if value's type matches expected type.
+       This enables type-directed pattern matching like:
+         match x { _: int => ..., _: string => ... }
+       or with binding:
+         match x { n: int => use(n), s: string => use(s) }
+
+       Semantics:
+       - Check if runtime type of v is compatible with expected_ty
+       - If match succeeds and binding is Some x, bind x to v with narrowed type
+       - If match fails, return None *)
+    | PatType expected_ty opt_var ->
+        let v_ty = value_runtime_type v in
+        if subtype v_ty expected_ty then
+          (match opt_var with
+           | Some x -> (Some [(x, v)], st)  (* Bind with narrowed type *)
+           | None -> (Some [], st))         (* Match but don't bind *)
+        else (None, st)
+
     (* Default fallback - use simple pattern matching for remaining cases *)
     | _ ->
         (match match_pattern p v with
@@ -1865,10 +1956,10 @@ let value_well_typed (_v: value) (_h: heap) (_t: brrr_type) : Type0 = True
 
     Proof: By the definition of definitional equality in F*. *)
 let eval_deterministic (fuel: nat) (e: expr) (st: eval_state)
-    : Lemma (ensures
+    : Lemma (ensures (
         let (r1, st1) = eval_expr fuel e st in
         let (r2, st2) = eval_expr fuel e st in
-        r1 == r2 /\ st1 == st2) =
+        r1 == r2 /\ st1 == st2)) =
   ()  (* Trivial by definitional equality *)
 
 (** Fuel monotonicity helper lemma.
@@ -1888,10 +1979,10 @@ let eval_deterministic (fuel: nat) (e: expr) (st: eval_state)
 #push-options "--z3rlimit 100 --fuel 2 --ifuel 1"
 let eval_fuel_monotonic (fuel1: nat) (fuel2: nat{fuel2 >= fuel1}) (e: expr) (st: eval_state)
     : Lemma (requires ROk? (fst (eval_expr fuel1 e st)))
-            (ensures
+            (ensures (
               let (r1, st1) = eval_expr fuel1 e st in
               let (r2, st2) = eval_expr fuel2 e st in
-              r1 == r2 /\ st1 == st2) =
+              r1 == r2 /\ st1 == st2)) =
   (* The proof relies on the structure of eval_expr:
      - If fuel1 = 0, precondition is false (divergence), so lemma holds vacuously
      - If fuel1 > 0 and we get ROk, evaluation terminated before exhausting fuel
@@ -2389,7 +2480,7 @@ let eval_while_break_exits (fuel: nat) (opt_lbl: option label) (cond body: expr)
 
     This is proven by observing that:
     1. ROk? result means evaluation terminated successfully before exhausting fuel
-    2. The computation is purely functional (no side effects in F*)
+    2. The computation is purely functional (no side effects in F-star)
     3. Additional fuel doesn't change which branch is taken at any decision point
     4. Therefore the result is identical for any fuel >= minimum required *)
 let rec fuel_mono_core (f1: nat) (f2: nat) (e: expr) (st: eval_state)
@@ -2411,7 +2502,7 @@ let rec fuel_mono_core (f1: nat) (f2: nat) (e: expr) (st: eval_state)
        Since f2 > f1, we have f2-1 >= f1-1, and the recursive calls
        will produce the same results by induction. *)
 
-    match e with
+    match e.loc_value with
     | ELit _ -> ()  (* Immediate success, no recursion *)
     | EVar _ -> ()  (* Single lookup, no recursion *)
     | EGlobal _ -> ()
@@ -2474,10 +2565,10 @@ let fuel_mono_result (f1: nat) (f2: nat) (e: expr) (st: eval_state)
     transparent. Calling eval_expr twice with the same arguments must yield
     the same result by definition of function application in type theory. *)
 let eval_determinism (fuel: nat) (e: expr) (st: eval_state)
-    : Lemma (ensures
+    : Lemma (ensures (
         let (r1, st1) = eval_expr fuel e st in
         let (r2, st2) = eval_expr fuel e st in
-        r1 == r2 /\ st1 == st2)
+        r1 == r2 /\ st1 == st2))
     [SMTPat (eval_expr fuel e st)] =
   (* Trivial by definitional equality in F* *)
   ()

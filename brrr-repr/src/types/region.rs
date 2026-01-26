@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 ///   | RFresh : nat -> region
 ///   | RScope : nat -> region
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Region {
     /// `'static` - lives for entire program
     Static,
@@ -65,6 +65,46 @@ impl Region {
     /// Is this the static region?
     pub const fn is_static(self) -> bool {
         matches!(self, Self::Static)
+    }
+
+    /// Check if this region outlives another region
+    ///
+    /// Lifetime ordering rules:
+    /// - `'static` outlives all regions
+    /// - Named regions only outlive themselves (conservative)
+    /// - Fresh regions: earlier (lower number) outlives later
+    /// - Scope regions: outer (lower depth) outlives inner
+    ///
+    /// # Arguments
+    /// * `other` - The potentially shorter-lived region
+    ///
+    /// # Returns
+    /// `true` if `self` outlives `other` based on the region structure
+    pub fn outlives(&self, other: &Self) -> bool {
+        match (self, other) {
+            // Static outlives everything
+            (Self::Static, _) => true,
+
+            // Named region only outlives itself (conservative without constraint solving)
+            (Self::Named(a), Self::Named(b)) => a == b,
+
+            // Fresh region: earlier (lower number) outlives later
+            // Fresh(0) was created before Fresh(1), so it lives longer
+            (Self::Fresh(n1), Self::Fresh(n2)) => n1 <= n2,
+
+            // Scope region: outer (lower depth) outlives inner
+            // Scope(0) is the outermost scope, Scope(1) is inside it, etc.
+            (Self::Scope(d1), Self::Scope(d2)) => d1 <= d2,
+
+            // Nothing except static outlives static
+            (_, Self::Static) => false,
+
+            // Cross-category: generally cannot determine without constraints
+            // Fresh regions are typically more local than named regions
+            // Scope regions are typically more local than fresh regions
+            // Conservative: return false for cross-category comparisons
+            _ => false,
+        }
     }
 }
 
@@ -220,16 +260,27 @@ impl Variance {
     }
 
     /// Combine variances (for nested type constructors)
+    ///
+    /// Follows F* `combine_variance` semantics:
+    /// - Bivariant absorbs everything (unused position)
+    /// - Invariant absorbs next (must be exactly equal)
+    /// - Covariant + Covariant = Covariant
+    /// - Contravariant + Contravariant = Covariant (double negation)
+    /// - Covariant + Contravariant = Contravariant
+    /// - Contravariant + Covariant = Contravariant
     pub const fn compose(self, other: Self) -> Self {
         match (self, other) {
-            // Invariant absorbs
-            (Self::Invariant, _) | (_, Self::Invariant) => Self::Invariant,
-            // Bivariant absorbs
+            // Bivariant absorbs everything (F* priority: first)
             (Self::Bivariant, _) | (_, Self::Bivariant) => Self::Bivariant,
-            // Covariant is identity
-            (Self::Covariant, v) | (v, Self::Covariant) => v,
-            // Contravariant negates
+            // Invariant absorbs next (F* priority: second)
+            (Self::Invariant, _) | (_, Self::Invariant) => Self::Invariant,
+            // Same variance preserves direction
+            (Self::Covariant, Self::Covariant) => Self::Covariant,
+            // Double negation: contra + contra = covariant
             (Self::Contravariant, Self::Contravariant) => Self::Covariant,
+            // Mixed: one negation = contravariant
+            (Self::Covariant, Self::Contravariant)
+            | (Self::Contravariant, Self::Covariant) => Self::Contravariant,
         }
     }
 
@@ -267,17 +318,85 @@ mod tests {
 
     #[test]
     fn test_variance_compose() {
+        // Covariant + Contravariant = Contravariant
         assert_eq!(
             Variance::Covariant.compose(Variance::Contravariant),
             Variance::Contravariant
         );
+        // Contravariant + Contravariant = Covariant (double negation)
         assert_eq!(
             Variance::Contravariant.compose(Variance::Contravariant),
             Variance::Covariant
         );
+        // Covariant + Invariant = Invariant
         assert_eq!(
             Variance::Covariant.compose(Variance::Invariant),
             Variance::Invariant
         );
+        // Covariant + Covariant = Covariant
+        assert_eq!(
+            Variance::Covariant.compose(Variance::Covariant),
+            Variance::Covariant
+        );
+        // Bivariant absorbs Invariant (F* priority: Bivariant first)
+        assert_eq!(
+            Variance::Bivariant.compose(Variance::Invariant),
+            Variance::Bivariant
+        );
+        assert_eq!(
+            Variance::Invariant.compose(Variance::Bivariant),
+            Variance::Bivariant
+        );
+        // Bivariant absorbs everything
+        assert_eq!(
+            Variance::Bivariant.compose(Variance::Covariant),
+            Variance::Bivariant
+        );
+        assert_eq!(
+            Variance::Bivariant.compose(Variance::Contravariant),
+            Variance::Bivariant
+        );
+    }
+
+    #[test]
+    fn test_region_outlives() {
+        let mut rodeo = lasso::Rodeo::default();
+        let a = Region::Named(rodeo.get_or_intern("a"));
+        let b = Region::Named(rodeo.get_or_intern("b"));
+
+        // Static outlives everything
+        assert!(Region::Static.outlives(&Region::Static));
+        assert!(Region::Static.outlives(&Region::Scope(0)));
+        assert!(Region::Static.outlives(&Region::Fresh(0)));
+        assert!(Region::Static.outlives(&a));
+
+        // Same region outlives itself
+        assert!(Region::Scope(1).outlives(&Region::Scope(1)));
+        assert!(Region::Fresh(5).outlives(&Region::Fresh(5)));
+        assert!(a.outlives(&a));
+
+        // Outer scope outlives inner scope
+        assert!(Region::Scope(0).outlives(&Region::Scope(1)));
+        assert!(Region::Scope(0).outlives(&Region::Scope(5)));
+        assert!(!Region::Scope(2).outlives(&Region::Scope(1)));
+
+        // Earlier fresh outlives later fresh
+        assert!(Region::Fresh(0).outlives(&Region::Fresh(1)));
+        assert!(Region::Fresh(0).outlives(&Region::Fresh(10)));
+        assert!(!Region::Fresh(5).outlives(&Region::Fresh(3)));
+
+        // Non-static cannot outlive static
+        assert!(!Region::Scope(0).outlives(&Region::Static));
+        assert!(!Region::Fresh(0).outlives(&Region::Static));
+        assert!(!a.outlives(&Region::Static));
+
+        // Different named regions don't outlive each other (conservative)
+        assert!(!a.outlives(&b));
+        assert!(!b.outlives(&a));
+
+        // Cross-category comparisons are conservative (false)
+        assert!(!Region::Scope(0).outlives(&Region::Fresh(0)));
+        assert!(!Region::Fresh(0).outlives(&Region::Scope(0)));
+        assert!(!a.outlives(&Region::Scope(0)));
     }
 }

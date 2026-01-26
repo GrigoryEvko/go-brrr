@@ -1,29 +1,41 @@
 [package]
 name = "brrr-repr"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
 description = "Binary and text representation formats for brrr-lang IR"
-license = "Apache-2.0"
-repository = "https://github.com/GrigoryEvko/go-brrr"
-keywords = ["ir", "serialization", "brrr", "encoding"]
-categories = ["encoding", "data-structures"]
-rust-version = "1.70"
+authors = ["Grigory Evko <grigory@evko.io>"]
+documentation = "https://docs.rs/brrr-repr"
+readme = "README.md"
+keywords = ["ir", "serialization", "brrr", "encoding", "type-system"]
+categories = ["encoding", "data-structures", "development-tools"]
+
+exclude = [
+    ".git",
+    ".github",
+    "target",
+    "*.brrr",
+    "*.brrrx",
+]
 
 [dependencies]
 # Serialization
-serde = { version = "1", features = ["derive"] }
+serde.workspace = true
 
 # String interning - 4-byte Spur keys
-lasso = { version = "0.7", features = ["multi-threaded", "ahasher", "serialize"] }
+lasso.workspace = true
 
 # SIMD-accelerated hashing (xxh3) for content addressing
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
+xxhash-rust.workspace = true
 
 # Error handling
-thiserror = "2"
+thiserror.workspace = true
 
 [dev-dependencies]
-pretty_assertions = "1"
+pretty_assertions.workspace = true
 
 [lints.rust]
 unsafe_code = "warn"

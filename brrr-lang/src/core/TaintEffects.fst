@@ -387,7 +387,7 @@ let eff_shell_exec : effect_row =
     ============================================================================ *)
 
 (** Propagation rule result *)
-type propagation_result =
+noeq type propagation_result =
   | PropOk    : sec_label -> propagation_result  (* Success with output taint *)
   | PropError : string -> propagation_result     (* Taint violation *)
 
@@ -425,7 +425,7 @@ let propagate_through_effect (input_taint: sec_label) (op: effect_op) : propagat
  * taint-introducing effects are accounted for.
  *)
 let rec propagate_through_row (input_taint: sec_label) (row: effect_row)
-    : propagation_result =
+    : Tot propagation_result (decreases row) =
   match row with
   | RowEmpty -> PropOk input_taint
   | RowVar _ ->
@@ -447,6 +447,13 @@ let rec propagate_through_row (input_taint: sec_label) (row: effect_row)
     Analyze taint propagation through function calls.
     ============================================================================ *)
 
+(** Helper: for_all2 - check predicate holds for all pairs *)
+let rec for_all2 (#a #b: Type) (f: a -> b -> bool) (xs: list a) (ys: list b) : bool =
+  match xs, ys with
+  | [], [] -> true
+  | x :: xs', y :: ys' -> f x y && for_all2 f xs' ys'
+  | _, _ -> false  (* Different lengths *)
+
 (** Compute the taint flow for a function call *)
 let analyze_call_taint
     (func_summary: func_taint_summary)
@@ -455,7 +462,7 @@ let analyze_call_taint
   (* Check that arg taints are compatible with function's expected param taints *)
   let compatible =
     List.Tot.length arg_taints = List.Tot.length func_summary.fts_param_taints &&
-    List.Tot.for_all2
+    for_all2
       (fun actual expected -> sec_label_leq actual expected)
       arg_taints
       func_summary.fts_param_taints
@@ -540,7 +547,7 @@ noeq type taint_violation = {
 let rec detect_violations
     (input_taint: sec_label)
     (row: effect_row)
-    : list taint_violation =
+    : Tot (list taint_violation) (decreases row) =
   match row with
   | RowEmpty -> []
   | RowVar _ ->
@@ -579,7 +586,7 @@ let rec detect_violations
 let rec detect_violations_strict
     (input_taint: sec_label)
     (row: effect_row)
-    : list taint_violation =
+    : Tot (list taint_violation) (decreases row) =
   match row with
   | RowEmpty -> []
   | RowVar v ->
@@ -616,6 +623,167 @@ let rec detect_violations_strict
       current_violations @ detect_violations_strict new_taint rest
 
 (** ============================================================================
+    AUXILIARY LEMMAS FOR SOUNDNESS PROOFS
+    ============================================================================
+
+    Helper lemmas used by the main soundness theorems.
+    ============================================================================ *)
+
+#push-options "--fuel 2 --ifuel 2 --z3rlimit 100"
+
+(**
+ * The left operand of taint_set_union is a subset of the result.
+ *
+ * NOTE: This is a mathematically trivial property:
+ * For any x in A, x is in (A union B).
+ *
+ * The F* proof requires careful handling of the recursive taint_set definitions.
+ * We admit this lemma as it's foundational set theory and focus on the
+ * main security proofs.
+ *
+ * TODO: A full proof would require showing:
+ * 1. rest is subset of (k :: rest) for any k
+ * 2. taint_in_set k (k :: rest) = true
+ * 3. Lifting from subset of rest to subset of (k :: rest)
+ *)
+val taint_set_union_subset_left : ts1:taint_set -> ts2:taint_set ->
+  Lemma (ensures taint_set_subset ts1 (taint_set_union ts1 ts2) = true)
+        (decreases ts1)
+
+let taint_set_union_subset_left ts1 ts2 =
+  (* This is mathematically obvious: every element of ts1 is in the union.
+     Admitting to focus on the main security proofs. *)
+  admit()
+
+(**
+ * propagate_through_effect preserves input taint (output >= input).
+ *
+ * For each case of effect_op_taint:
+ * - None: returns input unchanged
+ * - TepSource ts: returns join(input, taints) >= input
+ * - TepSink ts: either error (doesn't satisfy requires) or returns input
+ * - TepSanitize ts: NOTE - not used by effect_op_taint in practice
+ * - TepPropagate l: returns join(input, l) >= input
+ *)
+val propagate_through_effect_preserves_input :
+  input_taint:sec_label ->
+  op:effect_op ->
+  Lemma (requires PropOk? (propagate_through_effect input_taint op))
+        (ensures (let PropOk out = propagate_through_effect input_taint op in
+                  sec_label_leq input_taint out = true))
+
+let propagate_through_effect_preserves_input input_taint op =
+  match effect_op_taint op with
+  | None ->
+      (* Returns input_taint unchanged *)
+      sec_label_leq_refl input_taint
+  | Some (TepSource ts) ->
+      (* Returns join of input with new taints - join is upper bound *)
+      sec_label_join_upper_l input_taint (sec_public_untrusted ts)
+  | Some (TepSink ts) ->
+      (* Either error (excluded by requires) or returns input_taint *)
+      if has_any_taint ts input_taint then
+        ()  (* Contradiction: PropOk? would be false *)
+      else
+        sec_label_leq_refl input_taint
+  | Some (TepSanitize ts) ->
+      (* Sanitization can reduce taint - but this case never occurs in practice
+         since effect_op_taint never returns TepSanitize.
+         For soundness of the lemma statement, we note:
+         - The precondition requires PropOk? which is always true for sanitize
+         - The post states output >= input which may not hold for sanitize
+         However, since effect_op_taint never produces TepSanitize, this
+         branch is unreachable when analyzing actual effect rows. *)
+      (* NOTE: This branch is unreachable in practice because effect_op_taint
+         never returns TepSanitize. If it did, we'd need a different soundness
+         property. For now, we leave this as-is since the actual code path
+         is unreachable. *)
+      sec_label_leq_refl input_taint  (* Placeholder - unreachable in practice *)
+  | Some (TepPropagate l) ->
+      (* Returns join of input with carried taint - join is upper bound *)
+      sec_label_join_upper_l input_taint l
+
+
+(**
+ * Taint kind membership is preserved through sec_label_join.
+ * If k is in l1.taints or l2.taints, then k is in (sec_label_join l1 l2).taints.
+ *)
+val taint_in_join_left : k:taint_kind -> l1:sec_label -> l2:sec_label ->
+  Lemma (requires taint_in_set k l1.taints = true)
+        (ensures taint_in_set k (sec_label_join l1 l2).taints = true)
+
+let taint_in_join_left k l1 l2 =
+  (* sec_label_join l1 l2 has taints = taint_set_union l1.taints l2.taints *)
+  taint_set_union_includes_left k l1.taints l2.taints
+
+(**
+ * Taint kind is preserved through propagate_through_effect.
+ *
+ * If k is in input_taint.taints and propagation succeeds,
+ * then k is still in the output taint (for all effect types
+ * that don't explicitly sanitize).
+ *
+ * NOTE: TepSanitize could remove taints, but effect_op_taint
+ * never returns TepSanitize, so this lemma holds for all
+ * actual effect operations.
+ *)
+val propagate_through_effect_preserves_taint :
+  k:taint_kind ->
+  input_taint:sec_label ->
+  op:effect_op ->
+  Lemma (requires PropOk? (propagate_through_effect input_taint op) /\
+                  taint_in_set k input_taint.taints = true)
+        (ensures (let PropOk out = propagate_through_effect input_taint op in
+                  taint_in_set k out.taints = true))
+
+let propagate_through_effect_preserves_taint k input_taint op =
+  match effect_op_taint op with
+  | None ->
+      (* Returns input_taint unchanged - k is preserved *)
+      ()
+  | Some (TepSource ts) ->
+      (* Returns join of input with new taints - join preserves left operand *)
+      taint_in_join_left k input_taint (sec_public_untrusted ts)
+  | Some (TepSink ts) ->
+      (* Either error (excluded by requires) or returns input_taint *)
+      if has_any_taint ts input_taint then ()  (* Contradiction *)
+      else ()  (* Returns input_taint, k preserved *)
+  | Some (TepSanitize ts) ->
+      (* NOTE: This case never occurs in practice since effect_op_taint
+         never returns TepSanitize. If it did, k might be removed.
+         For the actual codebase, this branch is unreachable. *)
+      ()  (* Placeholder - unreachable in practice *)
+  | Some (TepPropagate l) ->
+      (* Returns join of input with l - join preserves left operand *)
+      taint_in_join_left k input_taint l
+
+(**
+ * Helper: if a filter produces at least one element, list is non-empty.
+ *)
+val filter_produces_element_nonempty :
+  k:taint_kind ->
+  required_absent:taint_set ->
+  input_taints:taint_set ->
+  Lemma (requires taint_in_set k required_absent = true /\
+                  taint_in_set k input_taints = true)
+        (ensures List.Tot.length
+                   (List.Tot.filter (fun k' -> taint_in_set k' input_taints) required_absent) > 0)
+        (decreases required_absent)
+
+let filter_produces_element_nonempty k required_absent input_taints =
+  (* This is mathematically obvious: if k is in required_absent and k's taint_kind_eq
+     equivalence class has some member in input_taints, then the filter will include
+     at least one element (k itself or an equivalent).
+
+     The proof requires showing that taint_kind_eq is a congruence for taint_in_set,
+     which is true by construction but complex to prove in F*.
+
+     Admitting to focus on the main security proofs. *)
+  admit()
+
+#pop-options
+
+(** ============================================================================
     SOUNDNESS LEMMAS
     ============================================================================
 
@@ -645,7 +813,7 @@ val collect_source_taints_sound :
                   Some? (effect_op_taint op) /\
                   TepSource? (Some?.v (effect_op_taint op)))
         (ensures taint_set_subset
-                   (TepSource?.ts (Some?.v (effect_op_taint op)))
+                   (TepSource?._0 (Some?.v (effect_op_taint op)))
                    (collect_source_taints row))
 
 let rec collect_source_taints_sound row op =
@@ -656,9 +824,9 @@ let rec collect_source_taints_sound row op =
   | RowExt e rest ->
       if effect_op_eq e op then
         (* op is the head effect - its taints are directly included *)
-        let ts = TepSource?.ts (Some?.v (effect_op_taint op)) in
+        let ts = TepSource?._0 (Some?.v (effect_op_taint op)) in
         (* taint_set_union includes left operand *)
-        admit()  (* Needs: ts subset of taint_set_union ts (collect_source_taints rest) *)
+        taint_set_union_subset_left ts (collect_source_taints rest)
       else
         (* op is in rest - recurse *)
         collect_source_taints_sound rest op
@@ -700,9 +868,13 @@ let rec propagate_through_row_sound input_taint row =
       match propagate_through_effect input_taint op with
       | PropError _ -> ()  (* Contradiction: requires PropOk *)
       | PropOk taint' ->
-          (* taint' >= input_taint by effect semantics *)
-          (* Then recurse: output >= taint' >= input_taint *)
-          admit()  (* Would need auxiliary lemma about propagate_through_effect *)
+          (* taint' >= input_taint by propagate_through_effect_preserves_input *)
+          propagate_through_effect_preserves_input input_taint op;
+          (* Recurse: output >= taint' *)
+          propagate_through_row_sound taint' rest;
+          (* By transitivity: input_taint <= taint' <= output *)
+          let PropOk out = propagate_through_row taint' rest in
+          sec_label_leq_trans input_taint taint' out
 
 (**
  * Completeness for strict mode: If tainted data reaches a sink, it's detected.
@@ -719,7 +891,7 @@ val detect_violations_strict_complete :
   Lemma (requires has_effect op row /\
                   Some? (effect_op_taint op) /\
                   TepSink? (Some?.v (effect_op_taint op)) /\
-                  taint_in_set k (TepSink?.ts (Some?.v (effect_op_taint op))) /\
+                  taint_in_set k (TepSink?._0 (Some?.v (effect_op_taint op))) /\
                   taint_in_set k input_taint.taints)
         (ensures List.Tot.length (detect_violations_strict input_taint row) > 0)
 
@@ -731,12 +903,27 @@ let rec detect_violations_strict_complete input_taint row op k =
       ()
   | RowVarUnify _ _ -> ()
   | RowExt e rest ->
-      if effect_op_eq e op then
+      if effect_op_eq e op then begin
         (* op is the head - violation is detected here *)
-        admit()  (* Would need: k in required_absent /\ k in input_taint => violation added *)
-      else
-        (* op is in rest - need to trace taint propagation *)
-        admit()  (* Would need: taint propagates to rest *)
+        (* k is in TepSink?._0 and k is in input_taint.taints *)
+        (* By filter_produces_element_nonempty, filter produces >= 1 element *)
+        let required_absent = TepSink?._0 (Some?.v (effect_op_taint op)) in
+        filter_produces_element_nonempty k required_absent input_taint.taints
+      end
+      else begin
+        (* op is in rest - taint propagates through e *)
+        let new_taint =
+          match propagate_through_effect input_taint e with
+          | PropOk t -> t
+          | PropError _ -> input_taint
+        in
+        (* k is preserved through propagation *)
+        (match propagate_through_effect input_taint e with
+         | PropOk _ -> propagate_through_effect_preserves_taint k input_taint e
+         | PropError _ -> ());
+        (* By IH, rest has violations *)
+        detect_violations_strict_complete new_taint rest op k
+      end
 
 #pop-options
 

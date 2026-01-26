@@ -284,7 +284,7 @@ let j_elim
 (* Based J eliminator - Martin-Loef formulation *)
 let j_elim_ml
     (#a: Type)
-    (c: (x y: a) -> eq_type a x y -> Type)
+    (c: (x: a) -> (y: a) -> eq_type a x y -> Type)
     (base: (x: a) -> c x x (refl x))
     (#x #y: a)
     (p: eq_type a x y)
@@ -493,7 +493,7 @@ noeq type dec_eq_result (a: Type) (x y: a) =
 
 (* Decidable equality typeclass *)
 noeq type has_dec_eq (a: Type) = {
-  dec_eq : (x y: a) -> dec_eq_result a x y;
+  dec_eq : (x: a) -> (y: a) -> dec_eq_result a x y;
 }
 
 (** Boolean equality implies decidable equality.
@@ -513,8 +513,8 @@ noeq type has_dec_eq (a: Type) = {
 let bool_eq_to_dec_eq
     (#a: Type)
     (eq_fn: a -> a -> bool)
-    (eq_sound: (x y: a) -> Lemma (requires eq_fn x y = true) (ensures x == y))
-    (eq_complete: (x y: a) -> Lemma (requires x == y) (ensures eq_fn x y = true))
+    (eq_sound: (x: a) -> (y: a) -> Lemma (requires eq_fn x y = true) (ensures x == y))
+    (eq_complete: (x: a) -> (y: a) -> Lemma (requires x == y) (ensures eq_fn x y = true))
     : has_dec_eq a =
   { dec_eq = fun x y ->
       if eq_fn x y then begin

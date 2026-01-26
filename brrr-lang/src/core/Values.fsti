@@ -134,6 +134,7 @@ noeq type value =
 
   (* Functions *)
   | VClosure : closure_id -> value
+  | VBoundMethod : receiver:value -> method_closure:closure_id -> value  (* Bound method: receiver + method *)
 
   (* Option/Result *)
   | VNone   : value
@@ -249,6 +250,7 @@ noeq type result (a: Type) =
   | RYield   : value -> result a
   | RPerform : Effects.effect_op -> list value -> result a
   | RAbort   : string -> value -> result a
+  | RGoto    : string -> result a  (* Jump to labeled statement *)
 
 (** Result monad: return *)
 val return : #a:Type -> a -> result a

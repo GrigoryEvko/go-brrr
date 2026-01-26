@@ -180,23 +180,109 @@ unfold let et_unit : effect_type = ETUnit
 
 (** ============================================================================
     EQUALITY PREDICATES
-    ============================================================================ *)
+    ============================================================================
 
-(** Abstract location equality *)
-val abstract_loc_eq : abstract_loc -> abstract_loc -> bool
+    Following HACL-star/EverParse patterns: simple pattern-matching equality functions
+    are defined with `unfold let` to make their bodies visible to Z3 during
+    normalization. This enables trivial reflexivity/symmetry/transitivity proofs.
 
-(** Effect type equality *)
+    Recursive functions (effect_type_eq, string_list_eq) remain as `val` since
+    `unfold` does not work well with recursion.
+*)
+
+(** Abstract location equality - unfold for proof automation *)
+[@(strict_on_arguments [0; 1])]
+unfold
+let abstract_loc_eq (l1 l2: abstract_loc) : bool =
+  match l1, l2 with
+  | LocConcrete n1, LocConcrete n2 -> n1 = n2
+  | LocAbstract s1, LocAbstract s2 -> s1 = s2
+  | LocParam p1, LocParam p2 -> p1 = p2
+  | LocUnknown, LocUnknown -> true
+  | _, _ -> false
+
+(** Effect type equality - recursive, kept as val *)
 val effect_type_eq : effect_type -> effect_type -> bool
 
-(** String list equality *)
+(** String list equality - recursive, kept as val *)
 val string_list_eq : list string -> list string -> bool
 
-(** Effect operation equality - handles all parameterized and unparameterized variants *)
-val effect_op_eq : effect_op -> effect_op -> bool
+(** Effect operation equality - unfold for proof automation.
+    Handles all parameterized and unparameterized variants. *)
+[@(strict_on_arguments [0; 1])]
+unfold
+let effect_op_eq (e1 e2: effect_op) : bool =
+  match e1, e2 with
+  (* Memory effects - location-parameterized *)
+  | ERead loc1, ERead loc2 -> abstract_loc_eq loc1 loc2
+  | EWrite loc1, EWrite loc2 -> abstract_loc_eq loc1 loc2
+  | EAlloc, EAlloc -> true
+  | EFree loc1, EFree loc2 -> abstract_loc_eq loc1 loc2
+
+  (* Control effects *)
+  | EThrow t1, EThrow t2 -> t1 = t2
+  | ECatch t1, ECatch t2 -> t1 = t2
+  | EPanic, EPanic -> true
+  | EAsync, EAsync -> true
+  | EYield y1 r1, EYield y2 r2 -> effect_type_eq y1 y2 && effect_type_eq r1 r2
+  | EDiv, EDiv -> true
+  | EShift, EShift -> true
+  | EAbort, EAbort -> true
+
+  (* I/O effects *)
+  | EInput s1, EInput s2 -> s1 = s2
+  | EOutput s1, EOutput s2 -> s1 = s2
+  | EIO, EIO -> true
+  | ENet, ENet -> true
+  | EFS, EFS -> true
+  | EFileRead p1, EFileRead p2 -> p1 = p2
+  | EFileWrite p1, EFileWrite p2 -> p1 = p2
+  | ERandom, ERandom -> true
+  | EClock, EClock -> true
+
+  (* Concurrency effects - lock-parameterized *)
+  | ESpawn, ESpawn -> true
+  | EJoin, EJoin -> true
+  | ELock l1, ELock l2 -> l1 = l2
+  | EUnlock l1, EUnlock l2 -> l1 = l2
+  | EAtomic, EAtomic -> true
+
+  (* Session effects - fully parameterized *)
+  | ESend c1 t1, ESend c2 t2 -> c1 = c2 && effect_type_eq t1 t2
+  | ERecv c1 t1, ERecv c2 t2 -> c1 = c2 && effect_type_eq t1 t2
+  | ESelect c1 l1, ESelect c2 l2 -> c1 = c2 && l1 = l2
+  | EBranch c1 ls1, EBranch c2 ls2 -> c1 = c2 && string_list_eq ls1 ls2
+  | EChanCreate c1 t1 b1, EChanCreate c2 t2 b2 -> c1 = c2 && effect_type_eq t1 t2 && b1 = b2
+  | EChanClose c1, EChanClose c2 -> c1 = c2
+  | EDelegate c1 t1, EDelegate c2 t2 -> c1 = c2 && t1 = t2
+
+  (* Resource effects *)
+  | EAcquire r1, EAcquire r2 -> r1 = r2
+  | ERelease r1, ERelease r2 -> r1 = r2
+  | EUse r1, EUse r2 -> r1 = r2
+
+  (* State effects *)
+  | EState, EState -> true
+  | ESTRead r1, ESTRead r2 -> r1 = r2
+  | ESTWrite r1, ESTWrite r2 -> r1 = r2
+  | ESTNew, ESTNew -> true
+
+  (* FFI effects *)
+  | EUnsafe, EUnsafe -> true
+  | EFFI, EFFI -> true
+
+  (* Legacy unparameterized *)
+  | EReadSimple, EReadSimple -> true
+  | EWriteSimple, EWriteSimple -> true
+  | ELockSimple, ELockSimple -> true
+  | ENewCh, ENewCh -> true
+
+  (* No match *)
+  | _, _ -> false
 
 (** Convert effect_type to effect_type (identity, for API consistency) *)
 inline_for_extraction noextract
-val effect_type_id : effect_type -> effect_type
+let effect_type_id (t: effect_type) : effect_type = t
 
 (** ============================================================================
     EFFECT ROW OPERATIONS

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::location::{Range, WithLoc};
 use super::Literal;
-use crate::types::TypeName;
+use crate::types::{BrrrType, TypeName};
 
 /// Pattern with source location
 pub type Pattern = WithLoc<Pattern_>;
@@ -73,6 +73,17 @@ pub enum Pattern_ {
 
     /// As-pattern `p @ x`
     As(Box<Pattern>, Spur),
+
+    /// Type pattern for runtime type matching
+    /// Used in Go type switches, TypeScript typeof/instanceof, Java instanceof, etc.
+    /// Matches if the runtime type of the scrutinee equals the expected type.
+    /// `case int:` in Go becomes `Type { expected: Int, binding: Some("v") }`
+    Type {
+        /// The expected type to match against
+        expected: BrrrType,
+        /// Optional variable binding with narrowed type
+        binding: Option<Spur>,
+    },
 }
 
 impl Pattern_ {
@@ -138,6 +149,12 @@ impl Pattern_ {
         Self::As(Box::new(pattern), binding)
     }
 
+    /// Create a type pattern for runtime type matching
+    /// Used in Go type switches, TypeScript typeof/instanceof, Java instanceof, etc.
+    pub fn type_pat(expected: BrrrType, binding: Option<Spur>) -> Self {
+        Self::Type { expected, binding }
+    }
+
     /// Get the discriminant for binary encoding
     pub const fn discriminant(&self) -> u8 {
         match self {
@@ -153,6 +170,7 @@ impl Pattern_ {
             Self::Box(_) => 9,
             Self::Rest(_) => 10,
             Self::As(_, _) => 11,
+            Self::Type { .. } => 12,
         }
     }
 
@@ -163,7 +181,8 @@ impl Pattern_ {
             Self::Tuple(pats) => pats.iter().all(|p| p.value.is_irrefutable()),
             Self::Ref(p) | Self::Box(p) | Self::As(p, _) => p.value.is_irrefutable(),
             Self::Struct { fields, .. } => fields.iter().all(|(_, p)| p.value.is_irrefutable()),
-            Self::Lit(_) | Self::Variant { .. } | Self::Or(_, _) | Self::Guard(_, _) => false,
+            // Type patterns are refutable - they only match specific runtime types
+            Self::Lit(_) | Self::Variant { .. } | Self::Or(_, _) | Self::Guard(_, _) | Self::Type { .. } => false,
         }
     }
 
@@ -177,6 +196,8 @@ impl Pattern_ {
                 vars.push(*v);
                 vars
             }
+            Self::Type { binding: Some(v), .. } => vec![*v],
+            Self::Type { binding: None, .. } => vec![],
             Self::Tuple(pats) => pats.iter().flat_map(|p| p.value.bound_vars()).collect(),
             Self::Struct { fields, .. } => {
                 fields.iter().flat_map(|(_, p)| p.value.bound_vars()).collect()
@@ -184,7 +205,7 @@ impl Pattern_ {
             Self::Variant { fields, .. } => {
                 fields.iter().flat_map(|p| p.value.bound_vars()).collect()
             }
-            Self::Or(l, r) => {
+            Self::Or(l, _r) => {
                 // Or-patterns must bind the same vars in both branches
                 l.value.bound_vars()
             }

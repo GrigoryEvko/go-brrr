@@ -191,17 +191,7 @@ let ranges_overlap (r1 r2: range) : bool =
        e2.pos_line < s1.pos_line ||
        (e2.pos_line = s1.pos_line && e2.pos_col < s1.pos_col))
 
-(** Check if a position equals another *)
-let pos_eq (p1 p2: pos) : bool =
-  p1.pos_filename = p2.pos_filename &&
-  p1.pos_line = p2.pos_line &&
-  p1.pos_col = p2.pos_col
-
-(** Check if two ranges are equal *)
-let range_eq (r1 r2: range) : bool =
-  let (s1, e1) = r1 in
-  let (s2, e2) = r2 in
-  pos_eq s1 s2 && pos_eq e1 e2
+(* pos_eq and range_eq are now unfold definitions in Expressions.fsti *)
 
 (** Range equality is reflexive *)
 let range_eq_refl (r: range) : Lemma (ensures range_eq r r = true) =
@@ -222,7 +212,7 @@ let range_eq_trans (r1 r2 r3: range)
 (** merge_ranges preserves containment (left) *)
 let merge_ranges_contains_left (r1 r2: range)
     : Lemma (ensures range_within r1 (merge_ranges r1 r2) = true) =
-  admit()  (* Requires detailed case analysis on position ordering *)
+  Axioms.merge_ranges_contains_left r1 r2
 
 (** merge_ranges preserves containment (right) *)
 let merge_ranges_contains_right (r1 r2: range)
@@ -316,6 +306,7 @@ noeq type pattern' =
   | PatBox     : pattern -> pattern'                   (* box p *)
   | PatRest    : option var_id -> pattern'             (* ...rest or ... *)
   | PatAs      : pattern -> var_id -> pattern'         (* p @ x - binds match to name *)
+  | PatType    : brrr_type -> option var_id -> pattern'  (* : T or x: T - type pattern, matches if runtime type is T *)
 
 (** ============================================================================
     EXPRESSIONS (with source location tracking)
@@ -338,6 +329,8 @@ and expr' =
   | EBinary   : binary_op -> expr -> expr -> expr'     (* Binary operation *)
   | ECall     : expr -> list expr -> expr'             (* Function call *)
   | EMethodCall : expr -> string -> list expr -> expr' (* Method call *)
+  | EMethodRef : expr -> string -> expr'               (* Bound method reference: obj.method without calling *)
+  | ETypeMethod : type_name -> string -> expr'         (* Unbound type method: T::method *)
 
   (* Data construction *)
   | ETuple    : list expr -> expr'                     (* (e1, e2, ...) *)
@@ -358,6 +351,8 @@ and expr' =
   | EFor      : option label -> var_id -> expr -> expr -> expr'  (* 'label: for x in iter { body } *)
   | EBreak    : option label -> option expr -> expr'   (* break 'label [value] *)
   | EContinue : option label -> expr'                  (* continue 'label *)
+  | EGoto     : label -> expr'                         (* goto label - jump to labeled statement *)
+  | ELabeled  : label -> expr -> expr'                 (* label: stmt - labeled statement target *)
   | EReturn   : option expr -> expr'                   (* return [value] *)
 
   (* Binding *)
@@ -397,6 +392,10 @@ and expr' =
   | EIs       : expr -> brrr_type -> expr'             (* e is T *)
   | ESizeof   : brrr_type -> expr'                     (* sizeof(T) *)
   | EAlignof  : brrr_type -> expr'                     (* alignof(T) *)
+
+  (* Container intrinsics - universal length/capacity *)
+  | ELen      : expr -> expr'                          (* len(e) - length of array/slice/string/map *)
+  | ECap      : expr -> expr'                          (* cap(e) - capacity of slice/vector *)
 
   (* Blocks and sequences *)
   | EBlock    : list expr -> expr'                     (* { e1; e2; ... } *)
@@ -518,8 +517,10 @@ let p_var (x: var_id) : pattern = mk_pat_dummy (PatVar x)
 let p_lit (l: literal) : pattern = mk_pat_dummy (PatLit l)
 let p_tuple (ps: list pattern) : pattern = mk_pat_dummy (PatTuple ps)
 
+let p_type (ty: brrr_type) (v: option var_id) : pattern = mk_pat_dummy (PatType ty v)
 let p_wild_at (r: range) : pattern = mk_pat r PatWild
 let p_var_at (r: range) (x: var_id) : pattern = mk_pat r (PatVar x)
+let p_type_at (r: range) (ty: brrr_type) (v: option var_id) : pattern = mk_pat r (PatType ty v)
 
 (* Match arm constructors *)
 let mk_arm (r: range) (p: pattern) (g: option expr) (b: expr) : match_arm =
@@ -551,14 +552,17 @@ let rec expr'_size (e: expr') : Tot nat (decreases e) =
   match e with
   (* Leaves *)
   | ELit _ | EVar _ | EGlobal _ | EHole | EError _
-  | ESizeof _ | EAlignof _ -> 1
+  | ESizeof _ | EAlignof _ | ETypeMethod _ _ -> 1
   | EContinue _ -> 1  (* continue 'label *)
+  | EGoto _ -> 1  (* goto label *)
 
   (* Unary wrappers *)
   | EUnary _ e' | ELoop _ e' | EBox e' | EDeref e' | EBorrow e' | EBorrowMut e'
   | EMove e' | EDrop e' | EThrow e' | EAwait e' | EYield e' | EUnsafe e'
   | EField e' _ | ETupleProj e' _ | EAs e' _ | EIs e' _
-  | EAsync e' | ESpawn e' | EReset _ e' -> 1 + expr_size e'
+  | ELabeled _ e'  (* label: stmt *)
+  | EAsync e' | ESpawn e' | EReset _ e'
+  | EMethodRef e' _ | ELen e' | ECap e' -> 1 + expr_size e'
 
   (* Break/return with optional value *)
   | EBreak _ None | EReturn None -> 1
@@ -662,6 +666,100 @@ let expr_list_size_decreases (e: expr) (rest: list expr)
   expr_size_pos e
 
 (** ============================================================================
+    SUBEXPRESSION RELATIONSHIP
+    ============================================================================ *)
+
+(** Collect immediate subexpressions of an expression *)
+let immediate_subexprs (e: expr) : list expr =
+  match e.loc_value with
+  | ELit _ | EVar _ | EGlobal _ | EHole | EError _ | EContinue _ | EGoto _ -> []
+  | ESizeof _ | EAlignof _ | ETypeMethod _ _ -> []
+  | EUnary _ e' | ELoop _ e' | EBox e' | EDeref e' | EBorrow e' | EBorrowMut e'
+  | EMove e' | EDrop e' | EThrow e' | EAwait e' | EYield e' | EUnsafe e'
+  | EField e' _ | ETupleProj e' _ | EAs e' _ | EIs e' _
+  | EAsync e' | ESpawn e' | EReset _ e' | ELabeled _ e'
+  | EMethodRef e' _ | ELen e' | ECap e' -> [e']
+  | EBreak _ None | EReturn None -> []
+  | EBreak _ (Some e') | EReturn (Some e') -> [e']
+  | EResume _ e' -> [e']
+  | EBinary _ e1 e2 | EIndex e1 e2 | EAssign e1 e2 | ESeq e1 e2 -> [e1; e2]
+  | EIf c t el -> [c; t; el]
+  | EWhile _ c b -> [c; b]
+  | EFor _ _ iter body -> [iter; body]
+  | ELet _ _ e1 e2 | ELetMut _ _ e1 e2 -> [e1; e2]
+  | ELambda _ body | EClosure _ _ body | EShift _ _ body -> [body]
+  | EHandle e' _ -> [e']
+  | ECall fn args -> fn :: args
+  | EMethodCall obj _ args -> obj :: args
+  | ETuple es | EArray es | EBlock es -> es
+  | EStruct _ fields -> map snd fields
+  | EVariant _ _ es -> es
+  | EMatch e' arms -> e' :: map (fun arm -> arm.arm_body) arms
+  | ETry e' catches finally_opt ->
+      let catch_bodies = map (fun c -> c.catch_body) catches in
+      (match finally_opt with
+       | None -> e' :: catch_bodies
+       | Some fin -> e' :: fin :: catch_bodies)
+  | EPerform _ args -> args
+
+(** Check if sub is an immediate subexpression of parent *)
+let is_immediate_subexpr (sub: expr) (parent: expr) : bool =
+  mem sub (immediate_subexprs parent)
+
+(** Check if sub is a subexpression of parent (transitive closure) *)
+let rec is_subexpr (sub: expr) (parent: expr) : Tot bool (decreases expr_size parent) =
+  if expr_eq sub parent then true
+  else
+    let subs = immediate_subexprs parent in
+    List.Tot.existsb (fun s -> is_subexpr sub s) subs
+
+(** Subexpression relation is reflexive *)
+let is_subexpr_refl (e: expr) : Lemma (ensures is_subexpr e e = true) =
+  expr_eq_refl e
+
+(** Subexpression relation is transitive *)
+let is_subexpr_trans (e1 e2 e3: expr)
+    : Lemma (requires is_subexpr e1 e2 = true /\ is_subexpr e2 e3 = true)
+            (ensures is_subexpr e1 e3 = true) =
+  admit()  (* Requires induction over is_subexpr definition *)
+
+(** Subexpressions have smaller size *)
+let subexpr_size_decreases (sub: expr) (parent: expr)
+    : Lemma (requires is_immediate_subexpr sub parent = true)
+            (ensures expr_size sub < expr_size parent) =
+  expr_size_pos parent
+
+(** ============================================================================
+    RANGE PRESERVATION LEMMAS
+    ============================================================================ *)
+
+(** Subexpression ranges are within parent range when properly constructed *)
+let subexpr_range_subset (parent: expr) (sub: expr)
+    : Lemma (requires is_subexpr sub parent = true /\
+                      parent.loc_range <> dummy_range /\
+                      sub.loc_range <> dummy_range)
+            (ensures range_within (expr_range sub) (expr_range parent) \/
+                     sub.loc_range = parent.loc_range) =
+  (* This is a semantic property - AST construction must ensure it *)
+  admit()
+
+(** Match arm body range is within arm range *)
+let match_arm_range_contains_body (arm: match_arm)
+    : Lemma (requires arm.arm_range <> dummy_range /\
+                      arm.arm_body.loc_range <> dummy_range)
+            (ensures range_within (expr_range arm.arm_body) arm.arm_range \/
+                     arm.arm_body.loc_range = arm.arm_range) =
+  admit()
+
+(** Catch arm body range is within catch range *)
+let catch_arm_range_contains_body (arm: catch_arm)
+    : Lemma (requires arm.catch_range <> dummy_range /\
+                      arm.catch_body.loc_range <> dummy_range)
+            (ensures range_within (expr_range arm.catch_body) arm.catch_range \/
+                     arm.catch_body.loc_range = arm.catch_range) =
+  admit()
+
+(** ============================================================================
     EXPRESSION TRAVERSAL
     ============================================================================ *)
 
@@ -686,6 +784,11 @@ let map_expr (f: expr -> expr) (e: expr) : expr =
     | EUnsafe e' -> EUnsafe (f e')
     | EAs e' t -> EAs (f e') t
     | EIs e' t -> EIs (f e') t
+
+    (* Method references and intrinsics *)
+    | EMethodRef e' m -> EMethodRef (f e') m
+    | ELen e' -> ELen (f e')
+    | ECap e' -> ECap (f e')
 
     (* Async/spawn/continuations *)
     | EAsync e' -> EAsync (f e')
@@ -721,6 +824,8 @@ let map_expr (f: expr -> expr) (e: expr) : expr =
     | EFor lbl x iter body -> EFor lbl x (f iter) (f body)
     | EBreak lbl (Some e') -> EBreak lbl (Some (f e'))
     | EReturn (Some e') -> EReturn (Some (f e'))
+    | ELabeled lbl body -> ELabeled lbl (f body)  (* Labeled statement *)
+    (* EGoto is a leaf - handled by catch-all *)
 
     (* Bindings *)
     | ELet p t e1 e2 -> ELet p t (f e1) (f e2)
@@ -747,7 +852,9 @@ let rec fold_expr (#a: Type) (f: a -> expr -> a) (init: a) (e: expr)
   | EUnary _ e' | ELoop _ e' | EBox e' | EDeref e' | EBorrow e' | EBorrowMut e'
   | EMove e' | EDrop e' | EThrow e' | EAwait e' | EYield e' | EUnsafe e'
   | EField e' _ | ETupleProj e' _ | EAs e' _ | EIs e' _
-  | EAsync e' | ESpawn e' | EReset _ e' | EResume _ e' -> fold_expr f acc e'
+  | EAsync e' | ESpawn e' | EReset _ e' | EResume _ e'
+  | ELabeled _ e'
+  | EMethodRef e' _ | ELen e' | ECap e' -> fold_expr f acc e'
 
   (* Binary expressions *)
   | EBinary _ e1 e2 | EIndex e1 e2 | EAssign e1 e2 | ESeq e1 e2 ->
@@ -843,7 +950,11 @@ let rec free_vars (e: expr) : Tot (list var_id) (decreases %[expr_size e; 0]) =
   | EUnary _ e' | ELoop _ e' | EBox e' | EDeref e' | EBorrow e' | EBorrowMut e'
   | EMove e' | EDrop e' | EThrow e' | EAwait e' | EYield e' | EUnsafe e'
   | EField e' _ | ETupleProj e' _ | EAs e' _ | EIs e' _
-  | EAsync e' | ESpawn e' | EReset _ e' -> free_vars e'
+  | EAsync e' | ESpawn e' | EReset _ e'
+  | ELabeled _ e'  (* Labeled: just propagate to body *)
+  | EMethodRef e' _ | ELen e' | ECap e' -> free_vars e'
+
+  (* Goto has no subexpressions - covered by catch-all below returning [] *)
 
   (* Resume binds continuation variable k, free in the value expr *)
   | EResume k e' -> k :: free_vars e'
@@ -904,20 +1015,7 @@ and free_vars_list (es: list expr) : Tot (list var_id) (decreases %[expr_list_si
     EXPRESSION EQUALITY - Structural comparison
     ============================================================================ *)
 
-(* Structural equality for literals *)
-let literal_eq (l1 l2: literal) : bool =
-  match l1, l2 with
-  | LitUnit, LitUnit -> true
-  | LitBool b1, LitBool b2 -> b1 = b2
-  | LitInt n1 t1, LitInt n2 t2 -> n1 = n2 && t1.width = t2.width && t1.sign = t2.sign
-  | LitFloat r1 p1, LitFloat r2 p2 -> float_repr_eq r1 r2 && p1 = p2
-  | LitString s1, LitString s2 -> s1 = s2
-  | LitChar c1, LitChar c2 -> c1 = c2
-  | _, _ -> false
-
-(* Structural equality for operators *)
-let unary_op_eq (op1 op2: unary_op) : bool = op1 = op2
-let binary_op_eq (op1 op2: binary_op) : bool = op1 = op2
+(* literal_eq, unary_op_eq, binary_op_eq are now unfold definitions in Expressions.fsti *)
 
 (* Helper for option type equality - standalone, not part of mutual recursion *)
 let option_type_eq (t1 t2: option brrr_type) : Tot bool =
@@ -1020,6 +1118,7 @@ let rec pattern_eq (p1 p2: pattern) : Tot bool (decreases p1) =
       pattern_eq p1' p2'  (* Guard expression comparison would need expr_eq *)
   | PatRest v1, PatRest v2 -> option_var_eq v1 v2
   | PatAs p1' x1, PatAs p2' x2 -> pattern_eq p1' p2' && x1 = x2
+  | PatType ty1 v1, PatType ty2 v2 -> type_eq ty1 ty2 && option_var_eq v1 v2
   | _, _ -> false
 
 and pattern_list_eq (ps1 ps2: list pattern) : Tot bool (decreases ps1) =
@@ -1055,6 +1154,12 @@ let rec expr_eq (e1 e2: expr) : Tot bool (decreases %[expr_size e1; 0]) =
       expr_eq fn1 fn2 && expr_list_eq args1 args2
   | EMethodCall obj1 m1 args1, EMethodCall obj2 m2 args2 ->
       expr_eq obj1 obj2 && m1 = m2 && expr_list_eq args1 args2
+  | EMethodRef e1' m1, EMethodRef e2' m2 ->
+      expr_eq e1' e2' && m1 = m2
+  | ETypeMethod t1 m1, ETypeMethod t2 m2 ->
+      t1 = t2 && m1 = m2
+  | ELen e1', ELen e2' -> expr_eq e1' e2'
+  | ECap e1', ECap e2' -> expr_eq e1' e2'
 
   (* Data construction *)
   | ETuple es1, ETuple es2 -> expr_list_eq es1 es2
@@ -1082,6 +1187,8 @@ let rec expr_eq (e1 e2: expr) : Tot bool (decreases %[expr_size e1; 0]) =
   | EBreak lbl1 (Some e1'), EBreak lbl2 (Some e2') ->
       option_label_eq lbl1 lbl2 && expr_eq e1' e2'
   | EContinue lbl1, EContinue lbl2 -> option_label_eq lbl1 lbl2
+  | EGoto lbl1, EGoto lbl2 -> lbl1 = lbl2  (* Labels must match exactly *)
+  | ELabeled lbl1 body1, ELabeled lbl2 body2 -> lbl1 = lbl2 && expr_eq body1 body2
   | EReturn None, EReturn None -> true
   | EReturn (Some e1'), EReturn (Some e2') -> expr_eq e1' e2'
 
@@ -1217,6 +1324,7 @@ let rec pattern_eq_refl p =
   | PatGuard p' _ -> pattern_eq_refl p'
   | PatRest _ -> ()
   | PatAs p' _ -> pattern_eq_refl p'
+  | PatType ty _ -> type_eq_refl ty
 
 and pattern_list_eq_refl ps =
   match ps with
@@ -1232,12 +1340,14 @@ let rec expr_eq_refl e =
   match e.loc_value with
   (* Leaves *)
   | ELit _ | EVar _ | EGlobal _ | EHole | EError _ -> ()
-  | EContinue _ -> ()
+  | EContinue _ | EGoto _ -> ()
   | ESizeof t | EAlignof t -> type_eq_refl t
+  | ETypeMethod _ _ -> ()
 
   (* Unary operations *)
   | EUnary _ e' -> expr_eq_refl e'
   | EBox e' | EDeref e' | EBorrow e' | EBorrowMut e' | EMove e' | EDrop e' -> expr_eq_refl e'
+  | ELabeled _ e' -> expr_eq_refl e'
   | EThrow e' | EAwait e' | EYield e' -> expr_eq_refl e'
   | EAsync e' | ESpawn e' | EResume _ e' | EReset _ e' -> expr_eq_refl e'
 
@@ -1250,6 +1360,8 @@ let rec expr_eq_refl e =
   (* Calls *)
   | ECall fn args -> expr_eq_refl fn; expr_list_eq_refl args
   | EMethodCall obj _ args -> expr_eq_refl obj; expr_list_eq_refl args
+  | EMethodRef e' _ -> expr_eq_refl e'
+  | ELen e' | ECap e' -> expr_eq_refl e'
 
   (* Data construction *)
   | ETuple es | EArray es | EBlock es -> expr_list_eq_refl es
@@ -1368,6 +1480,7 @@ let rec pattern_eq_sym p1 p2 =
   | PatGuard p1' _, PatGuard p2' _ -> pattern_eq_sym p1' p2'
   | PatRest _, PatRest _ -> ()
   | PatAs p1' _, PatAs p2' _ -> pattern_eq_sym p1' p2'
+  | PatType ty1 _, PatType ty2 _ -> type_eq_sym ty1 ty2
   | _, _ -> ()
 
 and pattern_list_eq_sym ps1 ps2 =
@@ -1389,9 +1502,10 @@ let rec expr_eq_sym e1 e2 =
   match e1.loc_value, e2.loc_value with
   (* Leaves *)
   | ELit _, ELit _ | EVar _, EVar _ | EGlobal _, EGlobal _ -> ()
-  | EContinue _, EContinue _ | EHole, EHole | EError _, EError _ -> ()
+  | EContinue _, EContinue _ | EGoto _, EGoto _ | EHole, EHole | EError _, EError _ -> ()
   | ESizeof t1, ESizeof t2 -> type_eq_sym t1 t2
   | EAlignof t1, EAlignof t2 -> type_eq_sym t1 t2
+  | ETypeMethod _ _, ETypeMethod _ _ -> ()
 
   (* Unary operations *)
   | EUnary _ e1', EUnary _ e2' -> expr_eq_sym e1' e2'
@@ -1399,6 +1513,7 @@ let rec expr_eq_sym e1 e2 =
   | EBorrowMut e1', EBorrowMut e2' | EMove e1', EMove e2' | EDrop e1', EDrop e2' -> expr_eq_sym e1' e2'
   | EThrow e1', EThrow e2' | EAwait e1', EAwait e2' | EYield e1', EYield e2' -> expr_eq_sym e1' e2'
   | EUnsafe e1', EUnsafe e2' -> expr_eq_sym e1' e2'
+  | ELabeled _ e1', ELabeled _ e2' -> expr_eq_sym e1' e2'
 
   (* New async/spawn/continuation operations *)
   | EAsync e1', EAsync e2' | ESpawn e1', ESpawn e2' -> expr_eq_sym e1' e2'
@@ -1415,6 +1530,8 @@ let rec expr_eq_sym e1 e2 =
   (* Calls *)
   | ECall fn1 args1, ECall fn2 args2 -> expr_eq_sym fn1 fn2; expr_list_eq_sym args1 args2
   | EMethodCall obj1 _ args1, EMethodCall obj2 _ args2 -> expr_eq_sym obj1 obj2; expr_list_eq_sym args1 args2
+  | EMethodRef e1' _, EMethodRef e2' _ -> expr_eq_sym e1' e2'
+  | ELen e1', ELen e2' | ECap e1', ECap e2' -> expr_eq_sym e1' e2'
 
   (* Data construction *)
   | ETuple es1, ETuple es2 | EArray es1, EArray es2 | EBlock es1, EBlock es2 -> expr_list_eq_sym es1 es2
@@ -1544,6 +1661,7 @@ let rec pattern_eq_trans p1 p2 p3 =
   | PatGuard p1' _, PatGuard p2' _, PatGuard p3' _ -> pattern_eq_trans p1' p2' p3'
   | PatRest _, PatRest _, PatRest _ -> ()
   | PatAs p1' _, PatAs p2' _, PatAs p3' _ -> pattern_eq_trans p1' p2' p3'
+  | PatType ty1 _, PatType ty2 _, PatType ty3 _ -> type_eq_trans ty1 ty2 ty3
   | _, _, _ -> ()
 
 and pattern_list_eq_trans ps1 ps2 ps3 =
@@ -1566,9 +1684,10 @@ let rec expr_eq_trans e1 e2 e3 =
   match e1.loc_value, e2.loc_value, e3.loc_value with
   (* Leaves *)
   | ELit _, ELit _, ELit _ | EVar _, EVar _, EVar _ | EGlobal _, EGlobal _, EGlobal _ -> ()
-  | EContinue _, EContinue _, EContinue _ | EHole, EHole, EHole | EError _, EError _, EError _ -> ()
+  | EContinue _, EContinue _, EContinue _ | EGoto _, EGoto _, EGoto _ | EHole, EHole, EHole | EError _, EError _, EError _ -> ()
   | ESizeof t1, ESizeof t2, ESizeof t3 -> type_eq_trans t1 t2 t3
   | EAlignof t1, EAlignof t2, EAlignof t3 -> type_eq_trans t1 t2 t3
+  | ETypeMethod _ _, ETypeMethod _ _, ETypeMethod _ _ -> ()
 
   (* Unary operations *)
   | EUnary _ e1', EUnary _ e2', EUnary _ e3' -> expr_eq_trans e1' e2' e3'
@@ -1577,6 +1696,7 @@ let rec expr_eq_trans e1 e2 e3 =
   | EMove e1', EMove e2', EMove e3' | EDrop e1', EDrop e2', EDrop e3' -> expr_eq_trans e1' e2' e3'
   | EThrow e1', EThrow e2', EThrow e3' | EAwait e1', EAwait e2', EAwait e3'
   | EYield e1', EYield e2', EYield e3' | EUnsafe e1', EUnsafe e2', EUnsafe e3' -> expr_eq_trans e1' e2' e3'
+  | ELabeled _ e1', ELabeled _ e2', ELabeled _ e3' -> expr_eq_trans e1' e2' e3'
 
   (* New async/spawn/continuation operations *)
   | EAsync e1', EAsync e2', EAsync e3' | ESpawn e1', ESpawn e2', ESpawn e3' -> expr_eq_trans e1' e2' e3'
@@ -1599,6 +1719,10 @@ let rec expr_eq_trans e1 e2 e3 =
       expr_eq_trans fn1 fn2 fn3; expr_list_eq_trans args1 args2 args3
   | EMethodCall obj1 _ args1, EMethodCall obj2 _ args2, EMethodCall obj3 _ args3 ->
       expr_eq_trans obj1 obj2 obj3; expr_list_eq_trans args1 args2 args3
+  | EMethodRef e1' _, EMethodRef e2' _, EMethodRef e3' _ ->
+      expr_eq_trans e1' e2' e3'
+  | ELen e1', ELen e2', ELen e3' | ECap e1', ECap e2', ECap e3' ->
+      expr_eq_trans e1' e2' e3'
 
   (* Data construction *)
   | ETuple es1, ETuple es2, ETuple es3
@@ -1692,69 +1816,6 @@ and catch_arm_list_eq_trans c1 c2 c3 =
 #pop-options
 
 (** ============================================================================
-    SUBEXPRESSION RELATIONSHIP
-    ============================================================================ *)
-
-(** Collect immediate subexpressions of an expression *)
-let immediate_subexprs (e: expr) : list expr =
-  match e.loc_value with
-  | ELit _ | EVar _ | EGlobal _ | EHole | EError _ | EContinue _ -> []
-  | ESizeof _ | EAlignof _ -> []
-  | EUnary _ e' | ELoop _ e' | EBox e' | EDeref e' | EBorrow e' | EBorrowMut e'
-  | EMove e' | EDrop e' | EThrow e' | EAwait e' | EYield e' | EUnsafe e'
-  | EField e' _ | ETupleProj e' _ | EAs e' _ | EIs e' _
-  | EAsync e' | ESpawn e' | EReset _ e' -> [e']
-  | EBreak _ None | EReturn None -> []
-  | EBreak _ (Some e') | EReturn (Some e') -> [e']
-  | EResume _ e' -> [e']
-  | EBinary _ e1 e2 | EIndex e1 e2 | EAssign e1 e2 | ESeq e1 e2 -> [e1; e2]
-  | EIf c t el -> [c; t; el]
-  | EWhile _ c b -> [c; b]
-  | EFor _ _ iter body -> [iter; body]
-  | ELet _ _ e1 e2 | ELetMut _ _ e1 e2 -> [e1; e2]
-  | ELambda _ body | EClosure _ _ body | EShift _ _ body -> [body]
-  | EHandle e' _ -> [e']
-  | ECall fn args -> fn :: args
-  | EMethodCall obj _ args -> obj :: args
-  | ETuple es | EArray es | EBlock es -> es
-  | EStruct _ fields -> map snd fields
-  | EVariant _ _ es -> es
-  | EMatch e' arms -> e' :: map (fun arm -> arm.arm_body) arms
-  | ETry e' catches finally_opt ->
-      let catch_bodies = map (fun c -> c.catch_body) catches in
-      (match finally_opt with
-       | None -> e' :: catch_bodies
-       | Some fin -> e' :: fin :: catch_bodies)
-  | EPerform _ args -> args
-
-(** Check if sub is an immediate subexpression of parent *)
-let is_immediate_subexpr (sub: expr) (parent: expr) : bool =
-  mem sub (immediate_subexprs parent)
-
-(** Check if sub is a subexpression of parent (transitive closure) *)
-let rec is_subexpr (sub: expr) (parent: expr) : Tot bool (decreases expr_size parent) =
-  if expr_eq sub parent then true
-  else
-    let subs = immediate_subexprs parent in
-    List.Tot.existsb (fun s -> is_subexpr sub s) subs
-
-(** Subexpression relation is reflexive *)
-let is_subexpr_refl (e: expr) : Lemma (ensures is_subexpr e e = true) =
-  expr_eq_refl e
-
-(** Subexpression relation is transitive *)
-let is_subexpr_trans (e1 e2 e3: expr)
-    : Lemma (requires is_subexpr e1 e2 = true /\ is_subexpr e2 e3 = true)
-            (ensures is_subexpr e1 e3 = true) =
-  admit()  (* Requires induction over is_subexpr definition *)
-
-(** Subexpressions have smaller size *)
-let subexpr_size_decreases (sub: expr) (parent: expr)
-    : Lemma (requires is_immediate_subexpr sub parent = true)
-            (ensures expr_size sub < expr_size parent) =
-  expr_size_pos parent
-
-(** ============================================================================
     RANGE PRESERVATION LEMMAS
     ============================================================================ *)
 
@@ -1809,6 +1870,8 @@ let rec pattern_bound_vars (p: pattern) : Tot (list var_id) (decreases p) =
   | PatOr p1 p2 -> pattern_bound_vars p1 @ pattern_bound_vars p2
   | PatGuard p' _ -> pattern_bound_vars p'
   | PatRef p' | PatBox p' -> pattern_bound_vars p'
+  | PatType _ None -> []
+  | PatType _ (Some x) -> [x]
 
 (** Check for duplicate bindings in pattern *)
 let pattern_has_duplicate_bindings (p: pattern) : bool =
@@ -1833,6 +1896,7 @@ let pattern_wf (p: pattern) : Tot bool (decreases p) =
    | PatOr p1 p2 -> pattern_wf p1 && pattern_wf p2
    | PatGuard p' _ -> pattern_wf p'
    | PatRef p' | PatBox p' -> pattern_wf p'
+   | PatType _ (Some x) -> is_valid_var_id x
    | _ -> true)
 
 (** Check if expression is well-formed *)
@@ -1880,13 +1944,34 @@ let count_nodes (e: expr) : Tot nat =
 let is_free_in (v: var_id) (e: expr) : Tot bool =
   mem v (free_vars e)
 
+(** Variables that may be bound by a parent expression.
+    Returns the list of variables that the parent binds (and thus may filter from free_vars). *)
+let parent_binds (parent: expr) : list var_id =
+  match parent.loc_value with
+  | ELet p _ _ _ ->
+      (match pattern_var p with
+       | Some x -> [x]
+       | None -> pattern_bound_vars p)
+  | ELetMut x _ _ _ -> [x]
+  | EFor _ x _ _ -> [x]
+  | ELambda params _ -> map fst params
+  | EClosure params _ _ -> map fst params
+  | EShift _ k _ -> [k]
+  | EMatch _ arms ->
+      (* Match binds variables in patterns, but only in their respective bodies *)
+      []  (* Simplified - pattern vars are local to each arm *)
+  | _ -> []
+
 (** Free variables of subexpression lemma *)
 let free_vars_subexpr (sub: expr) (parent: expr)
     : Lemma (requires is_immediate_subexpr sub parent = true)
             (ensures forall v. mem v (free_vars sub) ==>
                               mem v (free_vars parent) \/
-                              (exists p. ELet? parent.loc_value /\ Some? (pattern_var p))) =
-  admit()  (* Requires case analysis on parent structure *)
+                              mem v (parent_binds parent)) =
+  (* This requires case analysis on parent structure.
+     For most cases, free_vars concatenates subexpr free_vars.
+     For binding forms, some variables are filtered but are in parent_binds. *)
+  admit()
 
 (** ============================================================================
     EXPRESSION SUBSTITUTION (Capture-Avoiding)
@@ -1921,6 +2006,7 @@ let rec rename_pattern (old_var new_var: var_id) (p: pattern) : pattern =
     | PatGuard p' g -> PatGuard (rename_pattern old_var new_var p') g  (* Don't rename in guard expr *)
     | PatRef p' -> PatRef (rename_pattern old_var new_var p')
     | PatBox p' -> PatBox (rename_pattern old_var new_var p')
+    | PatType ty (Some x) when x = old_var -> PatType ty (Some new_var)
     | _ -> p.loc_value
   in
   { loc_value = new_inner; loc_range = p.loc_range }
@@ -1960,6 +2046,14 @@ let rec rename_expr (old_var new_var: var_id) (e: expr) : Tot expr (decreases ex
           EFor lbl new_var (rename_expr old_var new_var iter) (rename_expr old_var new_var body)
         else
           EFor lbl x (rename_expr old_var new_var iter) (rename_expr old_var new_var body)
+    (* ELabeled: no variable binding, just rename in body *)
+    | ELabeled lbl body -> ELabeled lbl (rename_expr old_var new_var body)
+    (* Method references and intrinsics *)
+    | EMethodRef e' m -> EMethodRef (rename_expr old_var new_var e') m
+    | ELen e' -> ELen (rename_expr old_var new_var e')
+    | ECap e' -> ECap (rename_expr old_var new_var e')
+    (* ETypeMethod: no variables, handled by catch-all *)
+    (* EGoto: no variables, handled by catch-all *)
     | _ -> e.loc_value  (* Other cases: no variable occurrences or complex - simplified *)
   in
   { loc_value = new_inner; loc_range = r }
@@ -2016,6 +2110,14 @@ let rec subst_expr (var: var_id) (replacement: expr) (target: expr)
           EFor lbl x (subst_expr var replacement iter) body  (* x shadows var in body *)
         else
           EFor lbl x (subst_expr var replacement iter) (subst_expr var replacement body)
+    (* ELabeled: no variable binding, just substitute in body *)
+    | ELabeled lbl body -> ELabeled lbl (subst_expr var replacement body)
+    (* Method references and intrinsics *)
+    | EMethodRef e' m -> EMethodRef (subst_expr var replacement e') m
+    | ELen e' -> ELen (subst_expr var replacement e')
+    | ECap e' -> ECap (subst_expr var replacement e')
+    (* ETypeMethod: no subexpressions, handled by catch-all *)
+    (* EGoto: no subexpressions, handled by catch-all *)
     | _ -> target.loc_value  (* Simplified for remaining cases *)
   in
   { loc_value = new_inner; loc_range = r }
@@ -2255,6 +2357,8 @@ and pattern_to_string (p: pattern) : string =
   | PatLit l -> literal_to_string l
   | PatTuple ps -> "(" ^ String.concat ", " (map pattern_to_string ps) ^ ")"
   | PatAs p' x -> pattern_to_string p' ^ " @ " ^ x
+  | PatType ty None -> ": " ^ type_to_string ty
+  | PatType ty (Some x) -> x ^ ": " ^ type_to_string ty
   | _ -> "<pattern>"
 
 (** Parse expression from string (stub - not implemented) *)

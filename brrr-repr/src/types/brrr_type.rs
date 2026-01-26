@@ -6,7 +6,7 @@ use lasso::Spur;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    EnumType, FuncType, ModalKind, NumericType, PrimKind, StructType, WrapperKind,
+    EnumType, FuncType, InterfaceType, ModalKind, NumericType, PrimKind, StructType, WrapperKind,
 };
 
 /// Type variable identifier (interned string)
@@ -18,13 +18,14 @@ pub type TypeName = Spur;
 /// Type ID for references within a module
 pub type TypeId = u32;
 
-/// Main type definition - 12 constructors for SMT tractability
+/// Main type definition - 14 constructors for SMT tractability
 /// Maps to F*:
 /// ```fstar
 /// noeq type typ =
 ///   | TPrim : prim_kind -> typ
 ///   | TNumeric : numeric_type -> typ
 ///   | TWrap : wrapper_kind -> typ -> typ
+///   | TSizedArray : nat -> typ -> typ  (* NEW: [N]T fixed-size arrays *)
 ///   | TModal : modal_kind -> typ -> typ
 ///   | TResult : typ -> typ -> typ
 ///   | TTuple : list typ -> typ
@@ -34,6 +35,7 @@ pub type TypeId = u32;
 ///   | TNamed : type_name -> typ
 ///   | TStruct : struct_type -> typ
 ///   | TEnum : enum_type -> typ
+///   | TInterface : interface_type -> typ
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BrrrType {
@@ -45,7 +47,13 @@ pub enum BrrrType {
 
     /// Wrapper types: Array, Slice, Option, Box, Ref, RefMut, Rc, Arc, Raw
     /// Sugar: `[T]`, `&[T]`, `T?`, `&T`, `&mut T`, `*T`
+    /// Note: WrapperKind::Array represents unsized arrays; use SizedArray for fixed-size.
     Wrap(WrapperKind, Box<BrrrType>),
+
+    /// Fixed-size array type: `[N]T` where N is known at compile time.
+    /// Distinct from Wrap(Array, T) which represents unsized arrays.
+    /// Go: `[5]int`, Rust: `[i32; 5]`, C: `int[5]`
+    SizedArray(usize, Box<BrrrType>),
 
     /// Modal refs: `□ T @ p` (box), `◇ T` (diamond)
     Modal(ModalKind, Box<BrrrType>),
@@ -73,6 +81,10 @@ pub enum BrrrType {
 
     /// Enum type definition
     Enum(EnumType),
+
+    /// Interface/trait type definition (for Go interfaces, TypeScript interfaces, etc.)
+    /// Empty interface `interface{}` should use `Prim(PrimKind::Dynamic)` instead
+    Interface(InterfaceType),
 }
 
 impl BrrrType {
@@ -97,9 +109,16 @@ impl BrrrType {
     /// Unknown type `⊤safe`
     pub const UNKNOWN: Self = Self::Prim(PrimKind::Unknown);
 
-    /// Create an array type `[T]`
+    /// Create an unsized array type `[T]`
     pub fn array(elem: Self) -> Self {
         Self::Wrap(WrapperKind::Array, Box::new(elem))
+    }
+
+    /// Create a fixed-size array type `[N]T`
+    ///
+    /// Go: `[5]int`, Rust: `[i32; 5]`, C: `int[5]`
+    pub fn sized_array(size: usize, elem: Self) -> Self {
+        Self::SizedArray(size, Box::new(elem))
     }
 
     /// Create a slice type `&[T]`
@@ -171,15 +190,35 @@ impl BrrrType {
             Self::Prim(_) => 0,
             Self::Numeric(_) => 1,
             Self::Wrap(_, _) => 2,
-            Self::Modal(_, _) => 3,
-            Self::Result(_, _) => 4,
-            Self::Tuple(_) => 5,
-            Self::Func(_) => 6,
-            Self::Var(_) => 7,
-            Self::App(_, _) => 8,
-            Self::Named(_) => 9,
-            Self::Struct(_) => 10,
-            Self::Enum(_) => 11,
+            Self::SizedArray(_, _) => 3,
+            Self::Modal(_, _) => 4,
+            Self::Result(_, _) => 5,
+            Self::Tuple(_) => 6,
+            Self::Func(_) => 7,
+            Self::Var(_) => 8,
+            Self::App(_, _) => 9,
+            Self::Named(_) => 10,
+            Self::Struct(_) => 11,
+            Self::Enum(_) => 12,
+            Self::Interface(_) => 13,
+        }
+    }
+
+    /// Is this an interface type?
+    pub const fn is_interface(&self) -> bool {
+        matches!(self, Self::Interface(_))
+    }
+
+    /// Is this a sized array type?
+    pub const fn is_sized_array(&self) -> bool {
+        matches!(self, Self::SizedArray(_, _))
+    }
+
+    /// Get the size of a sized array, if this is one.
+    pub const fn array_size(&self) -> Option<usize> {
+        match self {
+            Self::SizedArray(size, _) => Some(*size),
+            _ => None,
         }
     }
 
@@ -187,7 +226,9 @@ impl BrrrType {
     pub fn children(&self) -> Vec<&BrrrType> {
         match self {
             Self::Prim(_) | Self::Numeric(_) | Self::Var(_) | Self::Named(_) => vec![],
-            Self::Wrap(_, inner) | Self::Modal(_, inner) => vec![inner.as_ref()],
+            Self::Wrap(_, inner) | Self::SizedArray(_, inner) | Self::Modal(_, inner) => {
+                vec![inner.as_ref()]
+            }
             Self::Result(ok, err) => vec![ok.as_ref(), err.as_ref()],
             Self::Tuple(elems) => elems.iter().collect(),
             Self::Func(f) => {
@@ -207,6 +248,17 @@ impl BrrrType {
                 .iter()
                 .flat_map(|v| v.fields.iter())
                 .collect(),
+            Self::Interface(i) => {
+                // Collect return types and parameter types from method signatures
+                let mut children = Vec::new();
+                for method in &i.methods {
+                    for param in &method.params {
+                        children.push(&param.ty);
+                    }
+                    children.push(&method.return_type);
+                }
+                children
+            }
         }
     }
 }
@@ -243,5 +295,21 @@ mod tests {
             1
         );
         assert_eq!(BrrrType::array(BrrrType::BOOL).discriminant(), 2);
+        assert_eq!(BrrrType::sized_array(5, BrrrType::BOOL).discriminant(), 3);
+    }
+
+    #[test]
+    fn test_sized_array() {
+        let int32 = BrrrType::Numeric(NumericType::Int(IntType::I32));
+        let sized = BrrrType::sized_array(10, int32.clone());
+
+        assert!(sized.is_sized_array());
+        assert_eq!(sized.array_size(), Some(10));
+        assert_eq!(sized.children().len(), 1);
+
+        // Unsized array should not be a sized array
+        let unsized_arr = BrrrType::array(int32);
+        assert!(!unsized_arr.is_sized_array());
+        assert_eq!(unsized_arr.array_size(), None);
     }
 }

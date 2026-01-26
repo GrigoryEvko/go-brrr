@@ -153,6 +153,19 @@ val can_borrow_shared : var_state -> bool
 val can_borrow_mut : var_state -> bool
 
 (** ============================================================================
+    VARIABLE ENTRY
+    ============================================================================ *)
+
+(* Variable entry type *)
+val var_entry : Type0
+
+(* Accessors for var_entry fields - needed for interface *)
+val ve_var : var_entry -> var_id
+val ve_ty : var_entry -> brrr_type
+val ve_mode : var_entry -> mode
+val ve_state : var_entry -> var_state
+
+(** ============================================================================
     BORROW STATE
     ============================================================================ *)
 
@@ -175,6 +188,26 @@ val get_var_state : var_id -> borrow_state -> option var_state
 val get_var_mode : var_id -> borrow_state -> option mode
 
 (** ============================================================================
+    LOAN LOOKUP HELPERS
+    ============================================================================ *)
+
+(* Find loan by ID *)
+val find_loan : loan_id -> borrow_state -> option loan
+
+(* Get all loans for a variable *)
+val loans_for_var : var_id -> borrow_state -> list loan
+
+(** ============================================================================
+    MOVE AND DROP
+    ============================================================================ *)
+
+(* Check if a move is valid and perform it *)
+val check_move : var_id -> borrow_state -> option borrow_state
+
+(* Check if a drop is valid and perform it *)
+val check_drop : var_id -> borrow_state -> option borrow_state
+
+(** ============================================================================
     BORROW OPERATIONS
     ============================================================================ *)
 
@@ -189,16 +222,6 @@ val begin_borrow : var_id -> bool -> borrow_state -> option (loan_id & borrow_st
 
 (* End a borrow *)
 val end_borrow : loan_id -> borrow_state -> option borrow_state
-
-(** ============================================================================
-    MOVE AND DROP
-    ============================================================================ *)
-
-(* Check if a move is valid and perform it *)
-val check_move : var_id -> borrow_state -> option borrow_state
-
-(* Check if a drop is valid and perform it *)
-val check_drop : var_id -> borrow_state -> option borrow_state
 
 (** ============================================================================
     SCOPE MANAGEMENT
@@ -246,18 +269,18 @@ val exclusive_conflicts : x:var_id -> st:borrow_state ->
 (* Lemma: After move of linear variable, variable state is VsMoved *)
 val move_makes_unavailable : x:var_id -> st:borrow_state ->
   Lemma (requires Some? (check_move x st) /\
-                  (match find_var x st with Some ve -> ve.ve_mode = MOne | None -> false))
+                  (match find_var x st with Some ve -> ve_mode ve = MOne | None -> false))
         (ensures (match check_move x st with
                   | Some st' ->
                       (match find_var x st' with
-                       | Some ve' -> ve'.ve_state = VsMoved
+                       | Some ve' -> ve_state ve' = VsMoved
                        | None -> true)
                   | None -> true))
 
 (* Lemma: Cannot move borrowed variable *)
 val cannot_move_borrowed : x:var_id -> st:borrow_state ->
   Lemma (requires (match find_var x st with
-                   | Some ve -> not (can_move_state ve.ve_state)
+                   | Some ve -> not (can_move_state (ve_state ve))
                    | None -> true))
         (ensures None? (check_move x st))
 
@@ -269,6 +292,19 @@ val end_borrow_restores : lid:loan_id -> st:borrow_state ->
                   | None -> true))
 
 (** ============================================================================
+    EXTENDED BORROW STATE WITH REGIONS
+    ============================================================================ *)
+
+(* Extended borrow state with region tracking *)
+val extended_borrow_state : Type0
+
+(* Enter letregion scope: introduce fresh region *)
+val enter_letregion : extended_borrow_state -> region & extended_borrow_state
+
+(* Exit letregion scope: invalidate region, check no escaping references *)
+val exit_letregion : region -> brrr_type -> extended_borrow_state -> borrow_result extended_borrow_state
+
+(** ============================================================================
     NEW SOUNDNESS THEOREMS - Borrow Safety
     ============================================================================ *)
 
@@ -277,7 +313,7 @@ val end_borrow_restores : lid:loan_id -> st:borrow_state ->
 val borrow_exclusive : x:var_id -> st:borrow_state -> lid:loan_id ->
   Lemma (requires well_formed st /\
                   (match find_var x st with
-                   | Some ve -> VsBorrowedMut? ve.ve_state
+                   | Some ve -> VsBorrowedMut? (ve_state ve)
                    | None -> false))
         (ensures length (loans_for_var x st) = 1)
 
@@ -286,7 +322,7 @@ val borrow_exclusive : x:var_id -> st:borrow_state -> lid:loan_id ->
 val borrow_live : x:var_id -> st:borrow_state ->
   Lemma (requires well_formed st)
         (ensures (match find_var x st with
-                  | Some ve -> (VsMoved? ve.ve_state \/ VsDropped? ve.ve_state) ==>
+                  | Some ve -> (VsMoved? (ve_state ve) \/ VsDropped? (ve_state ve)) ==>
                                length (loans_for_var x st) = 0
                   | None -> true))
 
@@ -310,35 +346,3 @@ val constraints_satisfiable : lifetime_constraints -> bool
 
 (* Infer minimal lifetimes from constraints *)
 val solve_lifetime_constraints : lifetime_constraints -> option (list (region & region))
-
-(** ============================================================================
-    EXTENDED BORROW STATE WITH REGIONS
-    ============================================================================ *)
-
-(* Extended borrow state with region tracking *)
-val extended_borrow_state : Type0
-
-(* Enter letregion scope: introduce fresh region *)
-val enter_letregion : extended_borrow_state -> region & extended_borrow_state
-
-(* Exit letregion scope: invalidate region, check no escaping references *)
-val exit_letregion : region -> brrr_type -> extended_borrow_state -> borrow_result extended_borrow_state
-
-(** ============================================================================
-    HELPER FUNCTIONS
-    ============================================================================ *)
-
-(* Get all loans for a variable *)
-val loans_for_var : var_id -> borrow_state -> list loan
-
-(* Find loan by ID *)
-val find_loan : loan_id -> borrow_state -> option loan
-
-(* Variable entry type *)
-val var_entry : Type0
-
-(* Accessors for var_entry fields - needed for interface *)
-val ve_var : var_entry -> var_id
-val ve_ty : var_entry -> brrr_type
-val ve_mode : var_entry -> mode
-val ve_state : var_entry -> var_state

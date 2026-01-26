@@ -2,7 +2,7 @@
  * BrrrLang.Core.SecurityTypes - Interface
  *
  * Public interface for the Unified Security Type System.
- * Following HACL*/EverParse patterns for .fsti/.fst separation.
+ * Following HACL-star/EverParse patterns for .fsti/.fst separation.
  *
  * This interface exports:
  *   - Security label types (sec_label, taint_kind, confidentiality, integrity)
@@ -97,23 +97,56 @@ val sec_top : sec_label
     SECURITY LABEL ORDERING
     ============================================================================ *)
 
+(**
+ * Confidentiality ordering: Public < Secret
+ * Marked inline_for_extraction for efficient evaluation.
+ *)
 val conf_leq : c1:confidentiality -> c2:confidentiality -> bool
+
+(**
+ * Integrity ordering: Trusted < Untrusted (for taint flow)
+ * Untrusted is "higher" because tainted data can flow to more tainted.
+ *)
 val integ_leq : i1:integrity -> i2:integrity -> bool
+
+(** Check if taint kind is in set - recursive *)
 val taint_in_set : k:taint_kind -> ks:taint_set -> bool
+
+(** Taint set subset ordering - recursive *)
 val taint_set_subset : ks1:taint_set -> ks2:taint_set -> bool
+
+(**
+ * Security label ordering (product order).
+ * l1 <= l2 means data at l1 can flow to l2.
+ *)
 val sec_label_leq : l1:sec_label -> l2:sec_label -> bool
 
 (** ============================================================================
     SECURITY LABEL LATTICE OPERATIONS
     ============================================================================ *)
 
+(** Confidentiality join (least upper bound) *)
 val conf_join : c1:confidentiality -> c2:confidentiality -> confidentiality
+
+(** Confidentiality meet (greatest lower bound) *)
 val conf_meet : c1:confidentiality -> c2:confidentiality -> confidentiality
+
+(** Integrity join (least upper bound) *)
 val integ_join : i1:integrity -> i2:integrity -> integrity
+
+(** Integrity meet (greatest lower bound) *)
 val integ_meet : i1:integrity -> i2:integrity -> integrity
+
+(** Taint set union (join) - recursive *)
 val taint_set_union : ks1:taint_set -> ks2:taint_set -> taint_set
+
+(** Taint set intersection (meet) - recursive *)
 val taint_set_intersect : ks1:taint_set -> ks2:taint_set -> taint_set
+
+(** Security label join (least upper bound) *)
 val sec_label_join : l1:sec_label -> l2:sec_label -> sec_label
+
+(** Security label meet (greatest lower bound) *)
 val sec_label_meet : l1:sec_label -> l2:sec_label -> sec_label
 
 (** ============================================================================
@@ -131,6 +164,11 @@ val conf_leq_refl : c:confidentiality ->
 val integ_leq_refl : i:integrity ->
   Lemma (ensures integ_leq i i = true)
         [SMTPat (integ_leq i i)]
+
+(** taint_in_set with head - element is in set if it's the head *)
+val taint_in_set_head : k:taint_kind -> rest:taint_set ->
+  Lemma (ensures taint_in_set k (k :: rest) = true)
+        [SMTPat (taint_in_set k (k :: rest))]
 
 val taint_set_subset_refl : ks:taint_set ->
   Lemma (ensures taint_set_subset ks ks = true)
@@ -166,6 +204,29 @@ val taint_set_subset_trans : ks1:taint_set -> ks2:taint_set -> ks3:taint_set ->
 val sec_label_leq_trans : l1:sec_label -> l2:sec_label -> l3:sec_label ->
   Lemma (requires sec_label_leq l1 l2 = true /\ sec_label_leq l2 l3 = true)
         (ensures sec_label_leq l1 l3 = true)
+
+(** ============================================================================
+    TAINT SET UNION LEMMAS
+    ============================================================================ *)
+
+(** taint_set_union includes left operand *)
+val taint_set_union_includes_left : k:taint_kind -> ks1:taint_set -> ks2:taint_set ->
+  Lemma (requires taint_in_set k ks1 = true)
+        (ensures taint_in_set k (taint_set_union ks1 ks2) = true)
+        (decreases ks1)
+
+(** taint_set_union includes right operand *)
+val taint_set_union_includes_right : k:taint_kind -> ks1:taint_set -> ks2:taint_set ->
+  Lemma (requires taint_in_set k ks2 = true)
+        (ensures taint_in_set k (taint_set_union ks1 ks2) = true)
+        (decreases ks1)
+
+(** taint_set_union preserves left operand as subset: ts1 subset (union ts1 ts2)
+ *  This is the set-theoretic property: A subseteq (A union B)
+ *)
+val taint_set_union_subset_left : ts1:taint_set -> ts2:taint_set ->
+  Lemma (ensures taint_set_subset ts1 (taint_set_union ts1 ts2) = true)
+        (decreases ts1)
 
 (** ============================================================================
     LATTICE LAW LEMMAS - ANTISYMMETRY
@@ -217,14 +278,18 @@ val sec_label_meet_glb : l1:sec_label -> l2:sec_label -> lb:sec_label ->
     LATTICE LAW LEMMAS - COMMUTATIVITY AND IDEMPOTENCE
     ============================================================================ *)
 
-val sec_label_join_comm : l1:sec_label -> l2:sec_label ->
-  Lemma (ensures sec_label_join l1 l2 == sec_label_join l2 l1)
+(** sec_label_join is commutative up to set equivalence *)
+val sec_label_join_comm_equiv : l1:sec_label -> l2:sec_label ->
+  Lemma (ensures sec_label_leq (sec_label_join l1 l2) (sec_label_join l2 l1) = true /\
+                  sec_label_leq (sec_label_join l2 l1) (sec_label_join l1 l2) = true)
 
 val sec_label_join_idem : l:sec_label ->
   Lemma (ensures sec_label_join l l == l)
 
-val sec_label_meet_comm : l1:sec_label -> l2:sec_label ->
-  Lemma (ensures sec_label_meet l1 l2 == sec_label_meet l2 l1)
+(** sec_label_meet is commutative up to set equivalence *)
+val sec_label_meet_comm_equiv : l1:sec_label -> l2:sec_label ->
+  Lemma (ensures sec_label_leq (sec_label_meet l1 l2) (sec_label_meet l2 l1) = true /\
+                  sec_label_leq (sec_label_meet l2 l1) (sec_label_meet l1 l2) = true)
 
 val sec_label_meet_idem : l:sec_label ->
   Lemma (ensures sec_label_meet l l == l)

@@ -127,6 +127,11 @@ type sec_typing_result =
   | STyOk    : sec_type -> security_ctx -> effect_row -> sec_typing_result
   | STyError : string -> sec_typing_result
 
+(** Result of security type checking for expression lists *)
+type sec_list_result =
+  | STyOk'    : list sec_type -> security_ctx -> effect_row -> sec_list_result
+  | STyError' : string -> sec_list_result
+
 (** Combine effects from sequential expressions *)
 let seq_effects (e1: effect_row) (e2: effect_row) : effect_row =
   row_join e1 e2
@@ -445,12 +450,7 @@ and sec_infer_list
     (ctx: security_ctx)
     (pc: pc_label)
     (es: list expr)
-    : Tot sec_list_result (decreases es)
-and sec_list_result =
-  | STyOk'    : list sec_type -> security_ctx -> effect_row -> sec_list_result
-  | STyError' : string -> sec_list_result
-
-let rec sec_infer_list ctx pc es =
+    : Tot sec_list_result (decreases es) =
   match es with
   | [] -> STyOk' [] ctx pure
   | e :: rest ->

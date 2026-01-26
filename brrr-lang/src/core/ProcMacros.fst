@@ -318,7 +318,7 @@ let code_at_runtime (#tau: brrr_type) (c: code tau) : staged_code tau =
   { sc_code = c; sc_stage = 0 }
 
 (* Quote: lift expression to next stage *)
-let quote (#tau: brrr_type) (e: expr) : staged_code tau =
+let quote_expr (#tau: brrr_type) (e: expr) : staged_code tau =
   { sc_code = CQuote e; sc_stage = 1 }
 
 (* Splice: lower code to current stage (only valid inside quote) *)

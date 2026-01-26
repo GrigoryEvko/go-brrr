@@ -26,7 +26,7 @@
  *)
 module SeparationLogic
 
-(* Z3 solver options for SMT tractability - following HACL*/EverParse patterns *)
+(* Z3 solver options for SMT tractability - following HACL-star/EverParse patterns *)
 #set-options "--z3rlimit 50 --fuel 0 --ifuel 0"
 
 open FStar.FunctionalExtensionality

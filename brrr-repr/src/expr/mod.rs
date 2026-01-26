@@ -9,7 +9,10 @@ mod pattern;
 mod expression;
 
 pub use location::{Pos, Range, WithLoc};
-pub use literal::Literal;
+pub use literal::{FloatBits, Literal};
 pub use operators::{BinaryOp, UnaryOp};
 pub use pattern::{Pattern, Pattern_};
-pub use expression::{AnnotatedExpr, CatchArm, Expr, Expr_, MatchArm};
+pub use expression::{
+    AnnotatedExpr, CatchArm, Continuation, ContinuationLinearity, EffectHandler, Expr, Expr_,
+    HandlerClause, HandlerDepth, MatchArm, VarId,
+};

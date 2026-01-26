@@ -180,7 +180,7 @@ noeq type smt_term =
 
 (* SMTLIB2 commands *)
 noeq type smt_command =
-  | CmdSetLogic     : logic:string -> smt_command
+  | CmdSetLogic     : logic_name:string -> smt_command
   | CmdDeclareSort  : name:string -> arity:nat -> smt_command
   | CmdDefineSort   : name:string -> params:list string -> def:smt_sort -> smt_command
   | CmdDeclareConst : name:string -> sort:smt_sort -> smt_command
@@ -487,14 +487,14 @@ let rec smt_term_to_string (t: smt_term) : Tot string (decreases t) =
 
 (* SMT solver configuration *)
 noeq type smt_config = {
-  timeout_ms  : nat;            (* Solver timeout in milliseconds *)
-  logic       : string;         (* SMTLIB2 logic (e.g., "QF_LIA", "ALL") *)
-  incremental : bool;           (* Use incremental mode *)
+  timeout_ms   : nat;           (* Solver timeout in milliseconds *)
+  smt_logic    : string;        (* SMTLIB2 logic (e.g., "QF_LIA", "ALL") *)
+  incremental  : bool;          (* Use incremental mode *)
 }
 
 let default_smt_config : smt_config = {
   timeout_ms = 5000;            (* 5 second default timeout *)
-  logic = "ALL";                (* Full logic by default *)
+  smt_logic = "ALL";            (* Full logic by default *)
   incremental = true;
 }
 
@@ -594,7 +594,7 @@ assume val smt_soundness_unsat :
 
 (* Completeness for decidable fragments: If valid, SMT will return UNSAT *)
 assume val smt_completeness_qf_lia :
-  config:smt_config{config.logic = "QF_LIA"} ->
+  config:smt_config{config.smt_logic = "QF_LIA"} ->
   phi:smt_term ->
   Lemma (requires True)  (* phi is in QF_LIA *)
         (ensures smt_check_sat config phi <> SmtUnknown "incomplete")

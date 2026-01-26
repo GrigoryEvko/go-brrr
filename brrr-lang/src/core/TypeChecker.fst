@@ -1789,6 +1789,71 @@ let rec infer_type (gctx: global_ctx) (ctx: type_ctx) (e: expr)
             | _ -> infer_err_msg "Method call on non-struct type requires trait resolution")
        | err -> err)
 
+  (* T-MethodRef: Bound method reference (obj.method without calling).
+     Returns a function type where the receiver is already captured. *)
+  | EMethodRef receiver method_name ->
+      (match infer_type gctx ctx receiver with
+       | InferOk recv_ty eff_recv ctx1 ->
+           (match recv_ty with
+            | TStruct st ->
+                (match List.Tot.find (fun f -> f.field_name = method_name) st.struct_fields with
+                 | Some f ->
+                     (match f.field_ty with
+                      | TFunc ft ->
+                          (* Method ref returns a function without the first self parameter *)
+                          InferOk f.field_ty eff_recv ctx1
+                      | _ -> infer_err_msg ("Field " ^ method_name ^ " is not a function"))
+                 | None -> infer_err_msg ("Unknown method: " ^ method_name))
+            | _ -> infer_err_msg "Method reference on non-struct type requires trait resolution")
+       | err -> err)
+
+  (* T-TypeMethod: Unbound type method reference (T::method).
+     Returns the full function type including self parameter.
+     Note: Looks up type name in global context to find the type scheme. *)
+  | ETypeMethod type_name method_name ->
+      (* Look up type in global context and find the method *)
+      (match lookup_global type_name gctx with
+       | Some scheme ->
+           (* Instantiate the scheme to get the type *)
+           (match scheme.ts_body with
+            | TStruct st ->
+                (match List.Tot.find (fun f -> f.field_name = method_name) st.struct_fields with
+                 | Some f ->
+                     (match f.field_ty with
+                      | TFunc _ -> InferOk f.field_ty pure ctx
+                      | _ -> infer_err_msg ("Type method " ^ type_name ^ "::" ^ method_name ^ " is not a function"))
+                 | None -> infer_err_msg ("Unknown method: " ^ type_name ^ "::" ^ method_name))
+            | _ -> infer_err_msg ("Type " ^ type_name ^ " is not a struct"))
+       | None -> infer_err_msg ("Unknown type: " ^ type_name))
+
+  (* T-Len: Length intrinsic returns i64.
+     Supports arrays, slices, strings, tuples, and structs. *)
+  | ELen e' ->
+      (match infer_type gctx ctx e' with
+       | InferOk ety eff ctx1 ->
+           (* Check that the type supports len *)
+           let len_ty = TNumeric (NumInt i64) in
+           (match ety with
+            | TWrap WArray _ | TWrap WSlice _ -> InferOk len_ty eff ctx1
+            | TPrim PString -> InferOk len_ty eff ctx1
+            | TTuple _ -> InferOk len_ty eff ctx1
+            | TStruct _ -> InferOk len_ty eff ctx1
+            | _ -> infer_err_msg "len: unsupported type (expected array, slice, string, tuple, or struct)")
+       | err -> err)
+
+  (* T-Cap: Capacity intrinsic returns i64.
+     For fixed-size collections, capacity equals length. *)
+  | ECap e' ->
+      (match infer_type gctx ctx e' with
+       | InferOk ety eff ctx1 ->
+           let cap_ty = TNumeric (NumInt i64) in
+           (match ety with
+            | TWrap WArray _ | TWrap WSlice _ -> InferOk cap_ty eff ctx1
+            | TPrim PString -> InferOk cap_ty eff ctx1
+            | TTuple _ -> InferOk cap_ty eff ctx1
+            | _ -> infer_err_msg "cap: unsupported type (expected array, slice, string, or tuple)")
+       | err -> err)
+
   (* T-Struct: Struct construction with full field type inference.
 
      For struct literals like Point { x: 1, y: 2 }, we:
@@ -2324,9 +2389,9 @@ let typecheck_complete_with_globals (gctx: global_ctx) (e: expr) : Tot (option (
  *)
 val infer_preserves_ctx : gctx:global_ctx -> ctx:type_ctx -> e:expr ->
   Lemma (requires ctx_well_formed ctx = true)
-        (ensures match infer_type gctx ctx e with
+        (ensures (match infer_type gctx ctx e with
                  | InferOk _ _ ctx' -> ctx_well_formed ctx' = true
-                 | InferErr _ -> True)
+                 | InferErr _ -> True))
 let infer_preserves_ctx gctx ctx e =
   (* Proof by structural induction on e.
      Key invariant: all operations that modify the context maintain well-formedness:
@@ -2341,9 +2406,9 @@ let infer_preserves_ctx gctx ctx e =
  *)
 val check_preserves_ctx : gctx:global_ctx -> ctx:type_ctx -> e:expr -> expected:brrr_type ->
   Lemma (requires ctx_well_formed ctx = true)
-        (ensures match check_type gctx ctx e expected with
+        (ensures (match check_type gctx ctx e expected with
                  | CheckOk _ ctx' -> ctx_well_formed ctx' = true
-                 | CheckErr _ -> True)
+                 | CheckErr _ -> True))
 let check_preserves_ctx gctx ctx e expected =
   (* Follows from infer_preserves_ctx since check_type delegates to infer_type *)
   ()
@@ -2356,9 +2421,9 @@ let check_preserves_ctx gctx ctx e expected =
  *)
 val lookup_preserves_ctx : x:var_id -> ctx:type_ctx ->
   Lemma (requires ctx_well_formed ctx = true)
-        (ensures match lookup_ctx_mark_used x ctx with
+        (ensures (match lookup_ctx_mark_used x ctx with
                  | Some (_, _, ctx') -> ctx_well_formed ctx' = true
-                 | None -> True)
+                 | None -> True))
 let lookup_preserves_ctx x ctx =
   (* Marking a variable as used only changes bind_used flag, not structure *)
   ()

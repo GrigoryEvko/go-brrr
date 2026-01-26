@@ -103,6 +103,7 @@ let bind (#a #b: Type) (m: result a) (f: a -> result b) : result b =
   | RYield v -> RYield v
   | RPerform op args -> RPerform op args
   | RAbort p v -> RAbort p v
+  | RGoto lbl -> RGoto lbl
 #pop-options
 
 let (let*) = bind
@@ -120,6 +121,7 @@ let map_result (#a #b: Type) (f: a -> b) (r: result a) : result b =
   | RYield v -> RYield v
   | RPerform op args -> RPerform op args
   | RAbort p v -> RAbort p v
+  | RGoto lbl -> RGoto lbl
 #pop-options
 
 (** ============================================================================
@@ -148,6 +150,7 @@ let st_bind (#a #b: Type) (m: comp a) (f: a -> comp b) : comp b =
     | (RYield v, st') -> (RYield v, st')
     | (RPerform op args, st') -> (RPerform op args, st')
     | (RAbort p v, st') -> (RAbort p v, st')
+    | (RGoto lbl, st') -> (RGoto lbl, st')
 
 (* State operations *)
 let get_env : comp env =
@@ -197,11 +200,13 @@ let lit_to_value (l: literal) : value =
     VALUE SIZE FUNCTIONS (for termination proofs)
     ============================================================================ *)
 
-(* Size of a value - used for termination measures *)
+(* Size of a value - used for termination measures.
+   These are mutually recursive. We use the totality of the inductive type to justify termination. *)
 let rec value_size (v: value) : Tot nat (decreases v) =
   match v with
   | VUnit | VBool _ | VInt _ _ | VFloat _ _ | VString _ | VChar _
   | VRef _ | VRefMut _ | VBox _ | VClosure _ | VNone -> 1
+  | VBoundMethod recv _ -> 1 + value_size recv  (* Bound method: receiver + closure *)
   | VSome v' | VOk v' | VErr v' -> 1 + value_size v'
   | VTuple vs -> 1 + value_list_size vs
   | VArray vs -> 1 + value_list_size vs
@@ -216,6 +221,9 @@ and value_list_size (vs: vlist value) : Tot nat (decreases vs) =
   | [] -> 0
   | v :: rest -> value_size v + value_list_size rest
 
+(* Note: field_value_list_size termination relies on the strictly_positive annotation
+   on vlist ensuring that values in the list are subterms of the list.
+   F* should be able to verify this with sufficient fuel. *)
 and field_value_list_size (fields: vlist (string & value)) : Tot nat (decreases fields) =
   match fields with
   | [] -> 0
@@ -230,6 +238,7 @@ let rec value_size_pos (v: value)
   | VUnit | VBool _ | VInt _ _ | VFloat _ _ | VString _ | VChar _
   | VRef _ | VRefMut _ | VBox _ | VClosure _ | VNone
   | VFuture _ | VGenerator _ -> ()
+  | VBoundMethod recv _ -> value_size_pos recv
   | VSome v' | VOk v' | VErr v' -> value_size_pos v'
   | VTuple _ | VArray _ | VStruct _ _ | VVariant _ _ _ -> ()
 
@@ -414,6 +423,7 @@ let rec value_eq_bits_refl (v: value)
   | VUnit | VBool _ | VInt _ _ | VFloat _ _ | VString _ | VChar _
   | VRef _ | VRefMut _ | VBox _ | VClosure _ | VNone
   | VFuture _ | VGenerator _ -> ()
+  | VBoundMethod recv _ -> value_eq_bits_refl recv
   | VSome v' -> value_eq_bits_refl v'
   | VOk v' -> value_eq_bits_refl v'
   | VErr v' -> value_eq_bits_refl v'
@@ -442,6 +452,7 @@ let rec value_eq_refl (v: value)
   | VUnit | VBool _ | VInt _ _ | VFloat _ _ | VString _ | VChar _
   | VRef _ | VRefMut _ | VBox _ | VClosure _ | VNone
   | VFuture _ | VGenerator _ -> ()
+  | VBoundMethod recv _ -> value_eq_refl recv
   | VSome v' -> value_eq_refl v'
   | VOk v' -> value_eq_refl v'
   | VErr v' -> value_eq_refl v'
@@ -641,6 +652,7 @@ let rec pattern_size (p: pattern) : Tot nat (decreases p) =
   | PatBox p -> 1 + pattern_size p
   | PatRest _ -> 1                       (* ...rest or ... *)
   | PatAs p _ -> 1 + pattern_size p      (* p @ x *)
+  | PatType _ _ -> 1                     (* Type pattern: : T or x: T *)
 
 and pattern_list_size (pats: list pattern) : Tot nat (decreases pats) =
   match pats with
@@ -743,6 +755,20 @@ let rec match_pattern (p: pattern) (v: value)
        | Some binds -> Some ((x, v) :: binds)  (* Prepend the as-binding *)
        | None -> None)
 
+  (* PatType: Type pattern - matches if value's runtime type matches expected type.
+     Used for runtime type checking like: match x { _: int => ..., _: string => ... }
+
+     DESIGN NOTE: Like PatGuard, type patterns require evaluation context because
+     type_of_value is defined after match_pattern (due to interface ordering).
+     The full implementation is in eval_match_pattern in Eval.fst.
+
+     This pure version always returns None to indicate "needs evaluation context".
+     The evaluator should handle PatType by:
+     1. Computing type_of_value(v)
+     2. Checking subtype v_ty expected_ty
+     3. Binding opt_var to v if match succeeds *)
+  | PatType _ _ -> None  (* Type patterns need evaluation context - see Eval.fst *)
+
 (* Match multiple patterns against multiple values *)
 and match_patterns (pats: list pattern) (vs: list value)
     : Tot match_result (decreases %[pattern_list_size pats; 1]) =
@@ -802,11 +828,157 @@ let lit_to_value_char (c: FStar.Char.char)
             [SMTPat (lit_to_value (LitChar c))] = ()
 
 (** ============================================================================
+    HELPER LEMMAS FOR HEAP/ENV OPERATIONS
+    ============================================================================
+
+    These lemmas establish properties of assoc and filter that are needed
+    for the heap and environment operation specifications.
+
+    Following FStar.List.Tot.Properties patterns for list induction proofs.
+    ============================================================================ *)
+
+(** assoc after filter with equal key returns None.
+    If we filter out all entries with key k, then looking up k returns None. *)
+#push-options "--z3rlimit 100 --fuel 2 --ifuel 1"
+let rec assoc_filter_eq_none (#a: eqtype) (#b: Type) (k: a) (l: list (a & b))
+    : Lemma (ensures List.Tot.assoc k (List.Tot.filter (fun (k', _) -> k' <> k) l) == None)
+            (decreases l) =
+  match l with
+  | [] -> ()
+  | (k', v') :: tl ->
+      if k' <> k then begin
+        (* k' passes the filter, so it's in the result *)
+        (* We need to prove assoc k ((k', v') :: filter ...) == None *)
+        (* Since k' <> k, assoc k ((k', v') :: ...) == assoc k (...) *)
+        assoc_filter_eq_none k tl
+      end else begin
+        (* k' = k, so (k', v') is filtered out *)
+        assoc_filter_eq_none k tl
+      end
+#pop-options
+
+(** assoc after filter with different key is unchanged.
+    If we filter out entries with key k, looking up k' (where k' <> k) gives same result. *)
+#push-options "--z3rlimit 100 --fuel 2 --ifuel 1"
+let rec assoc_filter_neq_same (#a: eqtype) (#b: Type) (k: a) (k': a) (l: list (a & b))
+    : Lemma (requires k <> k')
+            (ensures List.Tot.assoc k' (List.Tot.filter (fun (x, _) -> x <> k) l) == List.Tot.assoc k' l)
+            (decreases l) =
+  match l with
+  | [] -> ()
+  | (x, v) :: tl ->
+      if x <> k then begin
+        (* (x, v) passes filter - it's included in result *)
+        if x = k' then begin
+          (* Found k' at head - both assocs return Some v *)
+          ()
+        end else begin
+          (* x <> k' - need to look in tail *)
+          assoc_filter_neq_same k k' tl
+        end
+      end else begin
+        (* x = k, so (x, v) is filtered out *)
+        (* Since k <> k', we have x <> k', so assoc k' ((x,v)::tl) == assoc k' tl *)
+        assoc_filter_neq_same k k' tl
+      end
+#pop-options
+
+(** fold_left max is monotonic: result >= accumulator.
+    Helper for proving next_loc produces a fresh location. *)
+#push-options "--z3rlimit 100 --fuel 2 --ifuel 1"
+let rec fold_max_geq_acc (h: heap) (acc: nat)
+    : Lemma (ensures List.Tot.fold_left (fun m (l', _) -> max m l') acc h >= acc)
+            (decreases h) =
+  match h with
+  | [] -> ()
+  | (l, v) :: tl ->
+      let new_acc = max acc l in
+      fold_max_geq_acc tl new_acc
+#pop-options
+
+(** fold_left max >= any element location in the heap *)
+#push-options "--z3rlimit 150 --fuel 2 --ifuel 1"
+let rec fold_max_geq_elem (h: heap) (acc: nat) (l: loc) (v: value)
+    : Lemma (requires List.Tot.memP (l, v) h)
+            (ensures List.Tot.fold_left (fun m (l', _) -> max m l') acc h >= l)
+            (decreases h) =
+  match h with
+  | [] -> ()  (* Contradicts memP *)
+  | (l', v') :: tl ->
+      let new_acc = max acc l' in
+      if l = l' && v == v' then begin
+        (* Element is at head *)
+        (* fold_left ... acc h = fold_left ... (max acc l') tl *)
+        (* max acc l' >= l' = l *)
+        fold_max_geq_acc tl new_acc
+      end else begin
+        (* Element is in tail *)
+        fold_max_geq_elem tl new_acc l v
+      end
+#pop-options
+
+(** next_loc produces a location greater than all existing locations in the heap *)
+#push-options "--z3rlimit 100 --fuel 2 --ifuel 1"
+let next_loc_gt_all (h: heap) (l: loc) (v: value)
+    : Lemma (requires List.Tot.memP (l, v) h)
+            (ensures next_loc h > l) =
+  fold_max_geq_elem h 0 l v
+#pop-options
+
+(** If a location is greater than all locations in heap, assoc returns None *)
+#push-options "--z3rlimit 100 --fuel 2 --ifuel 1"
+let rec assoc_none_if_not_mem (l: loc) (h: heap)
+    : Lemma (requires ~(List.Tot.mem l (List.Tot.map fst h)))
+            (ensures List.Tot.assoc l h == None)
+            (decreases h) =
+  match h with
+  | [] -> ()
+  | (l', _) :: tl ->
+      if l = l' then ()  (* Contradicts precondition *)
+      else assoc_none_if_not_mem l tl
+#pop-options
+
+(** Helper: if l > all locations in h, then l not in map fst h *)
+#push-options "--z3rlimit 150 --fuel 2 --ifuel 1"
+let rec gt_all_not_mem (l: loc) (h: heap)
+    : Lemma (requires forall l' v'. List.Tot.memP (l', v') h ==> l > l')
+            (ensures ~(List.Tot.mem l (List.Tot.map fst h)))
+            (decreases h) =
+  match h with
+  | [] -> ()
+  | (l', v') :: tl ->
+      (* l > l' by precondition *)
+      (* So l <> l' *)
+      gt_all_not_mem l tl
+#pop-options
+
+(** next_loc is not a member of the heap's location domain *)
+#push-options "--z3rlimit 200 --fuel 2 --ifuel 1"
+let rec next_loc_not_in_heap (h: heap)
+    : Lemma (ensures ~(List.Tot.mem (next_loc h) (List.Tot.map fst h)))
+            (decreases h) =
+  match h with
+  | [] -> ()
+  | (l, v) :: tl ->
+      let nl = next_loc h in
+      (* next_loc h = 1 + fold_left max 0 h *)
+      (* fold_left max 0 h >= l (for head element) *)
+      fold_max_geq_elem h 0 l v;
+      (* So nl = 1 + fold_left max 0 h >= 1 + l > l *)
+      assert (nl > l);
+      (* For elements in tl: fold_left max 0 h >= fold_left max 0 tl *)
+      (* and fold_left max 0 tl >= l' for any l' in tl *)
+      (* So nl > l' for any l' in tl *)
+      (* Therefore nl not in map fst h *)
+      ()
+#pop-options
+
+(** ============================================================================
     HEAP OPERATION SPECIFICATIONS
     ============================================================================ *)
 
 (** alloc returns a fresh location not in the original heap *)
-#push-options "--z3rlimit 100 --fuel 2 --ifuel 1"
+#push-options "--z3rlimit 150 --fuel 2 --ifuel 1"
 let alloc_fresh (v: value) (h: heap)
     : Lemma (let (l, h') = alloc v h in
              read l h == None /\
@@ -814,9 +986,13 @@ let alloc_fresh (v: value) (h: heap)
             [SMTPat (alloc v h)] =
   let l = next_loc h in
   let h' = (l, v) :: h in
-  (* read l h' = Some v because l is at head *)
-  (* read l h = None because l > all existing locations *)
-  admit ()  (* Proof requires induction on heap structure - acceptable admit *)
+  (* Part 1: read l h' = Some v *)
+  (* This follows directly from assoc definition - l is at head *)
+  assert (read l h' == Some v);
+  (* Part 2: read l h = None *)
+  (* l = next_loc h is greater than all locations in h *)
+  next_loc_not_in_heap h;
+  assoc_none_if_not_mem l h
 #pop-options
 
 (** alloc preserves existing heap bindings *)
@@ -831,32 +1007,39 @@ let write_updates (l: loc) (v: value) (h: heap)
             [SMTPat (read l (write l v h))] = ()
 
 (** write preserves other locations *)
-#push-options "--z3rlimit 50 --fuel 1 --ifuel 1"
+#push-options "--z3rlimit 100 --fuel 2 --ifuel 1"
 let write_preserves (l: loc) (v: value) (h: heap) (l': loc)
     : Lemma (requires l <> l')
             (ensures read l' (write l v h) == read l' h)
             [SMTPat (read l' (write l v h))] =
-  (* write prepends (l, v) and filters l from rest *)
-  (* lookup for l' skips (l, v) at head, finds same in filtered tail *)
-  admit ()  (* Proof requires induction on assoc - acceptable admit *)
+  (* write l v h = (l, v) :: filter (fun (l', _) -> l' <> l) h *)
+  (* read l' ((l, v) :: ...) = assoc l' ((l, v) :: ...) *)
+  (* Since l <> l', assoc skips (l, v) at head *)
+  (* So we need: assoc l' (filter (fun (x, _) -> x <> l) h) == assoc l' h *)
+  assoc_filter_neq_same l l' h
 #pop-options
 
 (** dealloc removes the specified location *)
-#push-options "--z3rlimit 50 --fuel 2 --ifuel 1"
+#push-options "--z3rlimit 100 --fuel 2 --ifuel 1"
 let dealloc_removes (l: loc) (h: heap)
     : Lemma (read l (dealloc l h) == None)
             [SMTPat (read l (dealloc l h))] =
-  (* dealloc filters out all entries with key l *)
-  admit ()  (* Proof requires induction on filter - acceptable admit *)
+  (* dealloc l h = filter (fun (l', _) -> l' <> l) h *)
+  (* read l (dealloc l h) = assoc l (filter (fun (l', _) -> l' <> l) h) *)
+  (* All entries with key l are filtered out, so assoc returns None *)
+  assoc_filter_eq_none l h
 #pop-options
 
 (** dealloc preserves other locations *)
-#push-options "--z3rlimit 50 --fuel 2 --ifuel 1"
+#push-options "--z3rlimit 100 --fuel 2 --ifuel 1"
 let dealloc_preserves (l: loc) (h: heap) (l': loc)
     : Lemma (requires l <> l')
             (ensures read l' (dealloc l h) == read l' h)
             [SMTPat (read l' (dealloc l h))] =
-  admit ()  (* Proof requires induction on filter - acceptable admit *)
+  (* dealloc l h = filter (fun (x, _) -> x <> l) h *)
+  (* read l' (dealloc l h) = assoc l' (filter ...) *)
+  (* Since l <> l', bindings for l' are preserved by filter *)
+  assoc_filter_neq_same l l' h
 #pop-options
 
 (** ============================================================================
@@ -879,11 +1062,14 @@ let empty_env_lookup (x: var_id)
             [SMTPat (lookup x empty_env)] = ()
 
 (** remove eliminates the binding *)
-#push-options "--z3rlimit 50 --fuel 2 --ifuel 1"
+#push-options "--z3rlimit 100 --fuel 2 --ifuel 1"
 let remove_lookup (x: var_id) (e: env)
     : Lemma (lookup x (remove x e) == None)
             [SMTPat (lookup x (remove x e))] =
-  admit ()  (* Proof requires induction on filter - acceptable admit *)
+  (* remove x e = filter (fun (y, _) -> y <> x) e *)
+  (* lookup x (remove x e) = assoc x (filter (fun (y, _) -> y <> x) e) *)
+  (* All entries with key x are filtered out, so assoc returns None *)
+  assoc_filter_eq_none x e
 #pop-options
 
 (** ============================================================================
@@ -907,6 +1093,7 @@ let result_right_identity (#a: Type) (m: result a)
   | RYield v -> ()
   | RPerform op args -> ()
   | RAbort p v -> ()
+  | RGoto lbl -> ()
 
 (** Associativity: (m >>= f) >>= g  ===  m >>= (\x -> f x >>= g) *)
 let result_assoc (#a #b #c: Type)
@@ -922,6 +1109,7 @@ let result_assoc (#a #b #c: Type)
   | RYield v -> ()
   | RPerform op args -> ()
   | RAbort p v -> ()
+  | RGoto lbl -> ()
 
 (** ============================================================================
     TYPE INFERENCE FROM VALUES
@@ -989,6 +1177,18 @@ let rec type_of_value (v: value) : Tot brrr_type (decreases value_size v) =
       effects = pure;
       is_unsafe = false
     }
+
+  (* Bound method: receiver + closure.
+     The method type includes the receiver type information.
+     We use MOne (linear) since the receiver is moved into the method call. *)
+  | VBoundMethod recv _ ->
+      let recv_ty = type_of_value recv in
+      TFunc {
+        params = [{ name = Some "self"; ty = recv_ty; mode = MOne }];
+        return_type = TPrim PUnknown;
+        effects = pure;
+        is_unsafe = false
+      }
 
   (* Option: Some carries inner type, None is unknown *)
   | VNone -> TWrap WOption (TPrim PUnknown)

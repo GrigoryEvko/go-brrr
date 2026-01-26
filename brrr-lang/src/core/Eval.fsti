@@ -499,10 +499,10 @@ val value_well_typed : value -> heap -> brrr_type -> Type0
 
     Proof: By the definition of definitional equality in F*. *)
 val eval_deterministic : fuel:nat -> e:expr -> st:eval_state ->
-    Lemma (ensures
+    Lemma (ensures (
         let (r1, st1) = eval_expr fuel e st in
         let (r2, st2) = eval_expr fuel e st in
-        r1 == r2 /\ st1 == st2)
+        r1 == r2 /\ st1 == st2))
 
 (** ----------------------------------------------------------------------------
     FUEL MONOTONICITY
@@ -513,10 +513,10 @@ val eval_deterministic : fuel:nat -> e:expr -> st:eval_state ->
 (** Fuel monotonicity (old-style signature for compatibility) *)
 val eval_fuel_monotonic : fuel1:nat -> fuel2:nat{fuel2 >= fuel1} -> e:expr -> st:eval_state ->
     Lemma (requires ROk? (fst (eval_expr fuel1 e st)))
-          (ensures
+          (ensures (
             let (r1, st1) = eval_expr fuel1 e st in
             let (r2, st2) = eval_expr fuel2 e st in
-            r1 == r2 /\ st1 == st2)
+            r1 == r2 /\ st1 == st2))
 
 (** Fuel monotonicity: adding fuel preserves successful results.
     SMTPat enables automatic application by Z3. *)

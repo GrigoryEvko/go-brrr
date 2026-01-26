@@ -31,55 +31,27 @@ open FStar.Classical
     TAINT KIND FUNCTIONS
     ============================================================================
 
-    Functions for working with taint kinds. The taint_kind type is defined
-    in the interface file (TaintAnalysis.fsti).
+    Functions for working with taint kinds. The taint_kind type and
+    taint_kind_eq are defined in the interface file (TaintAnalysis.fsti)
+    as unfold definitions, so the normalizer can compute directly.
     ============================================================================ *)
 
-(** Taint kind equality is decidable *)
-let taint_kind_eq (k1 k2: taint_kind) : bool =
-  match k1, k2 with
-  | TaintSQLi, TaintSQLi -> true
-  | TaintXSS, TaintXSS -> true
-  | TaintCMDi, TaintCMDi -> true
-  | TaintPathTraversal, TaintPathTraversal -> true
-  | TaintSSRF, TaintSSRF -> true
-  | _, _ -> false
-
-(** taint_kind_eq is reflexive *)
-#push-options "--fuel 1 --ifuel 1"
+(** taint_kind_eq is reflexive - trivial with unfold *)
 let taint_kind_eq_refl (k: taint_kind)
     : Lemma (ensures taint_kind_eq k k = true) =
-  match k with
-  | TaintSQLi -> ()
-  | TaintXSS -> ()
-  | TaintCMDi -> ()
-  | TaintPathTraversal -> ()
-  | TaintSSRF -> ()
-#pop-options
+  ()  (* Normalizer computes directly *)
 
-(** taint_kind_eq is symmetric *)
+(** taint_kind_eq is symmetric - trivial with unfold *)
 let taint_kind_eq_sym (k1 k2: taint_kind)
     : Lemma (requires taint_kind_eq k1 k2 = true)
             (ensures taint_kind_eq k2 k1 = true) =
-  match k1, k2 with
-  | TaintSQLi, TaintSQLi -> ()
-  | TaintXSS, TaintXSS -> ()
-  | TaintCMDi, TaintCMDi -> ()
-  | TaintPathTraversal, TaintPathTraversal -> ()
-  | TaintSSRF, TaintSSRF -> ()
-  | _, _ -> ()
+  ()  (* Normalizer computes directly *)
 
-(** taint_kind_eq implies Leibniz equality *)
+(** taint_kind_eq implies Leibniz equality - trivial with unfold *)
 let taint_kind_eq_implies_eq (k1 k2: taint_kind)
     : Lemma (requires taint_kind_eq k1 k2 = true)
             (ensures k1 = k2) =
-  match k1, k2 with
-  | TaintSQLi, TaintSQLi -> ()
-  | TaintXSS, TaintXSS -> ()
-  | TaintCMDi, TaintCMDi -> ()
-  | TaintPathTraversal, TaintPathTraversal -> ()
-  | TaintSSRF, TaintSSRF -> ()
-  | _, _ -> ()
+  ()  (* Normalizer computes directly *)
 
 (** ============================================================================
     TAINT KIND ORDERING (for canonical representation)
@@ -128,26 +100,12 @@ let taint_kind_compare (k1 k2: taint_kind) : (c:int{c = -1 \/ c = 0 \/ c = 1}) =
   else if i1 = i2 then 0
   else 1
 
-(** Compare result characterization *)
+(** Compare result characterization - trivial with unfold taint_kind_eq *)
 let taint_kind_compare_spec (k1 k2: taint_kind)
     : Lemma (ensures (taint_kind_compare k1 k2 = -1 <==> taint_kind_lt k1 k2 = true) /\
                      (taint_kind_compare k1 k2 = 0 <==> taint_kind_eq k1 k2 = true) /\
                      (taint_kind_compare k1 k2 = 1 <==> taint_kind_lt k2 k1 = true)) =
-  match k1, k2 with
-  | TaintSQLi, TaintSQLi -> ()
-  | TaintSQLi, _ -> ()
-  | TaintXSS, TaintSQLi -> ()
-  | TaintXSS, TaintXSS -> ()
-  | TaintXSS, _ -> ()
-  | TaintCMDi, TaintSQLi -> ()
-  | TaintCMDi, TaintXSS -> ()
-  | TaintCMDi, TaintCMDi -> ()
-  | TaintCMDi, _ -> ()
-  | TaintPathTraversal, TaintSSRF -> ()
-  | TaintPathTraversal, TaintPathTraversal -> ()
-  | TaintPathTraversal, _ -> ()
-  | TaintSSRF, TaintSSRF -> ()
-  | TaintSSRF, _ -> ()
+  ()  (* Normalizer computes directly with unfold *)
 
 (** ============================================================================
     TAINT KIND LIST OPERATIONS
@@ -371,26 +329,14 @@ let taint_kind_merge_comm_structural (k: taint_kind) (ks1 ks2: list taint_kind)
 
     Functions for working with taint status. The taint_status type is defined
     in the interface file (TaintAnalysis.fsti).
+
+    NOTE: is_untainted and normalize_taint are now unfold in .fsti
+    so they don't need implementations here.
     ============================================================================ *)
-
-(** Check if taint status is untainted *)
-let is_untainted (t: taint_status) : bool =
-  match t with
-  | Untainted -> true
-  | Tainted [] -> true  (* Empty taint list is effectively untainted *)
-  | Tainted _ -> false
-
-(** Normalize taint status (empty Tainted becomes Untainted) *)
-let normalize_taint (t: taint_status) : taint_status =
-  match t with
-  | Untainted -> Untainted
-  | Tainted [] -> Untainted
-  | Tainted ks -> Tainted ks
 
 (**
  * Check if taint status contains a specific kind.
- *
- * Returns true iff the value is tainted with the specified kind.
+ * Recursive helper, kept in implementation.
  *)
 let taint_contains (t: taint_status) (k: taint_kind) : bool =
   match t with

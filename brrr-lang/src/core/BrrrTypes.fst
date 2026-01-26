@@ -15,7 +15,7 @@ open Utils  (* Shared utilities - zip_lists, option combinators, etc. *)
 open FStar.List.Tot
 open FStar.Classical
 
-(* Z3 solver options for SMT tractability - following HACL*/EverParse patterns *)
+(* Z3 solver options for SMT tractability - following HACL-star/EverParse patterns *)
 #set-options "--z3rlimit 50 --fuel 0 --ifuel 0"
 
 (** ============================================================================

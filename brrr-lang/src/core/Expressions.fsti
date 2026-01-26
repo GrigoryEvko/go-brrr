@@ -119,11 +119,23 @@ val range_within : inner:range -> outer:range -> bool
 (** Check if two ranges overlap *)
 val ranges_overlap : range -> range -> bool
 
-(** Check if a position equals another *)
-val pos_eq : pos -> pos -> bool
+(** Check if a position equals another.
+    Unfold allows Z3 to see the structure for automatic proofs. *)
+[@(strict_on_arguments [0;1])]
+unfold
+let pos_eq (p1 p2: pos) : bool =
+  p1.pos_filename = p2.pos_filename &&
+  p1.pos_line = p2.pos_line &&
+  p1.pos_col = p2.pos_col
 
-(** Check if two ranges are equal *)
-val range_eq : range -> range -> bool
+(** Check if two ranges are equal.
+    Unfold allows Z3 to see the structure for automatic proofs. *)
+[@(strict_on_arguments [0;1])]
+unfold
+let range_eq (r1 r2: range) : bool =
+  let (s1, e1) = r1 in
+  let (s2, e2) = r2 in
+  pos_eq s1 s2 && pos_eq e1 e2
 
 (** Range equality is reflexive *)
 val range_eq_refl : r:range ->
@@ -231,6 +243,7 @@ noeq type pattern' =
   | PatBox     : pattern -> pattern'
   | PatRest    : option var_id -> pattern'
   | PatAs      : pattern -> var_id -> pattern'
+  | PatType    : brrr_type -> option var_id -> pattern'  (* Type pattern: matches if runtime type is T, optionally binds with narrowed type *)
 
 (** Expression underlying type *)
 and expr' =
@@ -241,6 +254,8 @@ and expr' =
   | EBinary   : binary_op -> expr -> expr -> expr'
   | ECall     : expr -> list expr -> expr'
   | EMethodCall : expr -> string -> list expr -> expr'
+  | EMethodRef : expr -> string -> expr'               (* Bound method reference: obj.method without calling *)
+  | ETypeMethod : type_name -> string -> expr'         (* Unbound type method: T::method *)
   | ETuple    : list expr -> expr'
   | EArray    : list expr -> expr'
   | EStruct   : type_name -> list (string & expr) -> expr'
@@ -255,6 +270,8 @@ and expr' =
   | EFor      : option label -> var_id -> expr -> expr -> expr'
   | EBreak    : option label -> option expr -> expr'
   | EContinue : option label -> expr'
+  | EGoto     : label -> expr'                          (* goto label - jump to labeled statement *)
+  | ELabeled  : label -> expr -> expr'                  (* label: stmt - labeled statement target *)
   | EReturn   : option expr -> expr'
   | ELet      : pattern -> option brrr_type -> expr -> expr -> expr'
   | ELetMut   : var_id -> option brrr_type -> expr -> expr -> expr'
@@ -282,6 +299,8 @@ and expr' =
   | EIs       : expr -> brrr_type -> expr'
   | ESizeof   : brrr_type -> expr'
   | EAlignof  : brrr_type -> expr'
+  | ELen      : expr -> expr'                          (* len(e) - length of array/slice/string/map *)
+  | ECap      : expr -> expr'                          (* cap(e) - capacity of slice/vector *)
   | EBlock    : list expr -> expr'
   | ESeq      : expr -> expr -> expr'
   | EUnsafe   : expr -> expr'
@@ -374,8 +393,10 @@ val p_wild : pattern
 val p_var : var_id -> pattern
 val p_lit : literal -> pattern
 val p_tuple : list pattern -> pattern
+val p_type : brrr_type -> option var_id -> pattern  (* Type pattern *)
 val p_wild_at : range -> pattern
 val p_var_at : range -> var_id -> pattern
+val p_type_at : range -> brrr_type -> option var_id -> pattern  (* Type pattern with location *)
 
 (** Match/catch arm constructors *)
 val mk_arm : range -> pattern -> option expr -> expr -> match_arm
@@ -419,6 +440,9 @@ val expr_size_pos : e:expr -> Lemma (ensures expr_size e >= 1)
 (** ============================================================================
     SUBEXPRESSION RELATIONSHIP
     ============================================================================ *)
+
+(** Collect immediate subexpressions of an expression *)
+val immediate_subexprs : expr -> list expr
 
 (** Check if e2 is an immediate subexpression of e1 *)
 val is_immediate_subexpr : sub:expr -> parent:expr -> Tot bool
@@ -532,24 +556,47 @@ val free_vars : expr -> Tot (list var_id)
 (** Check if variable is free in expression *)
 val is_free_in : var_id -> expr -> Tot bool
 
+(** Variables that may be bound by a parent expression *)
+val parent_binds : expr -> list var_id
+
 (** Free variables of subexpression are subset of parent free variables
     (modulo bindings in between) *)
 val free_vars_subexpr : sub:expr -> parent:expr ->
   Lemma (requires is_immediate_subexpr sub parent = true)
         (ensures forall v. mem v (free_vars sub) ==>
                           mem v (free_vars parent) \/
-                          (exists p. ELet? parent.loc_value /\ Some? (pattern_var p)))
+                          mem v (parent_binds parent))
 
 (** ============================================================================
     EXPRESSION EQUALITY
     ============================================================================ *)
 
-(** Literal equality *)
-val literal_eq : literal -> literal -> bool
+(** Literal equality.
+    Unfold allows Z3 to see the structure for automatic proofs.
+    Uses IEEE 754 equality for floats (NaN != NaN). *)
+[@(strict_on_arguments [0;1])]
+unfold
+let literal_eq (l1 l2: literal) : bool =
+  match l1, l2 with
+  | LitUnit, LitUnit -> true
+  | LitBool b1, LitBool b2 -> b1 = b2
+  | LitInt n1 t1, LitInt n2 t2 -> n1 = n2 && t1.width = t2.width && t1.sign = t2.sign
+  | LitFloat r1 p1, LitFloat r2 p2 -> float_repr_eq_ieee754 r1 r2 && p1 = p2
+  | LitString s1, LitString s2 -> s1 = s2
+  | LitChar c1, LitChar c2 -> c1 = c2
+  | _, _ -> false
 
-(** Operator equality *)
-val unary_op_eq : unary_op -> unary_op -> bool
-val binary_op_eq : binary_op -> binary_op -> bool
+(** Unary operator equality.
+    Unfold allows Z3 to see the structure for automatic proofs. *)
+[@(strict_on_arguments [0;1])]
+unfold
+let unary_op_eq (op1 op2: unary_op) : bool = op1 = op2
+
+(** Binary operator equality.
+    Unfold allows Z3 to see the structure for automatic proofs. *)
+[@(strict_on_arguments [0;1])]
+unfold
+let binary_op_eq (op1 op2: binary_op) : bool = op1 = op2
 
 (** Pattern equality (ignores location, compares structure) *)
 val pattern_eq : pattern -> pattern -> Tot bool

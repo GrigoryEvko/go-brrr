@@ -42,24 +42,84 @@ type extended_mode =
     ============================================================================ *)
 
 (* Convert extended mode to base mode *)
-val extended_to_mode : extended_mode -> mode
+unfold let extended_to_mode (em: extended_mode) : mode =
+  match em with
+  | EMLinear -> MOne
+  | EMAffine -> MOne
+  | EMRelevant -> MOne
+  | EMUnrestricted -> MOmega
 
 (* Structural rule checks *)
-val allows_weakening : extended_mode -> bool
-val allows_contraction : extended_mode -> bool
+unfold let allows_weakening (em: extended_mode) : bool =
+  match em with
+  | EMAffine -> true
+  | EMUnrestricted -> true
+  | _ -> false
 
-(* Can transition from extended mode to target mode?
-   This checks if the extended mode allows reaching the target. *)
-val can_transition : extended_mode -> mode -> bool
+unfold let allows_contraction (em: extended_mode) : bool =
+  match em with
+  | EMRelevant -> true
+  | EMUnrestricted -> true
+  | _ -> false
 
-(* Mode semiring operations *)
-val mode_add : mode -> mode -> mode
-val mode_mul : mode -> mode -> mode
+(* Can transition from extended mode to target mode? *)
+unfold let can_transition (em: extended_mode) (target: mode) : bool =
+  match em, target with
+  | EMLinear, MOne -> true
+  | EMLinear, MZero -> true
+  | EMAffine, MOne -> true
+  | EMAffine, MZero -> true
+  | EMRelevant, MOne -> true
+  | EMRelevant, MOmega -> true
+  | EMUnrestricted, _ -> true
+  | _, _ -> false
 
-(* Mode lattice operations *)
-val mode_leq : mode -> mode -> bool
-val mode_join : mode -> mode -> mode
-val mode_meet : mode -> mode -> mode
+(* Mode semiring operations - defined with unfold for normalization in proofs
+   Following HACL* Lib.IntTypes pattern *)
+
+(* Mode addition: combines parallel usages *)
+unfold let mode_add (m1 m2: mode) : mode =
+  match m1, m2 with
+  | MZero, m -> m
+  | m, MZero -> m
+  | MOmega, _ -> MOmega
+  | _, MOmega -> MOmega
+  | MOne, MOne -> MOmega
+
+(* Mode multiplication: combines sequential usages *)
+unfold let mode_mul (m1 m2: mode) : mode =
+  match m1, m2 with
+  | MZero, _ -> MZero
+  | _, MZero -> MZero
+  | MOne, m -> m
+  | m, MOne -> m
+  | MOmega, MOmega -> MOmega
+
+(* Mode lattice operations - also unfold for proofs *)
+
+unfold let mode_leq (m1 m2: mode) : bool =
+  match m1, m2 with
+  | MZero, _ -> true
+  | MOne, MOne -> true
+  | MOne, MOmega -> true
+  | MOmega, MOmega -> true
+  | _, _ -> false
+
+unfold let mode_join (m1 m2: mode) : mode =
+  match m1, m2 with
+  | MZero, m -> m
+  | m, MZero -> m
+  | MOmega, _ -> MOmega
+  | _, MOmega -> MOmega
+  | MOne, MOne -> MOne
+
+unfold let mode_meet (m1 m2: mode) : mode =
+  match m1, m2 with
+  | MOmega, m -> m
+  | m, MOmega -> m
+  | MZero, _ -> MZero
+  | _, MZero -> MZero
+  | MOne, MOne -> MOne
 
 (** ============================================================================
     SEMIRING LAWS (Lemmas with SMTPat triggers)
@@ -116,12 +176,17 @@ val mode_leq_trans : m1:mode -> m2:mode -> m3:mode ->
   Lemma (requires mode_leq m1 m2 = true /\ mode_leq m2 m3 = true)
         (ensures mode_leq m1 m3 = true)
 
-(* Extended mode consistency: if the base mode is less than target,
-   the extended mode can transition to that target. *)
-val extended_mode_consistent : em:extended_mode -> m:mode ->
-  Lemma (ensures mode_leq (extended_to_mode em) m = true ==>
-                 can_transition em m = true)
-        [SMTPat (extended_to_mode em); SMTPat (mode_leq (extended_to_mode em) m)]
+(* Extended mode consistency: extended modes preserve their base mode.
+   This relates extended modes to the basic mode lattice:
+   - extended_to_mode extracts the base mode from an extended mode
+   - mode_leq is reflexive on the base mode
+   NOTE: can_transition and mode_leq describe different concepts:
+   - can_transition: valid usage state transitions (Linear -> consumed)
+   - mode_leq: mathematical ordering (1 is NOT <= 0 in the lattice)
+   These don't have a clean relationship. *)
+val extended_mode_consistent : em:extended_mode ->
+  Lemma (ensures mode_leq (extended_to_mode em) (extended_to_mode em) = true)
+        [SMTPat (extended_to_mode em)]
 
 (** ============================================================================
     MODE LATTICE LAWS (with SMTPat triggers)
@@ -240,6 +305,17 @@ val contract_mode_ctx : string -> mode_ctx -> option mode_ctx
 (* Context validity predicate: all entries have consistent mode/extended_mode pairs *)
 val valid_mode_ctx : mode_ctx -> bool
 
+(** Linear Exclusivity Predicate
+    For contexts from a split, linear resources (EMLinear) can have mode MOne
+    in at most one context. This ensures join won't produce ω for linear resources.
+
+    linear_exclusive ctx1 ctx2 =
+      forall x. is_linear x ctx1 ==>
+        (get_mode x ctx1 = MOne ==> get_mode x ctx2 = MZero) /\
+        (get_mode x ctx2 = MOne ==> get_mode x ctx1 = MZero)
+*)
+val linear_exclusive : mode_ctx -> mode_ctx -> bool
+
 (* Consume preserves validity: if context is valid, consuming yields valid or None *)
 val consume_preserves_valid : x:string -> ctx:mode_ctx ->
   Lemma (requires valid_mode_ctx ctx = true)
@@ -253,9 +329,18 @@ val split_preserves_valid : ctx:mode_ctx ->
                  valid_mode_ctx (snd (split_ctx ctx)) = true)
         [SMTPat (split_ctx ctx)]
 
-(* Join preserves validity *)
+(* Split ensures linear exclusivity: contexts from split satisfy exclusivity *)
+val split_ensures_exclusivity : ctx:mode_ctx ->
+  Lemma (ensures linear_exclusive (fst (split_ctx ctx)) (snd (split_ctx ctx)) = true)
+        [SMTPat (split_ctx ctx)]
+
+(* Join preserves validity ONLY when linear exclusivity holds.
+   This is the critical invariant: without exclusivity, join could produce
+   mode ω for a linear resource (1 + 1 = ω), violating validity. *)
 val join_preserves_valid : ctx1:mode_ctx -> ctx2:mode_ctx ->
-  Lemma (requires valid_mode_ctx ctx1 = true /\ valid_mode_ctx ctx2 = true)
+  Lemma (requires valid_mode_ctx ctx1 = true /\
+                  valid_mode_ctx ctx2 = true /\
+                  linear_exclusive ctx1 ctx2 = true)  (* CRITICAL PRECONDITION *)
         (ensures valid_mode_ctx (join_ctx ctx1 ctx2) = true)
         [SMTPat (join_ctx ctx1 ctx2)]
 
