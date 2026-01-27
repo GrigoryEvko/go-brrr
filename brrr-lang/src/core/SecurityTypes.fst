@@ -373,11 +373,11 @@ let sec_label_leq_trans (l1 l2 l3: sec_label)
   taint_set_subset_trans l1.taints l2.taints l3.taints
 
 (** ============================================================================
-    TAINT SET UNION HELPER LEMMAS
+    TAINT SET UNION HELPER LEMMAS (private - used by lattice operations)
     ============================================================================ *)
 
 #push-options "--fuel 1 --ifuel 1"
-(** taint_set_union includes left operand *)
+(** taint_set_union includes left operand (private helper) *)
 let rec taint_set_union_includes_left (k: taint_kind) (ks1 ks2: taint_set)
     : Lemma (requires taint_in_set k ks1 = true)
             (ensures taint_in_set k (taint_set_union ks1 ks2) = true)
@@ -390,7 +390,7 @@ let rec taint_set_union_includes_left (k: taint_kind) (ks1 ks2: taint_set)
         else taint_kind_eq_refl k
       else taint_set_union_includes_left k rest ks2
 
-(** taint_set_union includes right operand *)
+(** taint_set_union includes right operand (private helper) *)
 let rec taint_set_union_includes_right (k: taint_kind) (ks1 ks2: taint_set)
     : Lemma (requires taint_in_set k ks2 = true)
             (ensures taint_in_set k (taint_set_union ks1 ks2) = true)
@@ -400,20 +400,9 @@ let rec taint_set_union_includes_right (k: taint_kind) (ks1 ks2: taint_set)
   | k' :: rest ->
       if taint_in_set k' ks2 then taint_set_union_includes_right k rest ks2
       else taint_set_union_includes_right k rest ks2
-
-(** taint_set_union preserves left operand as subset: ts1 subset (union ts1 ts2)
- *  This is the set-theoretic property: A subseteq (A union B)
- *)
-let rec taint_set_union_subset_left (ts1 ts2: taint_set)
-    : Lemma (ensures taint_set_subset ts1 (taint_set_union ts1 ts2) = true)
-            (decreases ts1) =
-  match ts1 with
-  | [] -> ()
-  | k :: rest ->
-      taint_kind_eq_refl k;
-      taint_set_union_includes_left k ts1 ts2;
-      taint_set_union_subset_left rest ts2
 #pop-options
+
+(** NOTE: taint_set_union_subset_left theorem (T-1.1) is now in TaintAnalysis.Theorems.fst *)
 
 (** ============================================================================
     ANTISYMMETRY LEMMAS
@@ -1037,13 +1026,57 @@ type taint_effect =
   | ETaintSanitize  : list taint_kind -> taint_effect  (* Removes taints *)
   | ETaintPropagate : taint_effect                     (* Propagates existing taints *)
 
-(** Convert taint effect to effect_op for integration with effect system *)
-let taint_effect_to_string (te: taint_effect) : string =
-  match te with
-  | ETaintSource _ -> "taint_source"
-  | ETaintSink _ -> "taint_sink"
-  | ETaintSanitize _ -> "taint_sanitize"
-  | ETaintPropagate -> "taint_propagate"
+(** Remove a taint kind from a set - moved here for interface order *)
+let rec remove_taint (k: taint_kind) (ks: taint_set) : taint_set =
+  match ks with
+  | [] -> []
+  | k' :: rest ->
+      if taint_kind_eq k k' then remove_taint k rest
+      else k' :: remove_taint k rest
+
+(** Remove multiple taint kinds *)
+let rec remove_taints (to_remove: list taint_kind) (ks: taint_set) : taint_set =
+  match to_remove with
+  | [] -> ks
+  | k :: rest -> remove_taints rest (remove_taint k ks)
+
+(** Sanitize a security label for specific taints - moved for interface order *)
+let sanitize_label (to_remove: list taint_kind) (l: sec_label) : sec_label = {
+  l with taints = remove_taints to_remove l.taints
+}
+
+(** Sanitize a security-typed type - moved for interface order *)
+let sanitize_sec_type (to_remove: list taint_kind) (st: sec_type) : sec_type = {
+  st with label = sanitize_label to_remove st.label
+}
+
+(** Check if a security label has any of the specified taints - moved for interface order *)
+let has_any_taint (ks: list taint_kind) (l: sec_label) : bool =
+  List.Tot.existsb (fun k -> taint_in_set k l.taints) ks
+
+(** Sanitization removes the specified taints - moved for interface order *)
+let rec remove_taint_correct (k: taint_kind) (ks: taint_set)
+    : Lemma (ensures taint_in_set k (remove_taint k ks) = false)
+            (decreases ks) =
+  match ks with
+  | [] -> ()
+  | k' :: rest ->
+      if taint_kind_eq k k' then remove_taint_correct k rest
+      else remove_taint_correct k rest
+
+(** Sanitization preserves other taints - moved for interface order *)
+let rec remove_taint_preserves (k k': taint_kind) (ks: taint_set)
+    : Lemma (requires taint_kind_eq k k' = false)
+            (ensures taint_in_set k' (remove_taint k ks) = taint_in_set k' ks)
+            (decreases ks) =
+  match ks with
+  | [] -> ()
+  | k'' :: rest -> remove_taint_preserves k k' rest
+
+(** After sanitization, sink check passes for removed taints - moved for interface order *)
+let sanitize_enables_sink (to_remove: list taint_kind) (l: sec_label)
+    : Lemma (ensures not (has_any_taint to_remove (sanitize_label to_remove l))) =
+  ()  (* By construction: remove_taints removes all specified taints *)
 
 (** ============================================================================
     I/O SOURCE TAINT MAPPING
@@ -1198,27 +1231,6 @@ let rec lookup_sec_ctx (x: string) (ctx: sec_ctx) : option sec_type =
     3. Defense in depth requires explicit trust boundaries
     ============================================================================ *)
 
-(** Remove a taint kind from a set *)
-let rec remove_taint (k: taint_kind) (ks: taint_set) : taint_set =
-  match ks with
-  | [] -> []
-  | k' :: rest ->
-      if taint_kind_eq k k' then remove_taint k rest
-      else k' :: remove_taint k rest
-
-(** Remove multiple taint kinds *)
-let rec remove_taints (to_remove: list taint_kind) (ks: taint_set) : taint_set =
-  match to_remove with
-  | [] -> ks
-  | k :: rest -> remove_taints rest (remove_taint k ks)
-
-(** Sanitize a security label for specific taints.
-    DOES NOT change integrity - endorsement must be explicit! *)
-let sanitize_label (to_remove: list taint_kind) (l: sec_label) : sec_label = {
-  l with taints = remove_taints to_remove l.taints
-  (* Integrity unchanged - data remains IUntrusted until explicitly endorsed *)
-}
-
 (** Explicitly endorse a label as trusted.
     Returns Some only if ALL taints have been removed.
     Returns None if any taints remain (cannot endorse tainted data). *)
@@ -1243,11 +1255,6 @@ let sanitize_and_maybe_endorse (to_remove: list taint_kind) (l: sec_label) : sec
   | Some endorsed -> (endorsed, true)
   | None -> (sanitized, false)
 
-(** Sanitize a security-typed type - does NOT change integrity *)
-let sanitize_sec_type (to_remove: list taint_kind) (st: sec_type) : sec_type = {
-  st with label = sanitize_label to_remove st.label
-}
-
 (** Explicitly endorse a security-typed type.
     Returns Some only if the label can be endorsed (no taints). *)
 let endorse_sec_type (st: sec_type) : option sec_type =
@@ -1258,10 +1265,6 @@ let endorse_sec_type (st: sec_type) : option sec_type =
 (** ============================================================================
     SECURITY VIOLATION CHECKING
     ============================================================================ *)
-
-(** Check if a security label has any of the specified taints *)
-let has_any_taint (ks: list taint_kind) (l: sec_label) : bool =
-  List.Tot.existsb (fun k -> taint_in_set k l.taints) ks
 
 (** Check if passing data to a sink is safe *)
 let sink_check (snk: sink_annotation) (arg_labels: list sec_label) : bool =
@@ -1330,33 +1333,17 @@ let sec_label_wf (l: sec_label) : bool =
 let sec_type_wf (st: sec_type) : bool =
   sec_label_wf st.label
 
+(** Convert taint effect to string for integration with effect system *)
+let taint_effect_to_string (te: taint_effect) : string =
+  match te with
+  | ETaintSource _ -> "taint_source"
+  | ETaintSink _ -> "taint_sink"
+  | ETaintSanitize _ -> "taint_sanitize"
+  | ETaintPropagate -> "taint_propagate"
+
 (** ============================================================================
     SECURITY TYPE SOUNDNESS LEMMAS
     ============================================================================ *)
-
-(** Sanitization removes the specified taints *)
-let rec remove_taint_correct (k: taint_kind) (ks: taint_set)
-    : Lemma (ensures taint_in_set k (remove_taint k ks) = false)
-            (decreases ks) =
-  match ks with
-  | [] -> ()
-  | k' :: rest ->
-      if taint_kind_eq k k' then remove_taint_correct k rest
-      else remove_taint_correct k rest
-
-(** Sanitization preserves other taints *)
-let rec remove_taint_preserves (k k': taint_kind) (ks: taint_set)
-    : Lemma (requires taint_kind_eq k k' = false)
-            (ensures taint_in_set k' (remove_taint k ks) = taint_in_set k' ks)
-            (decreases ks) =
-  match ks with
-  | [] -> ()
-  | k'' :: rest -> remove_taint_preserves k k' rest
-
-(** After sanitization, sink check passes for removed taints *)
-let sanitize_enables_sink (to_remove: list taint_kind) (l: sec_label)
-    : Lemma (ensures not (has_any_taint to_remove (sanitize_label to_remove l))) =
-  ()  (* By construction: remove_taints removes all specified taints *)
 
 (** Endorsed labels are always well-formed (have no taints) *)
 let endorse_label_wf (l: sec_label)

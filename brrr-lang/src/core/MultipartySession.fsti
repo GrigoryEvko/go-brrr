@@ -18,6 +18,7 @@ open FStar.List.Tot
 open Primitives
 open BrrrTypes
 open Expressions
+open SessionTypes
 
 (* Z3 solver options - must match implementation *)
 #set-options "--z3rlimit 50 --fuel 0 --ifuel 0"
@@ -140,6 +141,13 @@ val project : g:global_type -> p:participant ->
 
 val project_branches : branches:list (label & global_type) -> p:participant ->
     Tot (option (list (label & local_type))) (decreases branches)
+
+(** ============================================================================
+    LOCAL TYPE TO SESSION TYPE CONVERSION
+    ============================================================================ *)
+
+(* Convert local type to binary session type (erasing participant info) *)
+val local_to_session : l:local_type -> Tot session_type (decreases l)
 
 (** ============================================================================
     FREE VARIABLES
@@ -267,6 +275,12 @@ val deadlock_freedom : g:global_type ->
         (ensures all_projectable g = true)
 
 (** ============================================================================
+    HELPER PREDICATES
+    ============================================================================ *)
+
+val direct_interaction : g:global_type -> p:participant -> q:participant -> bool
+
+(** ============================================================================
     KEY LEMMAS - Projection Consistency
     ============================================================================ *)
 
@@ -285,12 +299,6 @@ val projection_consistency : g:global_type -> p:participant -> q:participant ->
         (ensures (match project g p, project g q with
                   | Some _, Some _ -> true
                   | _, _ -> false))
-
-(** ============================================================================
-    HELPER PREDICATES
-    ============================================================================ *)
-
-val direct_interaction : g:global_type -> p:participant -> q:participant -> bool
 
 (** ============================================================================
     VALIDATION FUNCTIONS

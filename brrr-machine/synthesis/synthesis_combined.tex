@@ -1,0 +1,450 @@
+\documentclass[11pt,a4paper]{report}
+
+%=============================================================================
+% PACKAGES
+%=============================================================================
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{stmaryrd}
+\usepackage{tikz-cd}
+\usetikzlibrary{positioning,shapes,arrows}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{longtable}
+\usepackage{geometry}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{etoolbox}
+\usepackage{tcolorbox}
+\usepackage{mathpartir}
+\usepackage{tabularx}
+\usepackage{adjustbox}
+\usepackage{array}
+
+\geometry{margin=1in}
+
+% Fix for overflowing tables - wrap in adjustbox
+\newenvironment{widetable}{\begin{adjustbox}{max width=\textwidth}}{\end{adjustbox}}
+
+%=============================================================================
+% DENSE FORMATTING
+%=============================================================================
+\makeatletter
+\patchcmd{\chapter}{\if@openright\cleardoublepage\else\clearpage\fi}{}{}{}
+\patchcmd{\chapter}{\clearpage}{}{}{}
+\makeatother
+
+\titleformat{\chapter}[block]{\normalfont\Large\bfseries}{\thechapter.}{0.5em}{}
+\titlespacing*{\chapter}{0pt}{1.5ex plus 0.5ex minus 0.3ex}{1ex plus 0.3ex}
+\titlespacing*{\section}{0pt}{1.5ex plus 0.5ex minus 0.3ex}{0.8ex plus 0.2ex}
+\titlespacing*{\subsection}{0pt}{1.2ex plus 0.4ex minus 0.2ex}{0.6ex plus 0.2ex}
+\titlespacing*{\subsubsection}{0pt}{1ex plus 0.3ex minus 0.2ex}{0.5ex plus 0.1ex}
+
+\titleformat{\part}[display]
+  {\normalfont\huge\bfseries\centering}{\partname\ \thepart}{10pt}{\Huge}
+\titlespacing*{\part}{0pt}{20pt}{15pt}
+
+\setlength{\parskip}{0.3ex plus 0.1ex minus 0.1ex}
+\setlength{\parindent}{1.5em}
+
+\AtBeginDocument{%
+  \setlength{\abovedisplayskip}{6pt plus 2pt minus 2pt}%
+  \setlength{\belowdisplayskip}{6pt plus 2pt minus 2pt}%
+  \setlength{\abovedisplayshortskip}{3pt plus 1pt minus 1pt}%
+  \setlength{\belowdisplayshortskip}{3pt plus 1pt minus 1pt}%
+}
+
+\setlist{nosep, leftmargin=*, labelsep=0.5em}
+\setlist[enumerate]{topsep=0.3ex, itemsep=0.1ex, parsep=0.1ex}
+\setlist[itemize]{topsep=0.3ex, itemsep=0.1ex, parsep=0.1ex}
+
+%=============================================================================
+% THEOREM ENVIRONMENTS
+%=============================================================================
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}[chapter]
+\newtheorem{example}[definition]{Example}
+\newtheorem{remark}[definition]{Remark}
+\newtheorem{principle}[definition]{Principle}
+
+\theoremstyle{plain}
+\newtheorem{theorem}[definition]{Theorem}
+\newtheorem{lemma}[definition]{Lemma}
+\newtheorem{corollary}[definition]{Corollary}
+\newtheorem{proposition}[definition]{Proposition}
+
+\theoremstyle{remark}
+\newtheorem*{notation}{Notation}
+\newtheorem*{contribution}{Contribution}
+\newtheorem*{designnote}{Design Note}
+
+%=============================================================================
+% CUSTOM COMMANDS - SEMANTIC BRACKETS
+%=============================================================================
+\newcommand{\sem}[1]{\llbracket #1 \rrbracket}
+\newcommand{\semenv}[2]{\llbracket #1 \rrbracket_{#2}}
+
+%=============================================================================
+% CUSTOM COMMANDS - TYPES
+%=============================================================================
+\newcommand{\TInt}{\ensuremath{\mathsf{Int}}}
+\newcommand{\TBool}{\ensuremath{\mathsf{Bool}}}
+\newcommand{\TString}{\ensuremath{\mathsf{String}}}
+\newcommand{\TFloat}{\ensuremath{\mathsf{Float}}}
+\newcommand{\TUnit}{\ensuremath{\mathsf{Unit}}}
+\newcommand{\TNever}{\ensuremath{\mathsf{Never}}}
+\newcommand{\TAny}{\ensuremath{\mathsf{Any}}}
+\newcommand{\TUnknown}{\ensuremath{\mathsf{Unknown}}}
+\newcommand{\TOption}[1]{\ensuremath{\mathsf{Option}[#1]}}
+\newcommand{\TResult}[2]{\ensuremath{\mathsf{Result}[#1, #2]}}
+\newcommand{\TArray}[1]{\ensuremath{\mathsf{Array}[#1]}}
+\newcommand{\TStruct}{\ensuremath{\mathsf{Struct}}}
+\newcommand{\TFunc}[3]{\ensuremath{#1 \xrightarrow{#2} #3}}
+\newcommand{\Code}[1]{\ensuremath{\langle #1 \rangle}}
+\newcommand{\TypeRep}[1]{\ensuremath{\mathsf{TypeRep}[#1]}}
+
+%=============================================================================
+% CUSTOM COMMANDS - MODES
+%=============================================================================
+\newcommand{\MUnique}{\ensuremath{\mathsf{unique}}}
+\newcommand{\MDup}{\ensuremath{\mathsf{dup}}}
+\newcommand{\mzero}{\mathsf{0}}
+\newcommand{\mone}{\mathsf{1}}
+\newcommand{\momega}{\omega}
+\newcommand{\maffine}{\mathsf{aff}}
+\newcommand{\mrelevant}{\mathsf{rel}}
+\newcommand{\own}{\mathsf{own}}
+\newcommand{\rref}{\mathsf{ref}}
+\newcommand{\rrefmut}{\mathsf{ref\,mut}}
+\newcommand{\gc}{\mathsf{gc}}
+\newcommand{\rc}{\mathsf{rc}}
+\newcommand{\arc}{\mathsf{arc}}
+
+%=============================================================================
+% CUSTOM COMMANDS - EFFECTS
+%=============================================================================
+\newcommand{\Eff}{\mathsf{Eff}}
+\newcommand{\Pure}{\bot}
+\newcommand{\EThrow}[1]{\mathsf{Throw}[#1]}
+\newcommand{\EPanic}{\mathsf{Panic}}
+\newcommand{\EIO}{\mathsf{IO}}
+\newcommand{\EAsync}{\mathsf{Async}}
+\newcommand{\EAlloc}{\mathsf{Alloc}}
+\newcommand{\ERead}{\mathsf{Read}}
+\newcommand{\EWrite}{\mathsf{Write}}
+\newcommand{\EDiverge}{\mathsf{Div}}
+\newcommand{\EAtomic}{\mathsf{Atomic}}
+\newcommand{\bind}{\mathbin{\gg\!=}}
+\newcommand{\pvs}{\Rrightarrow}
+\newcommand{\later}{\triangleright}
+\newcommand{\parr}{\mathbin{\rotatebox[origin=c]{180}{\&}}}
+\newcommand{\wand}{\mathbin{-\!\!*}}
+\newcommand{\dom}{\mathrm{dom}}
+\newcommand{\rowext}[2]{\langle #1 \mid #2 \rangle}
+\newcommand{\effjoin}{\sqcup}
+\newcommand{\bigeffjoin}{\bigsqcup}
+\newcommand{\effmeet}{\sqcap}
+\newcommand{\effsub}{\sqsubseteq}
+
+%=============================================================================
+% CUSTOM COMMANDS - JUDGMENTS
+%=============================================================================
+\newcommand{\types}{\vdash}
+\newcommand{\subtype}{<:}
+\newcommand{\env}{\Gamma}
+\newcommand{\pc}{\mathsf{pc}}
+\newcommand{\at}{@}
+
+%=============================================================================
+% CUSTOM COMMANDS - LINEAR LOGIC
+%=============================================================================
+\newcommand{\lolli}{\multimap}
+\newcommand{\tensor}{\otimes}
+\newcommand{\with}{\mathbin{\&}}
+\newcommand{\plus}{\oplus}
+\newcommand{\bang}{!}
+\newcommand{\whynot}{?}
+\newcommand{\one}{\mathbf{1}}
+\newcommand{\zero}{\mathbf{0}}
+
+%=============================================================================
+% CUSTOM COMMANDS - CHECKMARKS
+%=============================================================================
+\newcommand{\cmark}{$\checkmark$}
+\newcommand{\xmark}{$\times$}
+
+%=============================================================================
+% CUSTOM COMMANDS - ANALYSIS DOMAINS
+%=============================================================================
+\newcommand{\Lattice}{\mathcal{L}}
+\newcommand{\Domain}{\mathcal{D}}
+\newcommand{\Abstract}{\mathcal{A}}
+\newcommand{\Concrete}{\mathcal{C}}
+\newcommand{\abstr}{\alpha}
+\newcommand{\concr}{\gamma}
+\newcommand{\galois}[2]{\langle #1, #2 \rangle}
+
+%=============================================================================
+% CUSTOM COMMANDS - COMPLEXITY AND ALGORITHMS
+%=============================================================================
+\newcommand{\BigO}{\mathcal{O}}
+\newcommand{\IFDS}{\textsf{IFDS}}
+\newcommand{\IDE}{\textsf{IDE}}
+\newcommand{\CFL}{\textsf{CFL}}
+\newcommand{\CPG}{\textsf{CPG}}
+\newcommand{\CFG}{\textsf{CFG}}
+\newcommand{\PDG}{\textsf{PDG}}
+\newcommand{\AST}{\textsf{AST}}
+\newcommand{\SDG}{\textsf{SDG}}
+
+%=============================================================================
+% CUSTOM COMMANDS - LANGUAGES
+%=============================================================================
+\newcommand{\LangC}{\textsf{C}}
+\newcommand{\LangCpp}{\textsf{C++}}
+\newcommand{\LangRust}{\textsf{Rust}}
+\newcommand{\LangGo}{\textsf{Go}}
+\newcommand{\LangJava}{\textsf{Java}}
+\newcommand{\LangPython}{\textsf{Python}}
+\newcommand{\LangJS}{\textsf{JavaScript}}
+\newcommand{\LangTS}{\textsf{TypeScript}}
+\newcommand{\LangSwift}{\textsf{Swift}}
+\newcommand{\LangKotlin}{\textsf{Kotlin}}
+
+%=============================================================================
+% TCOLORBOX ENVIRONMENTS
+%=============================================================================
+\tcbuselibrary{listings,skins,breakable}
+
+\newtcolorbox{pillarbox}[1][]{
+  colback=blue!3,
+  colframe=blue!40!black,
+  fonttitle=\bfseries,
+  boxrule=0.5pt,
+  left=4pt, right=4pt, top=3pt, bottom=3pt,
+  boxsep=2pt,
+  before skip=6pt plus 2pt minus 2pt,
+  after skip=6pt plus 2pt minus 2pt,
+  breakable,
+  #1
+}
+
+\newtcolorbox{contributionbox}[1][]{
+  colback=green!3,
+  colframe=green!40!black,
+  fonttitle=\bfseries,
+  boxrule=0.5pt,
+  left=4pt, right=4pt, top=3pt, bottom=3pt,
+  boxsep=2pt,
+  before skip=6pt plus 2pt minus 2pt,
+  after skip=6pt plus 2pt minus 2pt,
+  breakable,
+  #1
+}
+
+\newtcolorbox{artifactbox}[1][]{
+  colback=gray!5,
+  colframe=gray!50,
+  boxrule=0.3pt,
+  left=3pt, right=3pt, top=2pt, bottom=2pt,
+  boxsep=1pt,
+  before skip=4pt plus 1pt minus 1pt,
+  after skip=4pt plus 1pt minus 1pt,
+  breakable,
+  #1
+}
+
+\newtcolorbox{sectiontemplatebox}[1][]{
+  colback=yellow!5,
+  colframe=yellow!50!black,
+  fonttitle=\bfseries,
+  boxrule=0.5pt,
+  left=4pt, right=4pt, top=3pt, bottom=3pt,
+  boxsep=2pt,
+  before skip=6pt plus 2pt minus 2pt,
+  after skip=6pt plus 2pt minus 2pt,
+  breakable,
+  #1
+}
+
+\newtcolorbox{warningbox}[1][]{
+  colback=red!5,
+  colframe=red!50!black,
+  fonttitle=\bfseries,
+  boxrule=0.5pt,
+  left=4pt, right=4pt, top=3pt, bottom=3pt,
+  breakable,
+  #1
+}
+
+\newtcolorbox{insightbox}[1][]{
+  colback=yellow!5,
+  colframe=yellow!50!black,
+  fonttitle=\bfseries,
+  boxrule=0.5pt,
+  left=4pt, right=4pt, top=3pt, bottom=3pt,
+  breakable,
+  #1
+}
+
+%=============================================================================
+% LISTINGS FOR F*
+%=============================================================================
+\definecolor{fstar-keyword}{RGB}{0,0,180}
+\definecolor{fstar-string}{RGB}{180,0,0}
+\definecolor{fstar-comment}{RGB}{0,128,0}
+\definecolor{fstar-type}{RGB}{128,0,128}
+
+\lstdefinelanguage{fstar}{
+  keywords={let, rec, in, if, then, else, match, with, type, val,
+            module, open, assume, assert, requires, ensures,
+            forall, exists, fun, function, and, or, not, true, false,
+            Tot, Lemma, Type, effect, new_effect, sub_effect,
+            inline_for_extraction, unfold, irreducible, opaque,
+            private, abstract, noeq, unopteq, instance, class},
+  keywordstyle=\color{fstar-keyword}\bfseries,
+  sensitive=true,
+  comment=[l]{//},
+  morecomment=[s]{(*}{*)},
+  commentstyle=\color{fstar-comment}\itshape,
+  stringstyle=\color{fstar-string},
+  morestring=[b]",
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  breakatwhitespace=false,
+  breakautoindent=true,
+  postbreak=\mbox{\textcolor{gray}{$\hookrightarrow$}\space},
+  columns=flexible,
+  showstringspaces=false,
+  tabsize=2,
+  extendedchars=true,
+  inputencoding=utf8,
+  escapeinside={(*@}{@*)},
+  literate={->}{$\rightarrow$}1
+           {=>}{$\Rightarrow$}1
+           {<-}{$\leftarrow$}1
+           {forall}{$\forall$}1
+           {exists}{$\exists$}1
+           {/\\}{$\land$}1
+           {\\/}{$\lor$}1
+           {~}{$\lnot$}1
+           {<=}{$\leq$}1
+           {>=}{$\geq$}1
+           {<>}{$\neq$}1
+           {alpha}{$\alpha$}1
+           {beta}{$\beta$}1
+           {gamma}{$\gamma$}1
+           {delta}{$\delta$}1
+           {epsilon}{$\varepsilon$}1
+           {tau}{$\tau$}1
+           {sigma}{$\sigma$}1
+           {rho}{$\rho$}1
+           {omega}{$\omega$}1
+}
+
+\lstset{language=fstar}
+
+\newtcblisting{fstarcode}[1][]{
+  listing only,
+  listing options={
+    language=fstar,
+    aboveskip=0pt,
+    belowskip=0pt,
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    breakatwhitespace=false,
+    breakautoindent=true,
+    postbreak=\mbox{\textcolor{gray}{$\hookrightarrow$}\space},
+    columns=flexible,
+    keepspaces=true
+  },
+  colback=gray!5,
+  colframe=gray!50,
+  boxrule=0.3pt,
+  left=2pt,
+  right=2pt,
+  top=1pt,
+  bottom=1pt,
+  boxsep=1pt,
+  before skip=4pt plus 1pt minus 1pt,
+  after skip=4pt plus 1pt minus 1pt,
+  breakable,
+  lines before break=2,
+  enforce breakable,
+  #1
+}
+
+%=============================================================================
+% TITLE
+%=============================================================================
+\title{%
+  \textbf{Brrr-Machine Synthesis Specification}\\[0.5em]
+  \large Complete Multi-Language Program Analysis Framework
+}
+
+\author{Brrr-Machine Project}
+
+\date{January 2026}
+
+%=============================================================================
+% DOCUMENT
+%=============================================================================
+\begin{document}
+
+% Allow more flexibility for line breaking to avoid overfull hboxes
+\sloppy
+
+\maketitle
+
+\begin{abstract}
+This document presents the complete brrr-machine synthesis specification,
+establishing the theoretical foundations and architectural principles for
+multi-language program analysis. The brrr-machine treats programming languages
+as parameterized instantiations of a universal computational model, enabling
+uniform analysis across heterogeneous language ecosystems. We present the
+vision, core thesis, and foundational pillars synthesized from seminal papers
+in programming language theory: abstract interpretation, program representation,
+interprocedural dataflow, pointer analysis, effect systems, substructural types,
+and security analysis.
+\end{abstract}
+
+\tableofcontents
+
+%=============================================================================
+% PART I: PREAMBLE
+%=============================================================================
+\input{synthesis_part1}
+
+%=============================================================================
+% PART II: THEORETICAL FOUNDATIONS
+%=============================================================================
+\input{synthesis_part2}
+
+%=============================================================================
+% PART III: PROGRAM REPRESENTATION
+%=============================================================================
+\input{synthesis_part3}
+
+%% PARTS 4-14 AND APPENDICES TEMPORARILY DISABLED FOR INCREMENTAL BUILD
+\input{synthesis_part4}
+\input{synthesis_part5}
+\input{synthesis_part6}
+\input{synthesis_part7}
+\input{synthesis_part8}
+\input{synthesis_part9}
+\input{synthesis_part10}
+\input{synthesis_part11}
+\input{synthesis_part12}
+\input{synthesis_part13}
+\input{synthesis_part14}
+\input{synthesis_appendices}
+
+\end{document}

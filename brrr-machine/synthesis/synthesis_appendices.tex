@@ -1,0 +1,1937 @@
+% synthesis_appendices.tex - LaTeX fragment for Appendices A, B, C, D
+% This is a FRAGMENT - no \documentclass, \begin{document}, or \end{document}
+
+\appendix
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% APPENDIX A: PAPER PRIORITY MATRIX
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\chapter{Paper Priority Matrix}
+\label{app:paper-priority}
+
+This appendix provides a prioritized reference of foundational papers organized by contribution category, with priority scores indicating their importance to the brrr-machine implementation.
+
+\section{Priority Matrix}
+
+\begin{longtable}{@{}p{4cm}cp{2cm}p{6cm}@{}}
+\toprule
+\textbf{Paper} & \textbf{Priority} & \textbf{Category} & \textbf{Key Contribution} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Paper} & \textbf{Priority} & \textbf{Category} & \textbf{Key Contribution} \\
+\midrule
+\endhead
+\midrule
+\multicolumn{4}{r}{\textit{Continued on next page}} \\
+\endfoot
+\bottomrule
+\endlastfoot
+
+Cousot 1977 & 10 & Foundation & Abstract interpretation \\
+Yamaguchi 2014 & 10 & Representation & Code Property Graph \\
+Reps 1995 & 9 & Algorithm & IFDS \\
+Reps 1997 & 9 & Algorithm & CFL-reachability \\
+Andersen 1994 & 9 & Pointer & Inclusion-based \\
+Steensgaard 1996 & 8 & Pointer & Unification-based \\
+\textbf{Lattner 2007 (DSA)} & \textbf{9} & \textbf{Pointer} & \textbf{Unification + context-sensitivity + heap cloning for C/C++ > 100K LOC} \\
+Moggi 1991 & 9 & Effects & Monads \\
+Plotkin 2003/2009 & 9 & Effects & Algebraic effects \\
+Leijen 2014/2017 & 9 & Effects & Row polymorphism \\
+Girard 1987 & 9 & Types & Linear logic \\
+Reynolds 2002 & 9 & Types & Separation logic \\
+Jung 2018 (Iris) & 9 & Types & Iris framework, higher-order ghost state, cameras, view shifts, step-indexed semantics \\
+\textbf{Muller 2016 (Viper)} & \textbf{9} & \textbf{Verification} & \textbf{IVL for permission-based reasoning, magic wands, quantified permissions} \\
+\textbf{Mulder 2022 (Diaframe)} & \textbf{9} & \textbf{Verification} & \textbf{Automated Iris proofs, bi-abduction with postponed existentials} \\
+Denning 1977 & 9 & Security & Information flow \\
+Livshits 2005 & 9 & Security & Taint analysis \\
+Tripp 2009 & 9 & Security & Thin slicing \\
+Matthews 2007 & 9 & Multi-lang & Boundary semantics \\
+Hammer 2014 & 9 & Incremental & Adapton \\
+Ferrante 1987 & 9 & Representation & PDG \\
+Horwitz 1990 & 9 & Representation & SDG \\
+Weiser 1984 & 8 & Representation & Slicing \\
+Sridharan 2005 & 8 & Pointer & Demand-driven \\
+Smaragdakis 2011 & 8 & Pointer & Datalog \\
+Calcagno 2009 & 9 & Pointer & Bi-abduction \\
+Aiken 1999 & 9 & Types & Set constraints \\
+Cousot 1992 & 9 & Foundation & Widening \\
+Goguen 1992 & 8 & Multi-lang & Institutions \\
+Wagner 1998 & 8 & Incremental & Parsing \\
+\textbf{Zilberstein 2023} & \textbf{10} & \textbf{Foundation} & \textbf{Outcome Logic (replaces IL)} \\
+\textbf{Kang 2017} & \textbf{10} & \textbf{Memory Model} & \textbf{Promising Semantics (fixes C11 thin-air bug)} \\
+\textbf{Lee 2020} & \textbf{10} & \textbf{Memory Model} & \textbf{Promising 2.0 (capped memory, global opts, fixes ARMv8)} \\
+\textbf{Podkopaev 2019} & \textbf{10} & \textbf{Memory Model} & \textbf{IMM intermediate model (O(n+m) compilation proofs, 33K Coq)} \\
+\textbf{Leroy 2009 (CompCert)} & \textbf{10} & \textbf{Verification} & \textbf{Verified C compiler, semantics preservation proofs, simulation relations} \\
+O'Hearn 2020 & 8 & Foundation & Incorrectness Logic (historical) \\
+Patterson 2022 & 9 & Multi-lang & Realizability models \\
+\textbf{King 1976} & \textbf{9} & \textbf{Algorithm} & \textbf{Symbolic execution, path conditions} \\
+\textbf{Kozen 1981} & \textbf{8} & \textbf{Foundation} & \textbf{Probabilistic semantics, Theorem 6.1} \\
+\textbf{Cousot 2012} & \textbf{8} & \textbf{Foundation} & \textbf{Probabilistic AI, three abstraction axes} \\
+\textbf{Bruni 2023 (LCL)} & \textbf{9} & \textbf{Foundation} & \textbf{Local Completeness Logic, unified over/under approx} \\
+\textbf{Le 2022 (Pulse-X)} & \textbf{10} & \textbf{Foundation} & \textbf{ISL, Manifest/Latent classification, True Positives Property} \\
+\textbf{Vanegue 2025} & \textbf{9} & \textbf{Algorithm} & \textbf{Non-termination proving, Pulse-infinity} \\
+Crary 1999 & 9 & Types & Capability multiplicities \\
+Xi 1999 & 8 & Types & Dependent ML / constraint domains \\
+Watt 2018 & 8 & Verification & Verified interpreter pattern \\
+\textbf{Disselkoen 2019 (MS-Wasm)} & \textbf{8} & \textbf{Memory Safety} & \textbf{Progressive memory safety for WebAssembly} \\
+\textbf{Perrone \& Romano 2024} & \textbf{7} & \textbf{Security Survey} & \textbf{Comprehensive WebAssembly security review (121 papers)} \\
+\textbf{Rupta/Li 2024} & \textbf{9} & \textbf{Pointer} & \textbf{Stack filtering, Rust MIR analysis, on-the-fly CG} \\
+\textbf{Sagiv 2002 (TVLA)} & \textbf{9} & \textbf{Foundation} & \textbf{Three-valued logic, shape analysis, focus/coerce} \\
+\textbf{Distefano 2006} & \textbf{8} & \textbf{Shape Analysis} & \textbf{Symbolic heaps, junk predicate, canonicalization} \\
+\textbf{Pnueli 1977} & \textbf{8} & \textbf{Temporal Logic} & \textbf{G, F, $\leadsto$, U operators, P1/P2 liveness principles} \\
+\textbf{Batty 2011} & \textbf{10} & \textbf{Memory Model} & \textbf{C11 semantics, coherence axioms, DRF-SC} \\
+\textbf{VeriFFI 2025} & \textbf{8} & \textbf{FFI} & \textbf{Representation predicates, GC-isomorphism} \\
+\textbf{Furr \& Foster 2008} & \textbf{8} & \textbf{FFI} & \textbf{Multilingual type inference, representational types} \\
+\textbf{Patterson \& Ahmed 2022} & \textbf{9} & \textbf{Multi-lang/IR} & \textbf{Semantic IR via realizability models, convertibility relations} \\
+\textbf{Strom \& Yemini 1986} & \textbf{9} & \textbf{Typestate} & \textbf{Original typestate concept, state machine semantics} \\
+\textbf{Boyapati 2003} & \textbf{9} & \textbf{Ownership} & \textbf{Owner-as-dominator discipline, ownership types} \\
+\textbf{Bierhoff 2007} & \textbf{9} & \textbf{Ownership} & \textbf{5 access permissions (unique/full/share/immutable/pure)} \\
+\textbf{Siek 2006} & \textbf{8} & \textbf{Types} & \textbf{Gradual typing, non-transitive consistency relation} \\
+\textbf{Garcia 2016 (AGT)} & \textbf{9} & \textbf{Types} & \textbf{Abstracting Gradual Typing: gradual types as abstract interpretations} \\
+\textbf{Honda 1998} & \textbf{9} & \textbf{Session Types} & \textbf{Binary session types, duality, linear channel usage} \\
+\textbf{Trabish 2018} & \textbf{9} & \textbf{Symbolic Exec} & \textbf{Chopped SE, skip regions, lazy recovery} \\
+\textbf{Honda 2008} & \textbf{9} & \textbf{Session Types} & \textbf{Multiparty asynchronous session types, global types, projection (see caveats below)} \\
+\textbf{Scalas \& Yoshida 2019} & \textbf{9} & \textbf{Session Types} & \textbf{``Less is More'': Safety property, fixes Honda 2008 proof flaws, no global types needed} \\
+\textbf{Yoshida \& Hou 2024} & \textbf{9} & \textbf{Session Types} & \textbf{``Less is More Revisited'': Association relation, validates top-down approach with subtyping} \\
+\textbf{Tirore et al.~2023/2025} & \textbf{8} & \textbf{Session Types} & \textbf{Mechanized MPST in Coq (ITP 2023) and Rocq (ECOOP 2025), restricted fragment} \\
+\textbf{Sui \& Xue 2016 (SVF)} & \textbf{9} & \textbf{Value-Flow} & \textbf{Sparse value-flow analysis, Memory SSA, SVFG construction} \\
+\textbf{Sui, Ye \& Xue 2012} & \textbf{9} & \textbf{Value-Flow} & \textbf{Full-sparse value-flow, source-sink reachability} \\
+\textbf{Chow et al.~1996} & \textbf{8} & \textbf{Memory SSA} & \textbf{Memory SSA foundation, mu/chi annotations} \\
+\textbf{Li et al.~2020 (ZIPPER)} & \textbf{9} & \textbf{Pointer} & \textbf{Selective context sensitivity, precision flow graph} \\
+\textbf{Huang et al.~2023 (JARVIS)} & \textbf{9} & \textbf{Call Graph} & \textbf{Python call graph via Function Type Graph, C3 MRO} \\
+\textbf{Agat 2000} & \textbf{7} & \textbf{Security} & \textbf{Timing channel analysis, timing-sensitive noninterference} \\
+\textbf{Guarnieri et al.~2020 (SPECTECTOR)} & \textbf{8} & \textbf{Security} & \textbf{Speculative Non-Interference (SNI)} \\
+\textbf{Almeida et al.~2016 (CT-Verif)} & \textbf{8} & \textbf{Security} & \textbf{Constant-time verification via product programs} \\
+\textbf{Cadar et al.~2008 (KLEE)} & \textbf{8} & \textbf{Testing} & \textbf{KLEE symbolic execution engine, constraint optimization} \\
+\textbf{Clarke, Emerson, Sistla 1986} & \textbf{7} & \textbf{Verification} & \textbf{CTL model checking, branching-time temporal logic} \\
+\textbf{Naeem et al.~2010} & \textbf{7} & \textbf{Algorithms} & \textbf{Practical IFDS extensions and optimizations} \\
+\textbf{Russo \& Sabelfeld 2006} & \textbf{7} & \textbf{Security} & \textbf{Dynamic monitors for concurrent IFC} \\
+\textbf{Sabelfeld \& Myers 2003} & \textbf{8} & \textbf{Security} & \textbf{Comprehensive language-based IFC survey} \\
+\textbf{Sabelfeld \& Sands 2000} & \textbf{7} & \textbf{Security} & \textbf{Probabilistic noninterference} \\
+\textbf{Godefroid et al.~2005 (DART)} & \textbf{8} & \textbf{Testing} & \textbf{Directed Automated Random Testing, concolic execution origins} \\
+\textbf{Sen et al.~2005 (CUTE)} & \textbf{8} & \textbf{Testing} & \textbf{Concolic testing foundations, pointer constraint separation} \\
+\textbf{Yun et al.~2018 (QSYM)} & \textbf{9} & \textbf{Testing} & \textbf{Optimistic concolic execution, native instrumentation} \\
+\textbf{Pradel \& Sen 2018 (DeepBugs)} & \textbf{8} & \textbf{ML/Bug Detection} & \textbf{Name-based bug detection via word2vec embeddings} \\
+\textbf{Smith \& Volpano 1998} & \textbf{7} & \textbf{Security} & \textbf{Type-based secure information flow} \\
+\textbf{Spath et al.~2019 (SPDS)} & \textbf{9} & \textbf{Algorithm} & \textbf{Synchronized pushdown systems, WPDS encoding} \\
+\textbf{Conrado et al.~2025 (MCFL)} & \textbf{9} & \textbf{Algorithm} & \textbf{Multiple context-free language reachability, d-MCFL hierarchy} \\
+\end{longtable}
+
+\section{Collection 2 Priority Justifications}
+
+\begin{description}
+\item[Bierhoff 2007 (9/10)] Critical for modular analysis with aliasing. The 5-permission system (unique, full, share, immutable, pure) directly fills Gap D.1 for library modeling and enables precise resource tracking where current \lstinline{ownership_state} is too simple. Frame-based inheritance handling addresses OOP analysis needs.
+
+\item[Siek 2006 (8/10)] Essential for Python/JavaScript analysis. Type consistency (non-transitive) provides soundness for boundary checking in Section 9.1.2. Cast insertion algorithm enables systematic boundary term generation. Pay-as-you-go semantics allows efficient code generation for known types.
+
+\item[Garcia 2016 AGT (9/10)] Principled foundation connecting gradual typing to abstract interpretation. Shows gradual types form a Galois connection: $\gamma(?) = \text{all types}$, consistency = non-empty intersection. \textbf{Critical:} Derives non-transitivity mathematically (not stipulated). Evidence semantics enable precise blame tracking at multi-language boundaries.
+
+\item[Honda 1998 (9/10)] Foundation for binary session types. Establishes type discipline for structured communication with duality (send/recv correspondence), linearity (channels used exactly once per direction), and progress (no deadlock in single session). Essential for Go channel analysis and Rust mpsc.
+
+\item[Honda 2008 (9/10)] Extends binary session types to multiparty asynchronous sessions. Global types describe complete protocol scenarios; projection extracts local types for each participant. Critical for microservice protocol analysis and distributed system verification. \textbf{Caveat}: The original proofs had flaws discovered by Scalas \& Yoshida 2019; use the association relation (Yoshida \& Hou 2024) with subtyping rather than direct equality for sound type safety proofs.
+
+\item[Scalas \& Yoshida 2019 (9/10)] ``Less is More: Multiparty Session Types Revisited'' (POPL 2019). Identified that Honda 2008's consistency requirement is overly restrictive and papers using ``full merging'' projection had flawed proofs. Introduces the \textbf{safety property} $\varphi$ as a weaker but sufficient condition for type safety. Key insight: global types are \textbf{not required} --- safety, deadlock-freedom, and liveness can be checked directly on typing contexts. Types more protocols than the original Honda approach.
+
+\item[Yoshida \& Hou 2024 (9/10)] ``Less is More Revisited: Association with Global Multiparty Session Types'' (arXiv 2024). Corrects the misunderstanding that the top-down MPST approach with mergeability is unsound. Introduces the \textbf{association relation} $G \sqsubseteq_s \Gamma$ using subtyping ($G \upharpoonright p \leq \Gamma(s[p])$) rather than equality. Proves top-down approach is sound and decidable. Key result: association guarantees safety, deadlock-freedom, and liveness by construction.
+
+\item[Tirore et al.~2023/2025 (8/10)] Mechanized proofs of multiparty session types. ITP 2023 provides Coq mechanization of a restricted fragment. ECOOP 2025 extends to full Rocq formalization. Useful reference for verification but covers a more limited fragment than the full Honda 2008 theory.
+
+\item[Sui \& Xue 2016 (9/10)] Alternative to IFDS for source-sink reachability problems. Sparse value-flow representation is more efficient when memory regions $R \ll$ dataflow domain $D$. Memory SSA ($\mu/\chi$ annotations) precisely tracks address-taken variables.
+
+\item[Li et al.~2020 ZIPPER (9/10)] Selective context sensitivity for pointer analysis. Identifies precision-critical methods via three value-flow patterns (direct, wrapped, unwrapped). Achieves 98.8\% precision of full 2obj analysis with 3.4$\times$ speedup.
+
+\item[Lattner, Lenharth, Adve 2007 DSA (9/10)] Scalable pointer analysis for large C/C++ codebases (100K--355K LOC). Combines Steensgaard-style unification $O(n \cdot \alpha(n))$ with context-sensitivity and heap cloning to achieve precision comparable to Andersen. Linux kernel analyzed in 3.1 seconds, $<46$MB memory.
+
+\item[Huang et al.~2023 JARVIS (9/10)] Critical for Python call graph construction. Function Type Graph (FTG) provides flow-sensitive type inference with strong updates. C3 linearization for MRO handles Python's multiple inheritance. 84\% higher precision than flow-insensitive approaches.
+
+\item[Spath et al.~2019 SPDS (9/10)] Solves combined context+field sensitivity via synchronized pushdown systems. Key insight: encode field access patterns via pushdown automata, avoiding exponential access-path enumeration. Achieves 64--83$\times$ speedups on DaCapo benchmarks.
+
+\item[Conrado et al.~2025 MCFL (9/10)] First decidable analysis for interleaved Dyck reachability via Multiple Context-Free Languages. The d-MCFL hierarchy provides principled underapproximations with $O(n^{2d})$ complexity and SETH lower bounds proving tightness.
+
+\item[Muller et al.~2016 Viper (9/10)] Verification infrastructure for permission-based reasoning. Provides permission-native intermediate language (IVL) with first-class support for \lstinline{acc(e.f)}, fractional/symbolic permissions, magic wands ($A \wand B$), quantified permissions.
+
+\item[Mulder et al.~2022 Diaframe (9/10)] Automated Iris proofs with foundational soundness. Key innovation: goal-directed proof search inspired by linear logic programming. Bi-abduction with \textsc{Postponed} existentials (critical for invariants). 10$\times$ less manual proof than raw Iris.
+
+\item[Furr \& Foster 2008 (8/10)] Practical FFI type inference for OCaml-C and Java-JNI boundaries. Introduces \emph{representational types} that model C's low-level view of high-level data. GC safety analysis via effect annotations. Validated: found 24 errors in OCaml benchmarks, 156 errors in JNI benchmarks.
+
+\item[Patterson \& Ahmed 2022 (9/10)] Foundational framework for semantic soundness of language interoperability via compilation. Key insight: interoperability works by compiling both languages to a shared target, with \emph{realizability models} $\mathcal{V}\llbracket\tau\rrbracket$ defining what target terms ``behave as'' source type $\tau$.
+
+\item[Leroy 2009 CompCert (10/10)] First realistic verified compiler proving semantics preservation for C to assembly. \textbf{Critical} for analysis correctness: if source analysis proves safety AND compilation is verified, then executable is safe. The 42K lines Coq proof introduces simulation relations as the standard proof technique.
+\end{description}
+
+\textbf{Note:} Yamaguchi 2014 (CPG), Steensgaard 1996, Reynolds 2002, and Leijen 2014 from Collection 2 were already integrated into the main synthesis and appear above with their original priorities.
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% APPENDIX B: LANGUAGE CONFIGURATION TABLE
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\chapter{Language Configuration Table}
+\label{app:language-config}
+
+This appendix provides a reference table of safety guarantees provided by each supported language's type system and runtime.
+
+\begin{table}[htbp]
+\centering
+\caption{Language Safety Properties}
+\label{tab:language-safety}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{@{}lccccccc@{}}
+\toprule
+\textbf{Language} & \textbf{MemSafe} & \textbf{NullSafe} & \textbf{TypeSafe} & \textbf{RaceFree} & \textbf{LeakFree} & \textbf{Memory} & \textbf{Types} \\
+\midrule
+Rust       & \cmark & \cmark & \cmark & \cmark & \cmark & Owned  & Static \\
+Haskell    & \cmark & \cmark & \cmark & \cmark & \cmark & GC     & Static \\
+Java       & \cmark & \xmark & \cmark & \xmark & \cmark & GC     & Static \\
+Go         & \cmark & \xmark & \cmark & \xmark & \cmark & GC     & Static \\
+Python     & \cmark & \xmark & \xmark & \cmark$^*$ & \cmark & GC & Dynamic \\
+JavaScript & \cmark & \xmark & \xmark & \cmark$^*$ & \cmark & GC & Dynamic \\
+C          & \xmark & \xmark & \xmark & \xmark & \xmark & Manual & Static \\
+C++        & \xmark & \xmark & \xmark & \xmark & \xmark & Manual & Static \\
+Swift      & \cmark & \cmark & \cmark & \xmark & \cmark & RC     & Static \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+
+\medskip
+\footnotesize{$^*$Single-threaded/GIL}
+\end{table}
+
+\paragraph{Legend.}
+\begin{itemize}
+\item \textbf{MemSafe}: Memory safety (no buffer overflows, use-after-free)
+\item \textbf{NullSafe}: Null safety (no null pointer dereferences by construction)
+\item \textbf{TypeSafe}: Type safety (no type confusion at runtime)
+\item \textbf{RaceFree}: Data race freedom (no concurrent access to shared mutable state)
+\item \textbf{LeakFree}: Resource leak prevention (automatic cleanup)
+\item \textbf{Memory}: Memory management model (Owned/GC/Manual/RC)
+\item \textbf{Types}: Type system (Static/Dynamic)
+\end{itemize}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% APPENDIX C: GLOSSARY
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\chapter{Glossary}
+\label{app:glossary}
+
+This appendix provides definitions for key terms used throughout the synthesis document.
+
+\section{Core Concepts}
+
+\begin{description}
+\item[Abstract Interpretation] Computing sound approximations of program behavior.
+
+\item[Abstracting Gradual Typing (AGT)] Garcia 2016. Framework showing gradual types are abstract interpretations of static type sets. $\gamma(?) = \text{all types}$. Consistency = non-empty set intersection. Provides Galois connection foundation for gradual typing. See Section 9.1.2.
+
+\item[Affine Typing] Substructural type system requiring values be used \emph{at most once} (can drop without use). Rust uses affine, not strictly linear. See RustBelt/Iris.
+
+\item[Backsubstitution] DeepPoly technique (Singh 2019). Recursively substitute polyhedral constraints backward through network layers until only input variables remain. Enables relational reasoning without exponential constraint explosion. Key to DeepPoly's precision. See Section 2.1.7c.
+
+\item[Bi-Abduction] Calcagno 2009. Given $p$ and $q$, find anti-frame $M$ and frame $F$ such that $p * M \vdash q * F$. Enables compositional shape analysis.
+
+\item[Binary Session Type] Honda 1998. Type discipline for structured two-party communication. Types describe sequences of send/receive actions, selections/branches, and delegation. Duality principle ensures compatible communication. See Section 14.0.
+
+\item[Bounded Unrolling] Under-approximate loop analysis. Unroll $k$ times (typically $k=3$), then cut off. Sound for bug finding.
+
+\item[Camera] Step-indexed partial commutative monoid (from Iris).
+
+\item[CFL-Reachability] Graph reachability where valid paths form a context-free language.
+
+\item[Causality Analysis] Honda 2008. Analysis of dependency relations (II, IO, OO) between communication prefixes. Determines ordering constraints for safe multiparty interaction.
+
+\item[Channel Effect] Effect type for communication operations (\textsc{ESend}, \textsc{ERecv}, \textsc{EChanCreate}, \textsc{EChanClose}). Linear effects that must be accounted for exactly once.
+
+\item[Chopped Symbolic Execution (CSE)] Trabish 2018. Symbolic execution that skips user-specified code regions and recovers their effects lazily when observable. Reduces path explosion while preserving soundness. See Section 4.4.6.
+
+\item[Code Property Graph (CPG)] Unified representation combining AST, CFG, and PDG.
+
+\item[Coherence] Honda 2008. Property that a global type is linear and projectable to all participants. Ensures protocol is implementable. \textbf{Note}: The original definition required exact equality between projections and local types; the corrected formulation (Yoshida \& Hou 2024) uses the association relation with subtyping.
+
+\item[Consistency (Session Types)] Honda 2008. Requirement that all partial projections be dual. \textbf{Caveat}: Shown to be overly restrictive by Scalas \& Yoshida 2019; replaced by the weaker \textbf{safety property} in modern formulations.
+
+\item[CompCert] Leroy 2009. First realistic verified compiler for C (Clight subset) to PowerPC/ARM/x86 assembly. Proves semantic preservation. 42K lines Coq. See Section 12.26.C.
+
+\item[Completeness Flag] DSA flag indicating whether all pointers to a node have been discovered. See Section 5.2.5.2, 12.33.2.
+
+\item[Concolic Execution] Godefroid 2005 (DART), Sen 2005 (CUTE). Hybrid execution that runs concrete and symbolic execution \emph{simultaneously}. Key insight: when symbolic reasoning becomes intractable, substitute concrete values and continue. Term ``concolic'' = concrete + symbolic. See Section 4.4.5, 4.4.7.
+
+\item[Consistent Subtyping] Garcia 2016. $G_1 \lesssim G_2$ iff $\exists\, T_1 \in \gamma(G_1), T_2 \in \gamma(G_2)$ with $T_1 <: T_2$. Combines gradual consistency with subtyping for record types. Essential for JS objects, TS interfaces at boundaries. See Section 9.1.2.
+
+\item[Convertibility (Language Interop)] Patterson \& Ahmed 2022. Relation $\tau_A \sim \tau_B$ between types from different languages meaning they can safely interoperate. Established by providing target-level \emph{glue code}. See Section 11.2.
+
+\item[Code2Inv] Si et al.~2018 (NeurIPS). RL-based loop invariant synthesis using GNN program embeddings and TreeLSTM decoder. Discovers complex invariants that widening cannot find. See Section 2.1.5c, 3.1.8.
+\end{description}
+
+\section{Data Structures and Algorithms}
+
+\begin{description}
+\item[CUTE (Concolic Unit Testing Engine)] Sen, Marinov, Agha 2005. Foundational concolic testing tool introducing: (1) \emph{logical input map} decoupling memory structure from physical layout, (2) \emph{constraint separation} solving pointer constraints separately from arithmetic, (3) \emph{fast unsat check} eliminating 60--95\% of SMT calls, (4) \emph{incremental solving}. See Section 4.4.5.
+
+\item[DART (Directed Automated Random Testing)] Godefroid, Klarlund, Sen 2005 (PLDI). First tool combining concrete and symbolic execution. Three key techniques: automatic interface extraction, random test driver generation, dynamic test generation. See Section 4.4.5.
+
+\item[Data Structure Analysis (DSA)] Lattner/Adve unification-based heap analysis with heap cloning for context sensitivity. See Section 5.2.5, 12.33.
+
+\item[DeepBugs] Pradel \& Sen 2018. ML-based bug detection using semantic identifier embeddings. Key insight: names encode semantic intent that reveals bugs. See Section 3.1.8.1.
+
+\item[DeepPoly] Singh et al.~2019 (POPL). Abstract domain for neural network verification. Combines restricted polyhedral constraints with backsubstitution for tight bounds. 100--1000$\times$ faster than MILP. See Section 2.1.7c.
+
+\item[Dependent Load] Trabish 2018. A load instruction where the loaded address may have been modified by a skipped function. Triggers recovery in CSE.
+
+\item[Diaframe] Mulder 2022. Automated Iris proof framework using bi-abduction with postponed existentials. 10$\times$ less manual proof than raw Iris. See Section 7.4.10.
+
+\item[Divergence Analysis] Detection of non-termination via repeating abstract states (loops) or same-state recursion.
+
+\item[DS Graph] Lattner 2007. Data Structure Graph---representation used by DSA. Nodes represent disjoint sets of memory objects; edges are field-sensitive pointers. See Section 5.2.5.1.
+
+\item[Duality] Honda 1998. Relationship between send and receive types: $\overline{\overline{T}} = T$. If two endpoints have dual types, their communication is safe.
+
+\item[Eval Algorithm] Calcagno 2009. Forward symbolic execution with bi-abduction for compositional memory analysis.
+
+\item[Evidence (AGT)] Garcia 2016. Metadata tracking \emph{how} type consistency was established during type checking. Enables precise blame tracking at boundaries. See Section 9.1.2.
+
+\item[Execution Tree] Dynamic tree structure from symbolic execution. Computed on-demand from CPG.
+\end{description}
+
+\section{Effects and Types}
+
+\begin{description}
+\item[Effect Row] Row-polymorphic type for tracking computational effects.
+
+\item[Expectation Transformer] Cousot 2012. Abstract transformer for probabilistic programs that operates on probability distributions over abstract states. See Section 2.1.6c.
+
+\item[FFI Type Safety] Furr \& Foster 2008. Static analysis ensuring type-safe foreign function calls. Uses representational types and GC registration analysis. See Section 9.4.6.
+
+\item[Flow-Sensitive Type (FFI)] Furr \& Foster 2008. Type of form $\mathit{ct}\{B, I, T\}$ where $B$=boxedness, $I$=offset, $T$=tag value. See Section 9.4.6.
+
+\item[Four-Point Lattice] Chong \& Myers 2004. Security label lattice with both confidentiality ($C_{\text{Low}}/C_{\text{High}}$) and integrity ($I_{\text{Low}}/I_{\text{High}}$). Required for robust declassification analysis. See Section 8.1.1, 12.34.1.
+
+\item[Galois Connection] Abstraction-concretization pair with soundness guarantee.
+
+\item[Global Type] Honda 2008. Bird's-eye view description of multiparty protocol specifying all interactions. Notation: $p \to q : k(U).G$ (p sends $U$ to q via channel $k$).
+
+\item[Gradual Guarantee] Garcia 2016. Theorem: making types less precise (more $?$) preserves program semantics but may add runtime checks. See Section 9.1.2.
+
+\item[Graph Neural Network (GNN)] Neural network operating on graph structures via message passing. Used by Code2Inv for invariant synthesis. See Section 3.1.8.
+
+\item[Guiding Constraints] Trabish 2018. Path constraints accumulated between snapshot creation and dependent state in CSE. $\mathit{gc} = \mathit{dependent.pc} - \mathit{snapshot.pc}$.
+\end{description}
+
+\section{Memory and Ownership}
+
+\begin{description}
+\item[Handle (MS-Wasm)] Disselkoen 2019. Typed pointer in MS-Wasm consisting of 4-tuple $(\mathit{base}, \mathit{offset}, \mathit{bound}, \mathit{isCorrupted})$. See Section 7.7.2.
+
+\item[Heap Cloning] DSA technique creating separate heap graphs per calling context for precision. See Section 5.2.5.4, 12.33.4.
+
+\item[Higher-Order Ghost State] Jung 2018 (Iris). Ghost state where the content is itself an Iris proposition (\textsf{iProp}). Critical for encoding recursive protocols and impredicative invariants. See Section 7.1.1.
+
+\item[Hybrid Fuzzing] QSYM 2018. Cooperative combination of coverage-guided fuzzing (fast, shallow) with concolic execution (slow, deep). See Section 4.4.7.
+
+\item[Linear Memory (WebAssembly)] A contiguous, mutable array of raw bytes that forms WebAssembly's memory model. See Section 7.7.1.
+
+\item[Linear Typing] Substructural type system requiring values be used \emph{exactly once}. Stricter than affine. See Girard 1987.
+
+\item[Macroscopic Unification] Lattner 2007. DSA's approach combining Steensgaard-style unification with context-sensitivity. ``Macroscopic'' because it operates at data-structure level. See Section 5.2.5.
+
+\item[Magic Wand] Reynolds 2002, Muller 2016. Separating implication ($A \wand B$): ``providing $A$ yields $B$''. PSPACE-complete in general. See Section 7.4.8.
+
+\item[Marshalling (FFI)] Converting data between source language representation and target language representation at FFI boundaries. See Section 9.4.4, 9.4.6.
+
+\item[MS-Wasm (Memory-Safe WebAssembly)] Disselkoen et al.~2019. Backwards-compatible extension to WebAssembly that captures memory safety semantics. Introduces segment memory and handles. See Section 7.7.
+
+\item[Multiplicity] Aliasing status of capability---$\MUnique$ (can free) vs $\MDup$ (aliases may exist).
+
+\item[Owner-as-Dominator] Boyapati 2003. Ownership type discipline where all heap paths from root to object $x$ must pass through $x$'s owner. Precursor to Rust's ownership model. See Part VII.
+
+\item[Ownership Types] Clarke 1998, Boyapati 2003. Type system associating each object with an owner. Foundation for Rust's ownership semantics. See Section 7.1, Part VII.
+\end{description}
+
+\section{Program Analysis}
+
+\begin{description}
+\item[IFDS] Interprocedural Finite Distributive Subset---$O(ED^3)$ dataflow algorithm. Requires \emph{distributive} transfer functions.
+
+\item[IMM (Intermediate Memory Model)] Podkopaev 2019. Declarative memory model serving as intermediate layer for compilation proofs. Reduces $O(n \cdot m)$ proofs to $O(n+m)$. See Section 6.5.9.
+
+\item[Incorrectness Logic (IL)] O'Hearn 2020. Under-approximate logic for proving bugs exist. \textbf{Deprecated} in favor of OL---IL is incompatible with abstract interpretation.
+
+\item[Interleaved Dyck] Language of strings where projections to two Dyck alphabets are both valid. Used for combined context+field sensitivity. \textbf{Undecidable}---requires MCFL or SPDS approximation. See Section 4.2.3.
+
+\item[ISL Triple] Incorrectness Separation Logic triple $[p]\ C\ [q; \mathit{exit}]$. Under-approximate semantics for bug finding.
+
+\item[KLEE] Cadar, Dunbar, Engler 2008 (OSDI). Symbolic execution engine for LLVM bitcode achieving high coverage on real programs. Tested all 89 GNU COREUTILS achieving 90\%+ line coverage, found 56 bugs. See Section 4.4.4.
+
+\item[Local Completeness] Bruni et al.~2023. Property $C^A_c(f)$ meaning abstract domain $A$ is complete for transfer function $f$ at specific input $c$. See Section 2.1.8b.
+
+\item[MCFL (Multiple Context-Free Language)] Conrado 2025. Language class strictly between CFL and interleaved Dyck. $d$-MCFL has $O(n^{2d})$ reachability complexity. See Section 4.2.4.
+
+\item[May-Mod Analysis] Flow-insensitive pointer analysis computing the set of memory locations a function may modify. Used in CSE to detect dependent loads. See Section 4.4.6.5.
+
+\item[Narrowing] Cousot 1992. Operator that recovers precision after widening. If $y \sqsubseteq x$ then $y \sqsubseteq (x \bigtriangledown y) \sqsubseteq x$.
+
+\item[Native Instrumentation] QSYM 2018. Binary analysis technique using Intel Pin to instrument only instructions touching symbolic data. See Section 4.4.7.
+
+\item[Neural Invariant Synthesis] Si et al.~2018. RL-based generation of loop invariants using neural networks. See Section 2.1.5c, Code2Inv.
+
+\item[Occurrence Typing] Tobin-Hochstadt 2008. Flow-sensitive type refinement via type predicates. Complements gradual typing. See Section 2.1.7b, 9.5, 12.3.5.
+
+\item[Optimistic Concolic Execution] QSYM 2018. Concolic variant that trades solver-level soundness for speed. 10--100$\times$ faster than KLEE. See Section 4.4.7.
+
+\item[Outcome Logic (OL)] Zilberstein 2023. Unified correctness/incorrectness framework. \textbf{Preferred} over IL---compatible with abstract interpretation, supports manifest error detection.
+
+\item[Over-Approximation] $\alpha(\mathit{concrete}) \subseteq \mathit{abstract}$. ``If safe, truly safe.'' May have false positives.
+
+\item[Path Condition] King 1976. Conjunction of constraints accumulated along symbolic execution path. Determines path feasibility.
+
+\item[PDG] Program Dependence Graph---data and control dependencies.
+
+\item[Points-to Analysis] Computing what each pointer may point to.
+
+\item[Precision Ordering (Gradual Types)] Garcia 2016. $G_1 \leq G_2$ ($G_1$ more precise than $G_2$) iff $\gamma(G_1) \subseteq \gamma(G_2)$. See Section 9.1.2.
+
+\item[Probabilistic Abstract Domain] Cousot 2012. Abstract domain for probabilistic programs. Operates on probability distributions over standard abstract domain $A$. See Section 2.1.6c.
+
+\item[SDG] System Dependence Graph---PDG extended with interprocedural edges. Two-phase slicing required.
+
+\item[Separation Logic] Logic with separating conjunction for heap reasoning.
+
+\item[SPDS (Synchronized Pushdown System)] Spath 2019. Two synchronized pushdown automata encoding field and call stacks. Enables polynomial combined context+field sensitivity. See Section 4.2.5.
+
+\item[Symbolic Execution] King 1976. Path-sensitive analysis tracking symbolic values and path conditions. Commutativity: $\mathit{instantiate}(\mathit{exec\_symbolic}(P)) = \mathit{exec\_concrete}(P)$.
+
+\item[Taint Analysis] Tracking untrusted data from sources to sinks.
+
+\item[Thin Slicing] Backward slice following only relevant dependencies.
+
+\item[Two-Phase Slicing] Horwitz 1990. Phase 1 ascends (no param-out), Phase 2 descends (no call/param-in). Prevents spurious paths.
+
+\item[Under-Approximation] $\mathit{abstract} \subseteq \mathit{concrete}$. ``If bug, truly a bug.'' May have false negatives.
+
+\item[Widening] Operator that accelerates fixpoint convergence for infinite domains.
+\end{description}
+
+\section{Memory Models}
+
+\begin{description}
+\item[Capped Memory] Lee 2020. PS 2.0 construction bounding realistic interference during certification. Enables value-range analysis and register promotion. See Section 6.5.7.
+
+\item[Promise (Memory Model)] Kang 2017. Commitment by a thread to perform a future write. Key mechanism for preventing thin-air values in relaxed memory.
+
+\item[Promising Semantics] Kang 2017/Lee 2020 memory model using thread-local certification to prevent thin-air values. PS 2.0 uses capped memory for certification. See Section 6.5.7.
+
+\item[RMW Strength] Podkopaev 2019. Classification of hardware RMW operations. POWER/ARMv7 have strong RMWs; ARMv8/RISC-V have weak RMWs. See Section 6.5.9.
+
+\item[Simulation Relation] Leroy 2009. Binary relation between execution states used to prove compilation pass correctness. Variants: lock-step, plus, star. See Section 12.26.C.
+
+\item[Thin-Air Problem] Fundamental soundness bug in C11 axiomatic memory model. Permits values that appear without any legitimate source. Fixed by Promising Semantics. See Section 6.5.7, Theorem 12.26.3.
+
+\item[Thread-Local Certification] Kang 2017/Lee 2020. Mechanism in Promising Semantics requiring that a thread can fulfill all its promises. See Section 6.5.7.
+
+\item[View (Memory Model)] Kang 2017. Timemap tracking which messages a thread has observed per location. See Section 6.5.7.
+
+\item[View Shift] Jung 2018 (Iris). The update modality $\Rrightarrow P$ asserting ownership of resources that can be updated to satisfy $P$. See Section 7.1.1.
+\end{description}
+
+\section{Security}
+
+\begin{description}
+\item[Declassification] Controlled release of secret data to lower security levels. See Section 8.1.4.3, 12.34.
+
+\item[Delimited Release] Chong \& Myers 2004. Declassification policy specifying \emph{what} information may be released via escape hatches. See Section 8.1.4.3, 12.34.2.
+
+\item[Endorsement] Chong \& Myers 2004. The integrity dual of declassification: controlled acceptance of low-integrity data as high-integrity. See Section 8.1.4.3, 12.34.7.
+
+\item[Escape Hatch] Declassification mechanism with policy, condition, and escaper components. See Section 12.34.2.
+
+\item[Integrity Label] Chong \& Myers 2004. Security label component tracking whether adversary can \emph{influence} a value. $I_{\text{Low}}$ = untrusted, $I_{\text{High}}$ = trusted. See Section 8.1.1, 12.34.1.
+
+\item[Robust Declassification] Zdancewic/Myers 2001 criterion ensuring attackers cannot influence what gets declassified. See Section 12.34.5--6.
+
+\item[Sanitizer] Security operation that transforms a \emph{value} to make it safe while preserving the security \emph{label}. Contrast with declassification which changes the \emph{label}. See Section 8.1.2, 12.34.9.
+
+\item[Semantic Security (under Declassification)] Chong \& Myers 2004. Formal security property: for all low-equivalent memories $M_1$ and $M_2$, $\mathit{visible}(P(M_1))$ and $\mathit{visible}(P(M_2))$ are equivalent. See Section 8.1.4.3, 12.34.4.
+\end{description}
+
+\section{Session Types}
+
+\begin{description}
+\item[Input-Input Dependency (II)] Honda 2008. Ordering between two inputs at same participant in same session.
+
+\item[Input-Output Dependency (IO)] Honda 2008. Ordering where output depends on data from prior input at same participant.
+
+\item[Output-Output Dependency (OO)] Honda 2008. Ordering between two outputs from same sender to same channel.
+
+\item[Projection (Session Types)] Honda 2008. Operation $G \restriction p$ extracting participant $p$'s local type from global type $G$. \textbf{Note}: In the corrected formulation (Yoshida \& Hou 2024), projections should be related to typing contexts via subtyping, not equality.
+
+\item[Association Relation] Yoshida \& Hou 2024. Relation $G \sqsubseteq_s \Gamma$ connecting global types to typing contexts via subtyping: $G \upharpoonright p \leq \Gamma(s[p])$. Replaces direct equality in sound MPST proofs.
+
+\item[Safety Property (MPST)] Scalas \& Yoshida 2019. Behavioral property $\varphi$ on typing contexts sufficient for type safety. Weaker than consistency but accepts more protocols. See Part XIV, Definition~\ref{def:safety-property}.
+
+\item[Session Delegation] Honda 1998. Transferring channel capability through a channel. Enables dynamic protocol reconfiguration.
+
+\item[Session Fidelity] Honda 2008. Property that process communication follows declared session type.
+
+\item[Session Type] Honda 1998/2008 protocol type specifying channel communication structure. See Section 12.28, Part XIV.
+\end{description}
+
+\section{Testing and Verification}
+
+\begin{description}
+\item[Concrete Fallback] QSYM 2018. Strategy of executing complex operations concretely rather than symbolically. See Section 4.4.7.
+
+\item[Latent Error] Bug that requires specific calling context to trigger. Contrast with Manifest Error.
+
+\item[Latent Predicate] Tobin-Hochstadt 2008. Type proposition attached to a function result. Specifies what type test the function ``remembers''. See Section 2.1.7b.
+
+\item[Manifest Error] Le 2022. Bug that triggers regardless of calling context. True Positives Property guarantees 0\% false positive rate.
+
+\item[Name Embedding] Pradel 2018. Dense vector representation of identifier names capturing semantic meaning. See Section 3.1.8.1.
+
+\item[Recovery Caching] Trabish 2018. Optimization storing recovery results to avoid redundant recovery executions in CSE.
+
+\item[Recovery State] Trabish 2018. State created to lazily execute a skipped function when its side effects become relevant. See Section 4.4.6.3.
+
+\item[Semantics Preservation] Leroy 2009. Property that compiled code has same observable behaviors as source program. See Section 12.26.C.
+
+\item[Skip Region] Trabish 2018. User-specified function to exclude from symbolic exploration in CSE. See Section 4.4.6.2.
+
+\item[Snapshot State] Trabish 2018. Symbolic state cloned immediately before entering skip region. See Section 4.4.6.3.
+
+\item[Synthetic Bug Generation] Pradel 2018. Technique for generating ML training data by simple mutations of correct code. See Section 3.1.8.1.
+
+\item[Trilean] Three-valued logic result from SMT queries: \textsc{Definitely}, \textsc{DefinitelyNot}, or \textsc{Unknown}.
+
+\item[True Positives Property] Le 2022, Theorem 3.4. Manifest error implies dead code OR real bug exists. Guarantees 0\% false positive rate.
+
+\item[Type Consistency] Siek 2006, Garcia 2016. Relation $G_1 \sim G_2$ for gradual types. Reflexive and symmetric but \emph{not} transitive. AGT derivation: $G_1 \sim G_2$ iff $\gamma(G_1) \cap \gamma(G_2) \neq \emptyset$. See Section 9.1.2.
+
+\item[Type Narrowing] Tobin-Hochstadt 2008. Reducing a union type to a subset of its members based on type tests. See Section 2.1.7b, 9.5.3.
+
+\item[Unified Approximation] Bruni et al.~2023 (LCL$_A$). Framework combining over-approximation and under-approximation in a single parameterized proof system. See Section 2.1.8b.
+
+\item[Validation-Based Soundness] QSYM 2018. Soundness model where a validator filters false positives by concrete execution. See Section 4.4.7.
+
+\item[Verified Compilation] Leroy 2009. Compiler accompanied by machine-checked proof of semantics preservation. See Section 12.26.C.
+
+\item[Viper] Muller 2016. Verification infrastructure for permission-based reasoning with fractional permissions, magic wands, and quantified permissions. See Section 7.1.2, 7.4.8--7.4.10.
+
+\item[Visible Predicate] Tobin-Hochstadt 2008. Type proposition known to hold at current program point. See Section 2.1.7b.
+\end{description}
+
+\section{WebAssembly}
+
+\begin{description}
+\item[Segment Memory (MS-Wasm)] Disselkoen 2019. Memory region in MS-Wasm separate from Wasm's linear memory. Segments are bounded, typed, and accessible only via handles. See Section 7.7.2.
+
+\item[WebAssembly (Wasm)] W3C Standard. Platform-independent bytecode language designed to run C/C++ and similar languages at near-native speed. Provides isolation from host environment but \emph{not} memory safety within the sandbox. See Section 7.7.
+
+\item[WebAssembly Type Safety] The property that WebAssembly's typed stack and typed function signatures are preserved at runtime. Wasm is type-safe for its value types but \emph{not} for memory operations. See Section 7.7.1.
+\end{description}
+
+\section{Pointer Analysis (TVLA and SVF)}
+
+\begin{description}
+\item[Canonical Abstraction] TVLA. Merge nodes with same canonical name (tuple of abstraction predicate values). Ensures bounded domain.
+
+\item[Chi Annotation ($\chi$)] Memory SSA. Annotates a store statement with potential memory locations that may be modified. For \lstinline{*p = x}, $o = \chi(o)$ indicates location $o$ may be updated.
+
+\item[Coerce Operation] TVLA. Apply compatibility constraints ($\varphi_1 \Rightarrow \varphi_2$), sharpen indefinite predicates, detect inconsistencies.
+
+\item[Conversion Strategy] M\&F 2007. Decouples type from conversion behavior. Examples: type-directed, zero-for-error, null-for-none.
+
+\item[Embedding Theorem] TVLA Theorem 3.7. If $S \sqsubseteq^f S'$ then $\llbracket\varphi\rrbracket^3_S(Z) \sqsubseteq \llbracket\varphi\rrbracket^3_{S'}(f \circ Z)$. Links concrete to abstract soundly.
+
+\item[Focus Operation] TVLA. Split summary nodes until formula evaluates to definite (0 or 1). Enables materialization for loops.
+
+\item[Fold/Unfold] Viper 2016. Explicit operations for recursive predicates. Fold exchanges body permissions for predicate instance; unfold exchanges predicate for body permissions.
+
+\item[Footprint] Reynolds 2002. Memory locations accessed by a command (reads, writes, allocates, frees). Essential for frame rule.
+
+\item[Frame Rule] Reynolds 2002. $\{P\}\ C\ \{Q\} \implies \{P * R\}\ C\ \{Q * R\}$. Enables compositional analysis by preserving unrelated resources.
+
+\item[Guard Polarity] M\&F 2007. Positive = value entering stricter language (must check). Negative = from stricter (can skip). \emph{Flips} at function arguments.
+
+\item[Hole Tagging] M\&F 2007. Tag evaluation holes with expected language to prevent ``language bleeding'' during reduction.
+
+\item[Inductive System] Aiken 1999. Finite representation of all set constraint solutions via cascade $\alpha_i = L_i \cup (\beta_i \cap U_i)$.
+
+\item[Inhale/Exhale] Muller 2016 (Viper). Asymmetric assertion $[\mathit{on\_exhale}, \mathit{on\_inhale}]$: different behavior when checked (exhale) vs assumed (inhale). Used for leak checks. See Section 7.4.10.
+
+\item[Instrumentation Predicates] TVLA. Derived predicates (reachability, cycle membership, sharing) that dramatically improve precision.
+
+\item[Local Consistency] Cousot 1977. $\alpha(f_c(\gamma(x))) \sqsubseteq f_a(x)$. Abstract transfer over-approximates concrete transfer after abstraction.
+
+\item[Memory SSA] Chow 1996, Sui 2016. Extension of classical SSA to handle indirect memory accesses via $\mu/\chi$ annotations. Enables def-use chains for address-taken variables.
+
+\item[Mu Annotation ($\mu$)] Memory SSA. Annotates a load statement with potential memory locations that may provide the value. For \lstinline{x = *p}, $\mu(o)$ indicates $x$ may read from location $o$.
+
+\item[On-the-Fly CG] Rupta 2024. Interleave call graph and points-to analysis. Resolves chicken-and-egg problem.
+
+\item[Projection Path] Rupta 2024. Field representation $(\mathit{base}, [f_1, f_2, f_3])$ instead of index. More precise for nested structs.
+
+\item[Quantified Permission] Muller 2016. Pointwise permission specification for arrays: $\forall i :: \mathit{range}(i) \Rightarrow \mathit{acc}(\mathit{arr}[i])$. See Section 7.4.9.
+
+\item[Realizability Model] Patterson 2022. Semantic interpretation $\mathcal{V}\llbracket\tau\rrbracket$ = target values behaving as source type $\tau$.
+
+\item[Representational Type (FFI)] Furr \& Foster 2008. Type that models C's low-level view of high-level language data. See Section 9.4.6.
+
+\item[Resource Algebra] Algebraic structure for modeling ownership.
+
+\item[Semantic IR] Patterson \& Ahmed 2022. IR design philosophy where the IR serves as a semantically-typed target language for multi-language interoperability. See Section 11.2.
+
+\item[Set Constraints] Aiken 1999. Unified framework: $X \subseteq Y$ constraints with conditionals and constructors. $O(n^3)$ resolution.
+
+\item[Shape Analysis] Track structural properties (list, tree, DAG, cycle) of heap data using three-valued logic.
+
+\item[Source-Sink Analysis] Analysis pattern tracking data flow from allocation sites (sources) to deallocation sites (sinks). SVF is optimized for this pattern.
+
+\item[Stack Filtering] Rupta 2024. \emph{Novel.} Eliminate points-to targets for stack objects whose frames aren't on call stack. 2--5$\times$ faster + more precise.
+
+\item[Strong Update] Sui 2016. A store that \emph{kills} the old value at a memory location. Occurs when pointer uniquely points to a concrete (non-summary) location.
+
+\item[Summary Node] TVLA. Abstract node representing multiple concrete nodes. $\mathit{sm}(v) = \frac{1}{2}$ indicates summary.
+
+\item[SVFG (Sparse Value-Flow Graph)] Sui 2016. Graph where nodes are variable definitions and edges capture value-flow relationships.
+
+\item[Three-Valued Logic] TVLA. Values: 1 (true), 0 (false), $\frac{1}{2}$ (unknown). Information ordering: $\frac{1}{2} \sqsubseteq 0$ and $\frac{1}{2} \sqsubseteq 1$.
+
+\item[Weak Update] Sui 2016. A store that must \emph{preserve} old values. Occurs when pointer may point to multiple locations or target is a summary node.
+\end{description}
+
+\section{ZIPPER-Related Terms}
+
+\begin{description}
+\item[ZIPPER] Li 2020 selective context sensitivity identifying precision-critical methods via flow patterns. See Section 5.3.2, 12.30.
+
+\item[Precision-Critical Method (PCM)] ZIPPER. A method that participates in direct, wrapped, or unwrapped flow patterns. Only PCMs benefit from context sensitivity.
+
+\item[In Method] ZIPPER. A method of class $C$ with one or more parameters. Objects can flow \emph{into} the class through In method parameters.
+
+\item[Out Method] ZIPPER. A method of class $C$ with non-void return type. Objects can flow \emph{out} of the class through Out method returns.
+
+\item[Direct Flow] ZIPPER. Flow pattern where object enters via In method parameter, flows through assignments/field ops, exits via Out method return of same class.
+
+\item[Wrapped Flow] ZIPPER. Flow pattern where object enters via In method, gets stored in wrapper object, wrapper flows out via Out method.
+
+\item[Unwrapped Flow] ZIPPER. Flow pattern where carrier object enters via In method, contents are loaded from carrier, loaded contents flow out via Out method.
+
+\item[Precision Flow Graph (PFG)] ZIPPER. Graph extending OFG with wrap/unwrap edges. Built per-class, restricted to nodes reachable from In method parameters.
+
+\item[Zipper$_e$ (Express)] ZIPPER. Variant with efficiency threshold. Excludes classes where $\mathit{pts}_c > PV \times \mathit{total\_pts}$. Default $PV=5\%$ achieves 94.7\% precision with 25.5$\times$ speedup.
+\end{description}
+
+\section{JARVIS-Related Terms}
+
+\begin{description}
+\item[Function Type Graph (FTG)] JARVIS 2023. Per-function graph tracking type relations for Python call graph construction. Enables flow-sensitive type inference with strong updates. See Section 5.3.3.
+
+\item[Application-Centered Analysis] JARVIS 2023. Analysis mode that starts from application entry points and only analyzes reachable code. Critical for scalability on Python codebases with 200+ dependencies.
+
+\item[Method Resolution Order (MRO)] Python's algorithm for determining method lookup order in class hierarchies. Uses C3 linearization to handle multiple inheritance consistently. See Section 5.3.3.3.
+
+\item[C3 Linearization] Python's MRO algorithm. Merges parent class MROs while preserving local precedence and monotonicity. Ensures consistent method lookup in diamond inheritance patterns.
+
+\item[Duck Typing] Dynamic typing paradigm where object capabilities determine validity, not declared type. Requires type inference (FTG) rather than class-based dispatch for precise call graph construction.
+
+\item[Magic Method] Python special methods (\lstinline{__getattr__}, \lstinline{__call__}, \lstinline{__get__}, etc.) that intercept attribute access and invocation. Must be handled by call graph construction. See Section 5.3.3.4.
+
+\item[Decorator Resolution] JARVIS 2023. Tracking function wrapping via decorators. Call graph must trace through wrapper to original function.
+
+\item[Import Summary] JARVIS 2023. Pre-computed mapping of import statements to resolved types.
+
+\item[Class Summary] JARVIS 2023. Pre-computed class hierarchy and method containment. Includes inheritance relations and cached MRO computations.
+
+\item[PyCG] Prior state-of-the-art Python call graph tool. Uses flow-insensitive worklist algorithm. JARVIS achieves 84\% higher precision.
+\end{description}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% APPENDIX D: GAP ANALYSIS, THEORETICAL TENSIONS, AND ENGINEERING CONSIDERATIONS
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\chapter{Gap Analysis, Theoretical Tensions, and Engineering Considerations}
+\label{app:gap-analysis}
+
+This appendix provides a systematic analysis of identified gaps between the theoretical framework established in Parts I--XII and the engineering requirements for production deployment.
+
+\section{Executive Summary}
+\label{sec:d1}
+
+This appendix derives from:
+\begin{enumerate}
+\item \textbf{External Review}: Feedback from static analysis practitioners
+\item \textbf{Literature Cross-Reference}: Comparison with extended paper collection
+\item \textbf{Implementation Experience}: Lessons from prototype development
+\end{enumerate}
+
+\subsection{Gap Classification}
+
+Identified gaps are classified into three severity levels:
+
+\begin{table}[htbp]
+\centering
+\caption{Gap Severity Classification}
+\label{tab:gap-severity}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Severity} & \textbf{Definition} & \textbf{Resolution Approach} \\
+\midrule
+\textbf{Critical} & Blocks core functionality & Must resolve before Phase 3 \\
+\textbf{Significant} & Reduces analysis quality & Should resolve before Phase 5 \\
+\textbf{Minor} & Engineering convenience & Address in Phase 6 or defer \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Gap Summary Matrix}
+
+\begin{table}[htbp]
+\centering
+\caption{Gap Analysis Summary}
+\label{tab:gap-summary}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Gap} & \textbf{Severity} & \textbf{Status} & \textbf{Resolution} \\
+\midrule
+Library Modeling & Significant & Addressed & D.2 (bi-abduction) \\
+Call Graph Construction & Critical & \cmark\ Resolved & D.3 (Qilin, 5.3) \\
+Path Sensitivity & Significant & \cmark\ Resolved & D.4 (4.3, 4.4) \\
+Memory Layout / ABI & Significant & Partial & D.5 (IR ext.) \\
+Dynamic Code (eval) & Minor & Partial & D.6 (conservative) \\
+Build System Integration & Minor & Engineering & D.7 \\
+False Positive Mgmt & Critical & \cmark\ Resolved & D.8 (OL class.) \\
+Time Budgets & Significant & Addressed & D.9 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\subsection{Theoretical Tensions}
+
+Section~\ref{sec:d10} documents tensions between foundational papers that require explicit resolution in the implementation:
+
+\begin{itemize}
+\item IFDS distributivity requirements vs general dataflow (Aiken 1999)
+\item Separation logic assumptions vs garbage-collected languages (Reynolds 2002)
+\item Field indexing vs projection paths (Rupta 2024)
+\item Language-agnostic vs language-specific pointer analysis
+\item Two-valued vs three-valued logic (TVLA 2002)
+\item Type-directed vs arbitrary conversions (Matthews-Findler 2007)
+\end{itemize}
+
+%--------------------------------------------------
+\section{Gap 1: Library and Environment Modeling}
+\label{sec:d2}
+
+\textbf{Severity}: Significant \quad \textbf{Status}: Addressed
+
+\subsection{Problem Characterization}
+
+The theoretical framework assumes complete source code availability. Production deployments must handle dependencies on:
+
+\begin{itemize}
+\item \textbf{Standard Libraries}: libc, JDK runtime, Python stdlib, Go runtime
+\item \textbf{Frameworks}: React, Django, Spring Boot, Express, Rails
+\item \textbf{Third-Party Packages}: npm, pip, cargo crates, Maven artifacts
+\end{itemize}
+
+Without semantic models for external code, analysis chains degrade:
+\begin{itemize}
+\item Taint propagation terminates at library boundaries
+\item Pointer analysis returns $\top$ for library allocations
+\item Call graphs omit edges through unmodeled code
+\end{itemize}
+
+\subsection{Reassessment: Problem Scope is Narrower Than Initially Estimated}
+
+\textbf{Critical Observation}: Modern package ecosystems distribute source code by default, substantially reducing the scope of the ``library modeling problem.''
+
+\begin{table}[htbp]
+\centering
+\caption{Ecosystem Source Code Availability Analysis}
+\label{tab:source-availability}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Ecosystem} & \textbf{Source Availability} \\
+\midrule
+Python / PyPI & Source distributed by default; \texttt{pip --download-source} \\
+JavaScript / npm & Full source in \texttt{node\_modules/} \\
+Rust / Cargo & Source fetched to \texttt{\textasciitilde/.cargo/registry/src/} \\
+Go / Modules & \texttt{go mod download} retrieves full source \\
+Java / Maven & \texttt{-sources.jar} artifacts available for most packages \\
+C/C++ & \textbf{Exception}: \texttt{.so}/\texttt{.dll} without headers common \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Revised Problem Statement}: The library modeling challenge reduces to:
+
+\begin{enumerate}
+\item \textbf{Scalability}: Whole-program analysis of transitive dependency closure---addressed via summary-based compositional analysis (bi-abduction)
+\item \textbf{Closed Binaries}: Rare except in C/C++ ecosystem---addressed via conservative approximation + user-provided contracts
+\item \textbf{External Boundaries}: Network APIs, databases, system calls---addressed via contract specification language
+\end{enumerate}
+
+\subsection{Resolution: Formal Specification Inference Techniques}
+
+The following established techniques address library modeling without requiring machine learning or manual annotation:
+
+\begin{pillarbox}[title={Technique 1: Bi-Abduction for Specification Inference}]
+\textbf{Reference}: Calcagno 2009 ``Compositional Shape Analysis by Means of Bi-Abduction''
+
+Given partial specification $\{P\}\ \mathit{code}\ \{Q\}$, bi-abduction infers:
+\begin{itemize}
+\item \textbf{Anti-frame}: Additional preconditions $P'$ required for safety
+\item \textbf{Frame}: Additional postconditions $Q'$ established by code
+\end{itemize}
+
+\textbf{Application}: Automatically infer specifications for library functions by analyzing their implementations.
+
+\textbf{Integration}: Phase 4, Milestone 4.3 (Bi-abduction for specs)
+\end{pillarbox}
+
+\begin{pillarbox}[title={Technique 2: Modular Typestate Verification}]
+\textbf{Reference}: Bierhoff 2007 ``Modular Typestate Checking of Aliased Objects''
+
+Modules verified independently against declared contracts:
+\begin{itemize}
+\item Libraries publish pre/post conditions
+\item Callers verify against published contracts
+\item Compositional verification without whole-program analysis
+\end{itemize}
+
+\textbf{Application}: Standard library contracts enable modular analysis
+\end{pillarbox}
+
+\begin{pillarbox}[title={Technique 3: Refinement Types as Contracts}]
+\textbf{References}: Rondon 2008 ``Liquid Types'', Vazou 2014 ``Refinement Types for Haskell''
+
+Type signatures encode behavioral contracts directly:
+\[
+\mathit{read\_file} : \{f:\mathsf{String} \mid \mathit{valid\_path}(f)\} \to \{s:\mathsf{String} \mid \mathit{length}(s) \geq 0\}
+\]
+
+\textbf{Application}: Extract contracts from existing type annotations (TypeScript types, Python type hints, Rust traits)
+\end{pillarbox}
+
+\begin{pillarbox}[title={Technique 4: Dependent Types}]
+\textbf{Reference}: Xi 1999 ``Dependent Types in Practical Programming''
+
+Types indexed by values encode rich specifications:
+\begin{align*}
+\mathit{vector} &: (n:\mathsf{Nat}) \to \mathsf{Type} \\
+\mathit{append} &: \mathit{vector}\ n \to \mathit{vector}\ m \to \mathit{vector}\ (n+m)
+\end{align*}
+
+\textbf{Application}: Leverage F* dependent types for verified specification
+\end{pillarbox}
+
+\subsection{Strategy for Genuinely Opaque Code}
+
+For unavailable source code (closed binaries, external network APIs, proprietary libraries), the following tiered strategy applies:
+
+\begin{pillarbox}[title={Opaque Code Handling Strategy}]
+\textbf{Tier 1: Conservative Approximation (Default)}
+\begin{itemize}
+\item Return value: $\top$ (top of lattice)
+\item Effect set: $\{\mathsf{Read}, \mathsf{Write}, \mathsf{IO}, \mathsf{Alloc}, \mathsf{Free}, \mathsf{Throw}\}$
+\item Taint propagation: $\mathit{tainted}(\mathit{input}) \Rightarrow \mathit{tainted}(\mathit{output})$
+\item Pointer analysis: fresh allocation site per call
+\end{itemize}
+
+\textbf{Tier 2: User-Provided Contracts}
+\begin{itemize}
+\item ACSL-style annotations for C/C++
+\item JML-style specifications for Java
+\item Brrr-contract language (to be specified)
+\item Inline annotations: \lstinline{@taint_source}, \lstinline{@taint_sink}, \lstinline{@pure}, etc.
+\end{itemize}
+
+\textbf{Tier 3: API Schema Extraction}
+\begin{itemize}
+\item OpenAPI/Swagger $\to$ REST endpoint contracts
+\item Protocol Buffers/gRPC $\to$ RPC type contracts
+\item GraphQL schemas $\to$ query/mutation contracts
+\item Database schemas $\to$ SQL query contracts
+\end{itemize}
+
+\textbf{Tier 4: Uncertainty Tracking}
+\begin{itemize}
+\item Classify findings crossing opaque boundaries as \textsc{Incomplete}
+\item Propagate uncertainty through dependent analyses
+\item Report boundary crossings in SARIF output
+\end{itemize}
+\end{pillarbox}
+
+\subsection{Remaining Implementation Items}
+
+\begin{table}[htbp]
+\centering
+\caption{Library Modeling Implementation Items}
+\label{tab:library-impl}
+\begin{tabular}{@{}llc@{}}
+\toprule
+\textbf{Item} & \textbf{Priority} & \textbf{Target Phase} \\
+\midrule
+Contract specification language design & High & Phase 4 \\
+Automatic contract extraction from type annotations & Medium & Phase 4 \\
+Contract composition rules for multi-language & Medium & Phase 5 \\
+Uncertainty propagation through analysis pipeline & High & Phase 3 \\
+Standard library contract database (Python, JS, Go) & Low & Phase 6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%--------------------------------------------------
+\section{Gap 2: Call Graph Construction --- Addressed}
+\label{sec:d3}
+
+\begin{pillarbox}[title={Status: Addressed in Sections 5.3, 12.22}]
+\textbf{Solution Implemented:}
+\begin{itemize}
+\item Section 5.3: On-the-fly call graph construction (Qilin algorithm)
+\item Section 12.22: Stack filtering theorems (Rupta/Li 2024)
+\item Interleaved CG + pointer analysis resolves chicken-and-egg
+\end{itemize}
+
+\textbf{Key Insights from Rupta 2024:}
+\begin{itemize}
+\item 1-callsite sensitivity better than Andersen for Rust
+\item Stack filtering: 2--5$\times$ faster \emph{and} more precise
+\item On-the-fly: resolve virtual calls as points-to sets refine
+\end{itemize}
+\end{pillarbox}
+
+\subsection{Remaining Open Questions}
+
+\begin{enumerate}
+\item \textbf{Reflection handling}---\lstinline{Class.forName()}, eval-like constructs
+\item \textbf{Dynamic dispatch prediction} heuristics for unsolvable cases
+\item \textbf{Incremental CG update} when code changes
+\item \textbf{Language-specific resolution rules} (Python MRO, JS prototype chain)
+\end{enumerate}
+
+%--------------------------------------------------
+\section{Gap 3: Path Sensitivity --- Addressed}
+\label{sec:d4}
+
+\begin{pillarbox}[title={Status: Addressed in Sections 4.3 (Under-Approx) and 4.4 (Symbolic Exec)}]
+\textbf{Solution Implemented:}
+\begin{itemize}
+\item Section 4.3: Eval algorithm with path-sensitive bi-abduction
+\item Section 4.4: Full symbolic execution with path conditions
+\item Section 4.3.3: Hybrid IFDS + Eval/Symbolic architecture
+\item Section 12.15: Symbolic execution theorems (King 1976)
+\end{itemize}
+
+\textbf{Key Theorems:}
+\begin{itemize}
+\item Commutativity: $\mathit{instantiate}(\mathit{exec\_symbolic}(P)) = \mathit{exec\_concrete}(P)$
+\item Forking semantics for conditionals
+\item SMT integration with trilean (\textsc{Definitely}/\textsc{DefinitelyNot}/\textsc{Unknown})
+\end{itemize}
+\end{pillarbox}
+
+\subsection{What's Still Missing}
+
+\begin{enumerate}
+\item \textbf{SMT solver integration}---Z3, CVC5 for constraint solving
+\item \textbf{Path merging heuristics}---When to merge vs. keep separate
+\item \textbf{Widening for symbolic paths}---Bound path explosion
+\item \textbf{Integration with IFDS}---Seamless hybrid approach
+\end{enumerate}
+
+%--------------------------------------------------
+\section{Gap 4: Memory Layout and ABI}
+\label{sec:d5}
+
+\subsection{The Problem Statement}
+
+The synthesis IR defines \TInt\ and \TStruct\ but ignores:
+\begin{itemize}
+\item Struct padding and alignment
+\item Integer width differences (\lstinline{long}: 32-bit Windows, 64-bit Linux)
+\item Endianness
+\item Calling conventions
+\end{itemize}
+
+\begin{lstlisting}[language=C,caption={Example Bug Not Caught}]
+// C code (Windows x64)
+struct Data { int x; long y; };  // sizeof = 8 (long is 4 bytes)
+
+// Rust code (Windows x64)
+#[repr(C)]
+struct Data { x: i32, y: i64 }   // sizeof = 16 (i64 is 8 bytes)
+
+// FFI call passes wrong struct layout -> buffer overflow
+\end{lstlisting}
+
+\subsection{Proposed IR Extension}
+
+To detect ABI mismatches at FFI boundaries, the IR must be extended with explicit layout and platform information. The key insight is that the same high-level type (e.g., \texttt{long}) may have different physical representations on different platforms (4 bytes on Windows x64, 8 bytes on Linux x64). The following type definitions capture the necessary metadata:
+
+\begin{fstarcode}[title={Extended IR types with layout information}]
+(* Endianness affects multi-byte value interpretation *)
+type endian =
+  | BigEndian
+  | LittleEndian
+
+(* Physical memory layout for a type *)
+type layout_info = {
+  size : nat;           (* Size in bytes *)
+  alignment : nat;      (* Alignment requirement *)
+  endianness : endian;  (* Big or little *)
+}
+
+(* Platform-specific ABI configuration *)
+type target_abi = {
+  pointer_size : nat;   (* 4 or 8 bytes *)
+  int_sizes : map int_width nat;  (* Width-specific sizes *)
+  struct_packing : packing_mode;
+  calling_convention : calling_conv;
+}
+
+type packing_mode =
+  | PackDefault    (* Platform default padding *)
+  | PackPacked     (* No padding, #pragma pack(1) *)
+  | PackExplicit   (* Explicit padding fields *)
+
+(* Extended struct type with layout metadata *)
+type ir_struct = {
+  name : string;
+  fields : list (string * ir_type * offset);  (* Include byte offset *)
+  layout : layout_info;
+  abi : target_abi;
+}
+
+(* Function to detect ABI incompatibilities between source and target *)
+val check_abi_compatibility :
+  source_struct:ir_struct ->
+  target_struct:ir_struct ->
+  list abi_mismatch
+
+(* Specific types of ABI mismatches that can cause memory corruption *)
+type abi_mismatch =
+  | SizeMismatch : expected:nat -> actual:nat -> abi_mismatch
+  | AlignmentMismatch : field:string -> expected:nat -> actual:nat -> abi_mismatch
+  | OffsetMismatch : field:string -> expected:nat -> actual:nat -> abi_mismatch
+  | TypeWidthMismatch : field:string -> expected:nat -> actual:nat -> abi_mismatch
+\end{fstarcode}
+
+The \texttt{check\_abi\_compatibility} function compares two struct representations across a boundary. Each \texttt{abi\_mismatch} variant identifies a specific problem: \texttt{SizeMismatch} means the total struct size differs, \texttt{OffsetMismatch} means a field starts at different positions (likely due to padding differences), and \texttt{TypeWidthMismatch} means the same field name has different sizes (e.g., \texttt{long} on different platforms).
+
+\subsection{What's Still Missing}
+
+\begin{enumerate}
+\item \textbf{ABI database} for common platforms (Windows, Linux, macOS $\times$ x86, x64, ARM)
+\item \textbf{Struct layout calculation} algorithm per ABI
+\item \textbf{FFI marshaling verification} at boundaries
+\item \textbf{Endianness conversion tracking} for network protocols
+\end{enumerate}
+
+%--------------------------------------------------
+\section{Gap 5: Dynamic Code Generation (Eval)}
+\label{sec:d6}
+
+\subsection{The Problem Statement}
+
+The synthesis recognizes \lstinline{eval()} as a taint sink, but not as a program modifier:
+
+\begin{lstlisting}[language=Python,caption={eval() as Program Modifier}]
+# This isn't just a sink -- it CHANGES the program
+user_method = input()
+eval(f"obj.{user_method}()")  # Creates new call edge at runtime!
+\end{lstlisting}
+
+\subsection{Conservative Strategy}
+
+\begin{pillarbox}[title={Handling Eval Without String Analysis}]
+\textbf{1. Detection:}
+\begin{itemize}
+\item Flag all \lstinline{eval}/\lstinline{exec}/\lstinline{Function()} calls
+\item Report as ``dynamic code generation'' finding
+\end{itemize}
+
+\textbf{2. Taint Tracking:}
+\begin{itemize}
+\item If eval argument is tainted $\to$ HIGH severity (RCE)
+\item If eval argument is constant $\to$ analyze the constant
+\end{itemize}
+
+\textbf{3. Constant Propagation:}
+\begin{itemize}
+\item If \lstinline{eval("x.foo()")} where string is known $\to$ add call edge
+\item Use existing constant propagation analysis
+\end{itemize}
+
+\textbf{4. Over-Approximation:}
+\begin{itemize}
+\item If string unknown: assume eval can call ANY method
+\item Add edges to all methods (conservative)
+\item Mark these edges as ``speculative''
+\end{itemize}
+
+\textbf{5. User Annotation:}
+\begin{itemize}
+\item Allow \lstinline{@eval_targets("foo", "bar")} annotation
+\item Restrict analysis to specified targets
+\end{itemize}
+\end{pillarbox}
+
+\subsection{What's Still Missing}
+
+\begin{enumerate}
+\item \textbf{String constraint solving} for eval argument analysis
+\item \textbf{Dynamic call graph edges} marked as uncertain
+\item \textbf{Reflection API modeling} (\lstinline{Class.forName}, \lstinline{getattr}, etc.)
+\item \textbf{Code generation patterns} (template engines, ORMs)
+\end{enumerate}
+
+%--------------------------------------------------
+\section{Gap 6: Build System Integration}
+\label{sec:d7}
+
+\subsection{The Problem Statement}
+
+Cannot correctly parse code without build configuration:
+\begin{itemize}
+\item \textbf{C/C++}: \lstinline{-DDEBUG}, \lstinline{-I/include/path} affect preprocessing
+\item \textbf{Java}: \texttt{CLASSPATH} determines which classes are visible
+\item \textbf{TypeScript}: \texttt{tsconfig.json} controls module resolution
+\item \textbf{Python}: \texttt{PYTHONPATH}, virtualenv affect imports
+\end{itemize}
+
+\subsection{This is Engineering, Not Research}
+
+No papers directly address this because it's an engineering concern.
+
+\textbf{Existing Solutions:}
+\begin{itemize}
+\item \texttt{compile\_commands.json} for C/C++ (CMake, Bear, intercept-build)
+\item Language Server Protocol (LSP) provides project model
+\item Build system plugins (Bazel aspects, Gradle plugins)
+\end{itemize}
+
+\subsection{Practical Implementation}
+
+\begin{pillarbox}[title={Build System Integration Strategy}]
+\begin{description}
+\item[C/C++] Require \texttt{compile\_commands.json}. Parse with clang's libtooling. Each TU gets its own preprocessor state.
+
+\item[Java] Read \texttt{pom.xml} / \texttt{build.gradle}. Extract classpath. Use javac API or ECJ.
+
+\item[TypeScript] Parse \texttt{tsconfig.json}. Use TypeScript compiler API. Respect module resolution.
+
+\item[Python] Detect virtualenv / conda. Parse \texttt{pyproject.toml} / \texttt{setup.py}. Use \lstinline{ast} module with correct \lstinline{sys.path}.
+
+\item[Rust] Parse \texttt{Cargo.toml}. Use rustc or rust-analyzer. Respect feature flags.
+
+\item[Go] Use \lstinline{go/packages} API. Respects \texttt{go.mod} automatically.
+\end{description}
+\end{pillarbox}
+
+\subsection{What's Still Missing}
+
+\begin{enumerate}
+\item \textbf{Unified project model} abstraction in brrr-machine
+\item \textbf{Build system detection} heuristics
+\item \textbf{Incremental build integration}---trigger re-analysis on build
+\item \textbf{Cross-project analysis} for monorepos
+\end{enumerate}
+
+%--------------------------------------------------
+\section{Gap 7: False Positive Management}
+\label{sec:d8}
+
+False positive management uses the provable \textbf{Manifest/Latent classification} from Le 2022.
+
+\begin{itemize}
+\item \textbf{Manifest bugs} have \emph{zero} false positive rate by Theorem 3.4
+\item \textbf{Latent bugs} require specific calling context (context provided)
+\item \textbf{Incomplete} classifications include explicit reason for incompleteness
+\end{itemize}
+
+\textbf{See Section 12.3} for the complete formal foundation (ISL triples, \lstinline{classify_bug} algorithm, theorems).
+
+\textbf{See Section 13.4 Layer 6} for system integration.
+
+\subsection{Implementation Status}
+
+\begin{table}[htbp]
+\centering
+\caption{False Positive Management Implementation Status}
+\label{tab:fp-impl}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Component} & \textbf{Status} & \textbf{Section} \\
+\midrule
+ISL Triple type & \cmark\ Defined & 12.3 \\
+Manifest proof structure & \cmark\ Defined & 12.3 \\
+True Positives Property & \cmark\ Theorem stated & 12.3 \\
+\texttt{classify\_bug} algorithm & \cmark\ Implemented & 12.3 \\
+Witness generation (concolic) & $\square$ TODO & 12.15 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%--------------------------------------------------
+\section{Gap 8: Extended Confidence Sources (Implementation Details)}
+\label{sec:d9}
+
+\begin{pillarbox}[title={Implementation Details for Section 13.4 Layer 6 (Verification \& Confidence)}]
+Core types are in Section 12.3; this section provides algorithms \& detail.
+
+\textbf{D.9.1 Test Discrepancy}: Compare test assumptions vs code behavior.
+Match $\to$ confidence BOOST $|$ Contradict $\to$ confidence REDUCE $|$ None $\to$ NEUTRAL
+
+\textbf{D.9.2 Uncertainty Estimation}: Each analysis block outputs confidence.
+Propagation rules and adaptive precision algorithms.
+
+\textbf{D.9.3 Runtime Debugger}: Ground truth from actual execution.
+Confirms $\to$ 0.95+ $|$ Contradicts $\to$ 0.0 (false positive!) $|$ Never $\to$ unchanged
+\end{pillarbox}
+
+\subsection{Test vs Code Discrepancy}
+
+\subsubsection{The Insight}
+
+Tests encode programmer \emph{assumptions} about code behavior. Code encodes \emph{actual} behavior. These often diverge. Detecting discrepancies \emph{statically} (without running tests) reveals:
+
+\begin{enumerate}
+\item \textbf{Test bugs}---Tests that would never catch the bugs they're meant to catch
+\item \textbf{Code bugs}---Code that behaves differently than any test expects
+\item \textbf{Specification gaps}---Behaviors neither tested nor clearly intended
+\end{enumerate}
+
+\subsubsection{Detection Categories}
+
+The following F* type definitions model different categories of test/code discrepancies. Each constructor captures a specific way that test assumptions can diverge from actual code behavior, enabling automated detection of test quality issues.
+
+\begin{fstarcode}[title={Test/Code Discrepancy Types}]
+(* Note: 'side_effect' is used instead of 'effect' which is reserved in F* *)
+type side_effect =
+  | SideRead
+  | SideWrite
+  | SideIO
+
+type io_category =
+  | FileIO
+  | NetworkIO
+  | DatabaseIO
+  | FFIBinding
+  | SystemCall
+
+type test_code_discrepancy =
+  (* Test assumes input type that code doesn't actually accept *)
+  | InputTypeMismatch : test_input:ir_type -> code_accepts:ir_type
+                       -> test_code_discrepancy
+  (* Test assertion can never fail given actual code behavior *)
+  | UnreachableAssertion : assertion:node_id -> reason:string
+                          -> test_code_discrepancy
+  (* Test assertion can never PASS given actual code behavior *)
+  | ImpossibleAssertion : assertion:node_id -> reason:string
+                         -> test_code_discrepancy
+  (* Code has error path that no test exercises *)
+  | UntestedErrorPath : error_node:node_id -> condition:ir_expr
+                       -> test_code_discrepancy
+  (* Mock returns values code can never actually produce *)
+  | MockBehaviorMismatch : mock:node_id -> impossible_value:ir_expr
+                          -> test_code_discrepancy
+  (* Test expects side effect that code doesn't perform (or vice versa) *)
+  | SideEffectMismatch : expected:side_effect -> actual:option side_effect
+                        -> test_code_discrepancy
+  (* File/network/binding behavior differs *)
+  | IOBehaviorMismatch : io_type:io_category -> test_assumes:behavior
+                        -> code_does:behavior -> test_code_discrepancy
+\end{fstarcode}
+
+The key insight is that each discrepancy type provides actionable information: \texttt{InputTypeMismatch} indicates the test is using inputs the function will reject, while \texttt{UnreachableAssertion} means the test is checking something that can never fail (a useless test).
+
+\subsubsection{Language-Specific Test Framework Integration}
+
+\begin{itemize}
+\item \textbf{Rust}: \lstinline{#[test]}, \lstinline{#[should_panic]}, \lstinline{assert!}, \lstinline{assert_eq!}\\
+      $\to$ Parse test functions, extract assertions, compare with code paths
+\item \textbf{Go}: \lstinline{func Test*}, \lstinline{t.Error}, \lstinline{t.Fatal}, testify assertions\\
+      $\to$ Extract test table patterns, compare with actual branches
+\item \textbf{Python}: pytest, unittest, assert statements\\
+      $\to$ Parse fixtures, mocks, parametrize decorators
+\item \textbf{JS/TS}: jest, mocha, \lstinline{expect()}, describe/it blocks\\
+      $\to$ Extract mock implementations, compare with real modules
+\end{itemize}
+
+\subsection{Classification Composition (Provable, Not Heuristic)}
+
+\subsubsection{The Principle}
+
+Every analysis block must output not just a \emph{result} but also:
+\begin{enumerate}
+\item \textbf{Classification}---Manifest, Latent, or Incomplete (not a float!)
+\item \textbf{Complexity}---How expensive was this? (provable bound)
+\item \textbf{Incompleteness Reasons}---Explicit list if analysis is incomplete
+\end{enumerate}
+
+\subsubsection{Classification Composition Rules}
+
+\begin{pillarbox}[title={Classification Composition (Formal, Not Heuristic)}]
+\textbf{Old (Heuristic):}
+$\mathit{conf\_out} = \mathit{conf}_1 \times \mathit{conf}_2$ \quad or \quad $\mathit{conf\_out} = \min(\mathit{conf}_1, \mathit{conf}_2)$
+
+Problem: What does $0.7 \times 0.8 = 0.56$ mean semantically?
+
+\textbf{New (Formal):} Classification is preserved through composition
+
+\textbf{Rule 1: Incomplete propagates}\\
+If ANY dependency is Incomplete $\to$ result is Incomplete\\
+Reason: Can't prove manifest if inputs uncertain
+
+\textbf{Rule 2: Manifest preserved through complete analysis}\\
+Manifest finding + Complete analysis $\to$ Manifest\\
+Reason: True Positives Property still applies
+
+\textbf{Rule 3: Latent context accumulates}\\
+$\textsc{Latent}(\mathit{ctx}_1) + \textsc{Latent}(\mathit{ctx}_2) \to \textsc{Latent}(\mathit{ctx}_1 \land \mathit{ctx}_2)$\\
+Reason: Both contexts required to trigger
+
+\textbf{Rule 4: Manifest + Latent = Latent}\\
+$\textsc{Manifest} \circ \textsc{Latent}(\mathit{ctx}) \to \textsc{Latent}(\mathit{ctx})$\\
+Reason: The latent constraint dominates
+\end{pillarbox}
+
+The following F* implementation formalizes the classification composition rules. The key insight is that \texttt{completeness} is tracked separately from \texttt{bug\_classification}, and incomplete results always propagate conservatively. This differs from heuristic confidence scores (e.g., $0.7 \times 0.8 = 0.56$) which have no clear semantic interpretation.
+
+\begin{fstarcode}[title={Formal Composition of Classifications}]
+(* Completeness tracks whether an analysis is definitive or approximated *)
+type completeness =
+  | Complete                        (* No approximations used *)
+  | Incomplete of incompleteness_reason  (* Explicit reason for approximation *)
+
+(* Type signature: compose two bug classifications with their completeness *)
+val compose_classifications :
+  upstream:bug_classification -> upstream_complete:completeness ->
+  downstream:bug_classification -> downstream_complete:completeness ->
+  bug_classification
+
+let compose_classifications up up_c down down_c =
+  (* Rule 1: Incomplete propagates *)
+  match up_c, down_c with
+  | Incomplete r1, _ ->
+      (* Upstream incomplete - can't trust downstream *)
+      RelaxedManifest [IncompleteDependency r1]
+  | _, Incomplete r2 ->
+      (* Downstream incomplete *)
+      RelaxedManifest [IncompleteDependency r2]
+  | Complete, Complete ->
+      (* Both complete - apply composition rules *)
+      match up, down with
+      (* Rule 2: Manifest preserved *)
+      | Manifest p1, Manifest p2 ->
+          Manifest (combine_proofs p1 p2)
+      (* Rule 3: Latent contexts accumulate *)
+      | Latent ctx1, Latent ctx2 ->
+          Latent (ctx1 `conj` ctx2)
+      (* Rule 4: Manifest + Latent = Latent *)
+      | Manifest _, Latent ctx -> Latent ctx
+      | Latent ctx, Manifest _ -> Latent ctx
+      (* RelaxedManifest composes conservatively *)
+      | RelaxedManifest vs1, RelaxedManifest vs2 ->
+          RelaxedManifest (vs1 @ vs2)
+      | RelaxedManifest vs, _ -> RelaxedManifest vs
+      | _, RelaxedManifest vs -> RelaxedManifest vs
+\end{fstarcode}
+
+The function preserves the True Positives Property (Le 2022, Theorem 3.4): if a \texttt{Manifest} bug is found through complete analyses, it is guaranteed to be a real bug.
+
+\subsubsection{Uncertainty Sources}
+
+Every analysis operation that introduces approximation or encounters missing information must explicitly record the uncertainty source. This enables: (1) explaining to users why a finding has reduced confidence, (2) adaptive precision---retrying with more precise analysis when uncertainty is high, and (3) audit trails for verification.
+
+\begin{fstarcode}[title={Uncertainty Source Types}]
+type uncertainty_source =
+  (* Analysis approximations *)
+  | WideningApplied : iterations:nat -> uncertainty_source
+  | ContextDepthLimited : max_k:nat -> uncertainty_source
+  | HeapAbstractionMerged : merged_count:nat -> uncertainty_source
+  (* Missing information *)
+  | ExternalCodeUnmodeled : func:func_id -> uncertainty_source
+  | DynamicDispatchUnresolved : call_site:node_id -> uncertainty_source
+  | ReflectionOrEval : location:node_id -> uncertainty_source
+  (* Language weirdness *)
+  | UndefinedBehaviorPossible : ub_type:string -> uncertainty_source
+  | LanguageSpecContradiction : spec_section:string -> uncertainty_source
+  | PlatformDependent : varies_on:string -> uncertainty_source
+
+(* Every analysis result bundles value with metadata about how it was computed *)
+type analysis_result (a : Type) = {
+  value : a;
+  confidence : float;  (* LEGACY: For backwards compatibility only. *)
+                       (* NEW CODE should use bug_classification from Section 12.3 *)
+  complexity : complexity_class;
+  uncertainties : list uncertainty_source;
+  approximations_used : list approximation;
+}
+
+(* Complexity classification for time budget management *)
+type complexity_class =
+  | Linear : complexity_class
+  | NLogN : complexity_class
+  | Quadratic : complexity_class
+  | Cubic : complexity_class
+  | CubicInDomain : domain_size:nat -> complexity_class  (* IFDS: O(ED^3) *)
+  | Exponential : base:nat -> complexity_class
+\end{fstarcode}
+
+The \texttt{analysis\_result} record separates the computed \texttt{value} from its provenance metadata. Note that the \texttt{confidence : float} field is marked as legacy; new code should use the structured \texttt{bug\_classification} type from Section 12.3 which provides provable guarantees rather than heuristic scores.
+
+\subsubsection{Adaptive Precision Based on Uncertainty}
+
+\begin{lstlisting}[basicstyle=\ttfamily\small,caption={Adaptive Precision Algorithm}]
+IF uncertainty > threshold THEN
+  TRY more precise analysis:
+    - Increase context depth
+    - Disable widening (if bounded iterations possible)
+    - Use relational domain instead of non-relational
+    - Run symbolic execution on uncertain paths
+
+IF complexity > budget THEN
+  DEGRADE precision:
+    - Reduce context depth
+    - Apply widening earlier
+    - Use cheaper domain (Steensgaard vs Andersen)
+    - Skip shape analysis
+    - Mark as "partial analysis"
+\end{lstlisting}
+
+\subsection{Runtime Debugger Integration}
+
+\subsubsection{The Vision}
+
+Build debugger-like plugins for each target language that:
+\begin{enumerate}
+\item \textbf{Intercept} execution at configurable points
+\item \textbf{Capture} concrete values, types, and execution paths
+\item \textbf{Feed} this ground truth back to static analysis
+\item \textbf{Validate} static predictions against runtime reality
+\end{enumerate}
+
+\subsubsection{Architecture}
+
+\begin{table}[htbp]
+\centering
+\caption{Language Runtime Hooks}
+\label{tab:runtime-hooks}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Language} & \textbf{Hook Mechanism} \\
+\midrule
+Python & \texttt{sys.settrace} \\
+Node & V8 inspector \\
+Rust & LLDB/rr \\
+Go & delve DAP \\
+C/C++ & GDB/LLDB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Trace Collector} captures:
+\begin{itemize}
+\item Function entry/exit with arguments
+\item Variable values at key points
+\item Branch decisions taken
+\item Memory allocations/deallocations
+\item I/O operations performed
+\end{itemize}
+
+\textbf{Trace Analyzer} classifies traces:
+\begin{itemize}
+\item \textsc{AlwaysHappens}: seen in 100\% of runs
+\item \textsc{Common}: seen in $>$50\% of runs
+\item \textsc{Rare}: seen in $<$10\% of runs
+\item \textsc{NeverSeen}: predicted by static, never observed
+\end{itemize}
+
+\textbf{Static $\leftrightarrow$ Dynamic Reconciliation}:
+\begin{itemize}
+\item Static predicted $X$, runtime showed $Y$:
+  \begin{itemize}
+  \item If $Y \subset X$: static is sound (expected)
+  \item If $Y \not\subset X$: static MISSED something (bug in us!)
+  \item If $X \gg Y$: static too imprecise (optimize)
+  \end{itemize}
+\end{itemize}
+
+\subsubsection{Trace Classification}
+
+The trace classification system bridges static and dynamic analysis by recording how often execution paths are observed at runtime. This enables: (1) identifying false positives when static predictions are never observed, (2) finding soundness bugs when runtime discovers paths static analysis missed, and (3) precision tuning when static analysis is too conservative.
+
+\begin{fstarcode}[title={Trace Classification Types}]
+(* Frequency categories based on observed execution runs *)
+type trace_frequency =
+  | AlwaysHappens    (* 100% of observed runs *)
+  | VeryCommon       (* >90% of runs *)
+  | Common           (* >50% of runs *)
+  | Occasional       (* 10-50% of runs *)
+  | Rare             (* <10% of runs *)
+  | NeverObserved    (* 0% - but may be possible *)
+
+(* Complete classification of a trace with static/dynamic comparison *)
+type trace_classification = {
+  path : list node_id;       (* Sequence of CPG nodes in the trace *)
+  frequency : trace_frequency;
+  observed_count : nat;
+  total_runs : nat;
+  static_says : reachability;      (* What static analysis predicted *)
+  discrepancy : option discrepancy_type;  (* Any mismatch detected *)
+}
+
+(* Types of disagreement between static and dynamic analysis *)
+type discrepancy_type =
+  | StaticMissed : trace_classification -> discrepancy_type  (* Runtime found path static missed *)
+  | StaticOverApprox : ratio:float -> discrepancy_type       (* Static predicted 100, only 5 taken *)
+  | StaticWrong : expected:value -> actual:value -> discrepancy_type  (* Value mismatch *)
+\end{fstarcode}
+
+The \texttt{discrepancy} field is critical for analysis quality: \texttt{StaticMissed} indicates a soundness bug in our analysis (we missed a real path), while \texttt{StaticOverApprox} indicates an opportunity for precision improvement.
+
+\subsubsection{Integration with Confidence Model}
+
+Runtime traces BOOST or REDUCE confidence:
+\begin{itemize}
+\item Finding $X$ with static confidence 0.7:
+  \begin{itemize}
+  \item If runtime confirms: confidence $\to$ 0.95+
+  \item If runtime contradicts: confidence $\to$ 0.0 (false positive!)
+  \item If runtime never exercises: confidence unchanged
+  \end{itemize}
+\item Path $Y$ predicted reachable:
+  \begin{itemize}
+  \item If runtime reaches: \textsc{Confirmed}
+  \item If runtime never reaches after $N$ runs: likely \textsc{Unreachable} (but could be rare edge case)
+  \end{itemize}
+\end{itemize}
+
+%--------------------------------------------------
+\section{Theoretical Tensions and Resolutions}
+\label{sec:d10}
+
+This section documents tensions between foundational papers that require explicit reconciliation in the implementation. Each tension is characterized by its source, implications, and adopted resolution.
+
+\subsection{IFDS Distributivity vs General Dataflow (Aiken 1999)}
+
+\begin{pillarbox}[title={Tension: IFDS Scope Limitation}]
+\textbf{Synthesis Position (Part IV):}\\
+IFDS serves as the primary interprocedural dataflow framework
+
+\textbf{Contradicting Reference:}\\
+Aiken 1999 ``Introduction to Set Constraint-Based Program Analysis''\\
+IFDS is a \emph{restricted fragment} of the more general set constraint formalism
+
+\textbf{Theoretical Implications:}
+\begin{itemize}
+\item IFDS requires \emph{distributive} transfer functions: $f(a \sqcup b) = f(a) \sqcup f(b)$
+\item Pointer analysis (Part V) is \emph{not} distributive---cannot use IFDS directly
+\item Set constraints handle non-distributive cases via projection operations
+\end{itemize}
+
+\textbf{Adopted Resolution:}
+\begin{itemize}
+\item \textbf{IFDS}: Efficient $O(ED^3)$ implementation for distributive analyses (taint, nullability, reaching definitions, live variables)
+\item \textbf{Set Constraints}: General framework for non-distributive analyses (pointer analysis, type inference)
+\item Section 12.18: Provides set constraint theorems for non-distributive cases
+\end{itemize}
+
+\textbf{Implementation Impact:}
+\begin{itemize}
+\item Phase 2: Pointer analysis uses dedicated solver (not IFDS)
+\item Phase 3: IFDS for taint/nullability only
+\end{itemize}
+\end{pillarbox}
+
+\subsection{Separation Logic vs Garbage-Collected Languages (Reynolds 2002)}
+
+\begin{pillarbox}[title={Tension: Separation Logic Deallocation Assumptions}]
+\textbf{Synthesis Position (Part VII):}\\
+Use separation logic uniformly for memory reasoning across languages
+
+\textbf{Contradicting Reference:}\\
+Reynolds 2002 ``Separation Logic: A Logic for Shared Mutable Data Structures''\\
+Explicitly notes: ``GC interaction is problematic''
+
+\textbf{Theoretical Implications:}
+\begin{itemize}
+\item Separation logic frame rule assumes explicit deallocation timing
+\item GC may collect memory at unpredictable points
+\item ``Disconnected garbage'' has no separation logic representation
+\item Ownership transfer semantics differ fundamentally
+\end{itemize}
+
+\textbf{Adopted Resolution:}
+
+\textbf{For GC Languages} (Python, Go, Java, JavaScript, Ruby):
+\begin{itemize}
+\item Separation logic applies to \emph{resources} only: file handles, network connections, database cursors, locks, semaphores, condition variables
+\item Memory safety granted axiomatically from runtime
+\item Track resource ownership, not heap cell ownership
+\end{itemize}
+
+\textbf{For Manual Memory Languages} (C, C++, unsafe Rust):
+\begin{itemize}
+\item Full separation logic reasoning applies
+\item Frame rule enables compositional analysis
+\item Track allocation/deallocation correspondence
+\end{itemize}
+
+\textbf{Implementation Impact:}\\
+Language configuration specifies \lstinline{memory_model}: \texttt{GC} $|$ \texttt{Manual} $|$ \texttt{Hybrid}
+\end{pillarbox}
+
+\subsection{Field Index vs Projection Path (Rupta 2024)}
+
+\textbf{Tension:}
+\begin{itemize}
+\item \textbf{Synthesis Position (Part V)}: Use field \emph{index} for field sensitivity:\\
+      \lstinline{FieldLoad(dst, base, field_index)}
+\item \textbf{Rupta 2024}: Use \emph{projection path} for nested structs:\\
+      $(\mathit{base}, [field_1, field_2, field_3])$
+\end{itemize}
+
+\textbf{Implications:}
+\begin{itemize}
+\item Field index: \lstinline{x.a} and \lstinline{y.a} conflated if same index
+\item Projection path: distinguished by \emph{full} path
+\item Nested structs lose precision with index-based approach
+\end{itemize}
+
+\textbf{Resolution:}
+Adopt projection-based representation for Rust analysis. For simpler languages, index-based may suffice. Update Part V Section 5.1 to note both approaches.
+
+\subsection{Steensgaard Default vs Language-Specific (Rupta 2024)}
+
+\textbf{Tension:}
+\begin{itemize}
+\item \textbf{Synthesis Position (Part V)}: ``Steensgaard for speed, Andersen for precision''
+\item \textbf{Rupta 2024}: ``1-callsite-sensitive is FASTER and MORE PRECISE for Rust''
+\end{itemize}
+
+\textbf{Implications:}
+\begin{itemize}
+\item Generic recommendation ignores language characteristics
+\item Rust ownership model changes aliasing patterns
+\item Stack filtering (novel) enables context-sensitivity at low cost
+\end{itemize}
+
+\textbf{Resolution:}
+Add language-specific recommendations:
+\begin{itemize}
+\item \textbf{Rust}: 1-callsite + stack filtering (Rupta)
+\item \textbf{C/C++}: Andersen or demand-driven (Sridharan)
+\item \textbf{Python}: Type-based + dynamic traces
+\item \textbf{Java}: Object-sensitive for OOP patterns
+\end{itemize}
+
+\subsection{Two-Valued vs Three-Valued Logic (TVLA 2002)}
+
+\textbf{Tension:}
+\begin{itemize}
+\item \textbf{Synthesis Position (Part II)}: Boolean lattices with explicit ``Maybe'' variants:\\
+      $\mathsf{TaintLevel} = \mathsf{Tainted} \mid \mathsf{Untainted} \mid \mathsf{Unknown}$
+\item \textbf{TVLA 2002}: Three-valued logic with Kleene semantics:\\
+      $\mathsf{three\_value} = \mathsf{TV0} \mid \mathsf{TV1} \mid \mathsf{TVHalf}$
+\end{itemize}
+
+\textbf{Implications:}
+\begin{itemize}
+\item Synthesis approach is ad-hoc per-domain
+\item TVLA approach is principled with information ordering
+\item Kleene semantics provide correct conjunction/disjunction
+\end{itemize}
+
+\textbf{Resolution:}
+Section 12.23 provides three-valued foundation. Section 5.4 uses three-valued for shape analysis. Consider refactoring existing domains to use three-valued base.
+
+\subsection{Type-Directed vs Arbitrary Conversion (M\&F 2007)}
+
+\textbf{Tension:}
+\begin{itemize}
+\item \textbf{Synthesis Position (Part IX)}: Assume type-directed conversion:\\
+      $\mathit{type\_map} : \mathsf{Type}_1 \to \mathsf{Type}_2$
+\item \textbf{M\&F 2007}: Conversion strategies ($\kappa$) decouple type from behavior:\\
+      Zero-for-error, sentinel values, custom conversions
+\end{itemize}
+
+\textbf{Implications:}
+\begin{itemize}
+\item Real FFIs have arbitrary conventions (C's $-1$ for error, etc.)
+\item Type-directed assumption breaks for C/Python interop
+\item Need explicit conversion strategy abstraction
+\end{itemize}
+
+\textbf{Resolution:}
+Section 12.20 adds \lstinline{conversion_strategy} type. Section 9.3 integrates with guard generation. Part IX should note non-type-directed cases.
+
+\subsection{GC vs Manual Memory (VeriFFI 2025)}
+
+\textbf{Tension:} The framework supports both GC languages (Python, Java, Go) and manual memory languages (C, C++, Rust). Their ownership models conflict:
+
+\begin{table}[htbp]
+\centering
+\caption{GC vs Manual Memory Comparison}
+\label{tab:gc-manual}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Aspect} & \textbf{GC Languages} & \textbf{Manual Memory} \\
+\midrule
+Deallocation & Automatic, timing uncertain & Explicit, deterministic \\
+Pointer validity & Until collected & Until freed \\
+Object movement & GC may relocate & Fixed address \\
+Ownership transfer & Reference semantics & Move/copy semantics \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Implications:}
+\begin{itemize}
+\item GC languages don't track deallocation---GC handles it
+\item Manual languages must track use-after-free, double-free
+\item FFI boundaries are especially dangerous:
+  \begin{itemize}
+  \item GC may collect object still referenced by C code
+  \item C may free memory still visible to GC language
+  \end{itemize}
+\item Ownership states don't translate directly
+\end{itemize}
+
+\textbf{Resolution Strategy:}
+
+\begin{enumerate}
+\item \textbf{Language-specific ownership states} (Section 7.6.2):
+  \begin{itemize}
+  \item GC languages: \textsc{GCRooted} / \textsc{GCReachable} / \textsc{GCFinalized}
+  \item Manual: \textsc{Acquired} / \textsc{InUse} / \textsc{Released} (Section 7.1)
+  \end{itemize}
+
+\item \textbf{FFI boundary requirements} (Section 7.6.3):
+  \begin{itemize}
+  \item Pin objects during cross-boundary calls
+  \item Copy small data to avoid cross-heap references
+  \item Register pointers as roots when necessary
+  \end{itemize}
+
+\item \textbf{GC-isomorphism preservation} (Section 7.6.1):
+  \begin{itemize}
+  \item Representation predicates survive GC cycles
+  \item Analysis results valid before AND after GC
+  \item Addresses may change but structure preserved
+  \end{itemize}
+
+\item \textbf{Boundary guards}:
+  \begin{itemize}
+  \item Source GC, target non-GC: Pin or Copy
+  \item Source non-GC, target GC: Register root if storing reference
+  \item Both GC but different runtimes: Cross-heap reference handling
+  \end{itemize}
+\end{enumerate}
+
+\textbf{Reference:} VeriFFI (Wang et al.~2025)---``Verified FFI for GC Languages''
+
+\subsection{Summary Table}
+
+\begin{table}[htbp]
+\centering
+\caption{Theoretical Tensions Summary}
+\label{tab:tensions-summary}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{@{}p{2.5cm}p{3cm}p{3cm}p{4cm}@{}}
+\toprule
+\textbf{Tension} & \textbf{Synthesis} & \textbf{Paper} & \textbf{Resolution} \\
+\midrule
+IFDS scope & Primary framework & Restricted fragment & Both: IFDS for distributive, constraints for general \\
+Sep logic + GC & Use everywhere & GC problematic & Resources only for GC languages \\
+Field handling & Index-based & Projection path & Adopt projection for precision \\
+Pointer default & Steensgaard & Language-specific & Per-language recommendations \\
+Value logic & Two-valued + Maybe & Three-valued & Use three-valued foundation \\
+Conversions & Type-directed & Arbitrary strategies & Add conversion strategy type \\
+GC vs Manual & Unified ownership & Incompatible models & Language-specific states + FFI requirements \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+%--------------------------------------------------
+\section{Collection 2 Paper Integration Summary}
+\label{sec:d11}
+
+This section documents the integration of Collection 2 papers into the synthesis.
+
+\subsection{Papers Already Integrated in Main Synthesis}
+
+\begin{longtable}{@{}p{3cm}p{4cm}p{6cm}@{}}
+\toprule
+\textbf{Paper} & \textbf{Integration Location} & \textbf{Key Contribution} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Paper} & \textbf{Integration Location} & \textbf{Key Contribution} \\
+\midrule
+\endhead
+\midrule
+\multicolumn{3}{r}{\textit{Continued on next page}} \\
+\endfoot
+\bottomrule
+\endlastfoot
+
+\textbf{Leijen 2014} & Section 12.27 (Effect Absence Theorems) & Row-polymorphic effects, semantic soundness theorems. Effect absence proves bug impossibility. \\
+
+\textbf{Yamaguchi 2014} & Part II (CPG), Section 5.3, throughout & CPG (AST+CFG+PDG), traversal algebra. Found 18 Linux kernel CVEs. Foundation of analysis infrastructure. \\
+
+\textbf{Reynolds 2002} & Section 7.1 (Ownership), Part VII & Separation logic, frame rule, compositional heap reasoning. Enables modular memory analysis. \\
+
+\textbf{Steensgaard 1996} & Section 5.1, Section 12.22 & $O(n \cdot \alpha)$ unification-based points-to, cjoin optimization. Fast pointer analysis baseline. \\
+
+\textbf{Sivaramakrishnan 2021} & Section 6.1.2, 6.4, 6.4.1 & Production effect handlers in OCaml. Fiber-based implementation, 1\% overhead, C FFI limitations. \\
+
+\textbf{Petricek 2014} & Section 6.6 (Coeffects), Part VII intro & Coeffect systems dual to effects. Flat (capabilities) and structural (liveness, usage). Connects to linear types. \\
+\end{longtable}
+
+\subsection{Papers Added to Appendix A (Priority Matrix)}
+
+\begin{longtable}{@{}p{2.5cm}ccp{3cm}p{3cm}@{}}
+\toprule
+\textbf{Paper} & \textbf{Priority} & \textbf{Category} & \textbf{Key Contribution} & \textbf{Gap Addressed} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Paper} & \textbf{Priority} & \textbf{Category} & \textbf{Key Contribution} & \textbf{Gap Addressed} \\
+\midrule
+\endhead
+\midrule
+\multicolumn{5}{r}{\textit{Continued on next page}} \\
+\endfoot
+\bottomrule
+\endlastfoot
+
+\textbf{Bierhoff 2007} & 9 & Ownership & 5 access permissions, modular typestate with aliasing & D.1, D.7 \\
+
+\textbf{Siek 2006} & 8 & Types & Gradual typing, non-transitive consistency, cast insertion & D.5, Section 9.1.2 \\
+
+\textbf{Kang 2017} & 10 & Memory Model & Promising Semantics---prevents thin-air, validates compiler opts & Theorem 12.26.3 soundness \\
+
+\textbf{Lee 2020} & 10 & Memory Model & Promising 2.0---capped memory, value-range analysis, ARMv8 fix & Section 6.5.7 \\
+
+\textbf{Podkopaev 2019} & 10 & Memory Model & IMM---$O(n+m)$ compilation proofs, 33K Coq & Section 6.5.9 \\
+
+\textbf{Godefroid 2005} & 8 & Testing & DART---concolic execution origins, interface extraction & Section 4.4.5 \\
+\end{longtable}
+
+\subsection{Integration Details}
+
+\paragraph{Bierhoff 2007 (Modular Typestate Checking).}
+\begin{itemize}
+\item \textbf{Enhances}: Part VII (Ownership and Resources), Section 7.1.3
+\item \textbf{Addresses}: Gap D.1 by providing formal aliasing handling for library specifications
+\item \textbf{Key insight}: Permission taxonomy with fraction \emph{functions} (not just fractions) enables precise tracking of shared state
+\item \textbf{Temporary state}: Weak permissions carry state that is forgotten after effects, enabling practical use of share/pure
+\end{itemize}
+
+\paragraph{Siek 2006 (Gradual Typing).}
+\begin{itemize}
+\item \textbf{Enhances}: Part IX (Multi-Language Analysis), Section 9.1.2 (boundary risk analysis)
+\item \textbf{Critical fix}: Replaces informal ``types\_compatible'' with rigorous \emph{type consistency}
+\item \textbf{Non-transitivity}: $t_1 \sim ?$ and $? \sim t_2$ does \emph{not} imply $t_1 \sim t_2$. This prevents unsound coercion chains.
+\item \textbf{Cast insertion}: Systematic algorithm for generating boundary casts from Section 9.1
+\end{itemize}
+
+\paragraph{Garcia 2016 (Abstracting Gradual Typing).}
+\begin{itemize}
+\item \textbf{Enhances}: Part IX (Section 9.1.2), connects to Part II (Abstract Interpretation)
+\item \textbf{Critical insight}: Gradual types \emph{are} abstract interpretations of static type sets
+\item \textbf{Galois connection}: $\gamma(?) = \text{all types}$, $\gamma(\mathsf{Int}) = \{\mathsf{Int}\}$. Consistency is: $\gamma(G_1) \cap \gamma(G_2) \neq \emptyset$
+\item \textbf{Derived non-transitivity}: Non-transitivity \emph{emerges} from set intersection (not stipulated)
+\item \textbf{Consistent subtyping}: $G_1 \lesssim G_2$ when $\exists\, T_1 \in \gamma(G_1), T_2 \in \gamma(G_2)$ with $T_1 <: T_2$. Essential for record types.
+\item \textbf{Evidence semantics}: Tracks \emph{how} consistency was established for precise blame at boundaries
+\item \textbf{Gradual guarantee}: Less precise types $\to$ more runtime checks, same semantics
+\item \textbf{Integration}: Connects Section 9.1.2 to Section 2.1.2, unifying gradual typing with abstract interpretation framework
+\end{itemize}
+
+\paragraph{Sivaramakrishnan 2021 (Retrofitting Effect Handlers onto OCaml).}
+\begin{itemize}
+\item \textbf{Enhances}: Section 6.1.2 (Algebraic Effects), Section 6.4 (Effect Handler Limitations)
+\item \textbf{New section}: Section 6.4.1 (Production Effect Handler Implementation)
+\item \textbf{Key contributions}:
+  \begin{itemize}
+  \item Fiber-based stack segmentation for delimited continuations
+  \item 1\% mean overhead for non-effect code (validated on 54 benchmarks)
+  \item C FFI boundary limitation: effects cannot cross C stack frames
+  \item Runtime-enforced continuation linearity (one-shot by default)
+  \item DWARF compatibility for debugging (GDB, perf work correctly)
+  \end{itemize}
+\item \textbf{Practical insight}: Effect handlers \emph{are} practical for production systems when carefully implemented
+\end{itemize}
+
+\paragraph{Petricek 2014 (Coeffects: A Calculus of Context-Dependent Computation).}
+\begin{itemize}
+\item \textbf{Enhances}: Part VI (complete effect/coeffect duality), Part VII (ownership via usage coeffects)
+\item \textbf{New section}: Section 6.6 (Coeffect Systems)
+\item \textbf{Key contributions}:
+  \begin{itemize}
+  \item Effects and coeffects are \emph{dual}: effects = what computation \emph{produces}, coeffects = what it \emph{requires}
+  \item Flat coeffects for capabilities (network, filesystem, platform requirements)
+  \item Structural coeffects for per-variable properties (liveness, usage counting)
+  \item Semiring algebra enables compositional reasoning
+  \item Usage coeffects connect to linear types and Rust ownership
+  \end{itemize}
+\item \textbf{Critical insight}: Complete analysis requires \emph{both} effects and coeffects
+\end{itemize}
+
+\subsection{Cross-Paper Connections}
+
+Both Bierhoff 2007 and Siek 2006 address partial knowledge:
+\begin{itemize}
+\item \textbf{Siek}: Types are partially known ($?$ represents unknown portions)
+\item \textbf{Garcia (AGT)}: $?$ represents \emph{set} of all types; partial knowledge = set abstraction
+\item \textbf{Bierhoff}: State is partially known (weak permissions have temporary assumptions)
+\end{itemize}
+
+Effect/Coeffect duality connects multiple papers:
+\begin{itemize}
+\item \textbf{Petricek 2014}: Coeffects are dual to effects (Moggi 1991, Plotkin 2003)
+\item \textbf{Sivaramakrishnan 2021}: Production implementation validates effect handler theory
+\item \textbf{Girard 1987}: Linear types map to usage coeffects (Section 6.6.3 and Section 7.2.2)
+\end{itemize}
+
+AGT connects gradual typing to abstract interpretation (Part II $\leftrightarrow$ Part IX):
+\begin{itemize}
+\item \textbf{Garcia 2016}: Gradual types form Galois connection with static type sets
+\item \textbf{Consistency derived}: $G_1 \sim G_2$ iff $\gamma(G_1) \cap \gamma(G_2) \neq \emptyset$
+\item \textbf{Precision ordering}: $G_1$ more precise than $G_2$ iff $\gamma(G_1) \subseteq \gamma(G_2)$
+\item \textbf{Implication}: Part IX boundary analysis is an \emph{instance} of Part II framework
+\end{itemize}
+
+This suggests a unified treatment of uncertainty:
+
+\begin{pillarbox}[title={Partial Knowledge Framework}]
+\begin{itemize}
+\item \textbf{For types (Siek/Garcia)}: consistency = non-transitive (from set intersection)
+\item \textbf{For states (Bierhoff)}: assumption = temporary (may be invalidated)
+\item \textbf{For permissions}: fractions = summable (ownership accounting)
+\item \textbf{For gradual (AGT)}: precision = set inclusion (Galois connection)
+\end{itemize}
+\end{pillarbox}
+
+The integration enables the synthesis to handle:
+\begin{enumerate}
+\item \textbf{Dynamic language analysis} (Python, JavaScript) via gradual typing
+\item \textbf{Aliased resource tracking} via access permissions
+\item \textbf{Modular library verification} via frame-based inheritance
+\item \textbf{Precise boundary checking} via type consistency (not subtyping)
+\end{enumerate}
+
+\bigskip
+\begin{center}
+\textit{End of Appendix D}
+\end{center}

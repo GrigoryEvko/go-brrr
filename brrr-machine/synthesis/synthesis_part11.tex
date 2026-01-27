@@ -1,0 +1,967 @@
+% Part XI: The Brrr-Machine IR
+% Fragment - no document preamble
+
+\part{The Brrr-Machine IR}
+\label{part:brrr-machine-ir}
+
+%==================================================
+\chapter{Unified Intermediate Representation}
+\label{ch:unified-ir}
+%==================================================
+
+All source languages are translated to a common IR. This enables:
+\begin{itemize}
+    \item Single analysis implementation for all languages
+    \item Consistent effect tracking
+    \item Cross-language dataflow
+\end{itemize}
+
+%--------------------------------------------------
+\section{IR Design Principles}
+\label{sec:ir-design-principles}
+%--------------------------------------------------
+
+\begin{pillarbox}[title={IR Design Principles}]
+\textbf{PRINCIPLE 1: EXPLICIT EFFECTS}
+\begin{itemize}
+    \item Every side effect is represented explicitly.
+    \item Pure expressions separated from effectful statements.
+    \item No hidden control flow.
+\end{itemize}
+
+\textbf{PRINCIPLE 2: EXPLICIT MEMORY}
+\begin{itemize}
+    \item All memory operations through uniform interface.
+    \item Memory mode (GC/RC/owned/manual) is a parameter.
+\end{itemize}
+
+\textbf{PRINCIPLE 3: SSA-LIKE STRUCTURE}
+\begin{itemize}
+    \item Each variable assigned once (in its scope).
+    \item Phi nodes at control flow merge points.
+    \item Enables efficient dataflow analysis.
+\end{itemize}
+
+\textbf{PRINCIPLE 4: TYPE-PRESERVING}
+\begin{itemize}
+    \item Type information preserved when available.
+    \item Abstract types for dynamic languages.
+    \item Gradual types for mixed scenarios.
+\end{itemize}
+
+\textbf{CRITICAL FOR RUST} \textbf{[Rupta24]}:
+Do NOT lower Rust to LLVM IR for analysis---type info is LOST!
+LLVM IR loses: ownership, borrowing, lifetimes, trait bounds.
+Use MIR-level representation for Rust to preserve:
+\begin{itemize}
+    \item Borrow regions and lifetimes
+    \item Move vs copy semantics
+    \item Trait object type info
+\end{itemize}
+See Section~\ref{sec:stack-filtering} for stack filtering which requires this info.
+\end{pillarbox}
+
+\begin{pillarbox}[title={Pay-As-You-Go Representation (Siek 2006 Gradual Typing)}]
+\textbf{Source}: \textbf{[Siek06]} -- ``Gradual Typing for Functional Languages''
+
+\textbf{KEY OPTIMIZATION}: Runtime overhead only for dynamic types.
+
+For gradual typing at language boundaries (Python$\leftrightarrow$Rust, JS$\leftrightarrow$Go):
+
+\textbf{KNOWN TYPES (statically typed):}
+\begin{itemize}
+    \item Use UNBOXED representation---direct machine values
+    \item \texttt{int} $\to$ native int64, \texttt{bool} $\to$ native bool, \texttt{struct} $\to$ native layout
+    \item No runtime type checks, no boxing overhead
+    \item Same performance as fully static code
+\end{itemize}
+
+\textbf{DYNAMIC TYPES (? / \TAny):}
+\begin{itemize}
+    \item Use BOXED representation with type tag
+    \item Runtime type checks at cast boundaries
+    \item \texttt{\{ tag: TypeTag, value: *void \}} layout
+    \item Overhead only where types are actually unknown
+\end{itemize}
+
+\textbf{CANONICAL FORMS} (Siek Lemma 5):
+Values of ground types (int, bool) have predictable representation:
+\begin{itemize}
+    \item If $v : \TInt$ (not ?) then $v$ is unboxed integer
+    \item If $v : \text{?}$ then $v$ is boxed with runtime tag
+\end{itemize}
+This enables efficient code generation at FFI boundaries.
+
+\textbf{APPLICATION TO IR:}
+\begin{itemize}
+    \item \TAny\ in \texttt{ir\_type} signals ``needs boxing''
+    \item Known types (\TInt, \TBool, \texttt{TStruct}) signal ``unboxed OK''
+    \item Code generator chooses representation based on type precision
+\end{itemize}
+
+Cross-reference: Section~\ref{sec:gradual-typing-boundaries} for gradual typing at boundaries.
+Cross-reference: \textbf{[Bierhoff07]} review for typestate + gradual integration.
+\end{pillarbox}
+
+%--------------------------------------------------
+\section{Complete IR Specification}
+\label{sec:complete-ir-specification}
+%--------------------------------------------------
+
+\begin{fstarcode}[title={Brrr-Machine Intermediate Representation}]
+(* ==================================================
+   BRRR-MACHINE INTERMEDIATE REPRESENTATION
+   ================================================== *)
+module BrrrMachine.IR
+
+(* --------------------------------------------------
+   TYPES
+   -------------------------------------------------- *)
+type ir_type =
+  (* Primitives *)
+  | TUnit : ir_type
+  | TBool : ir_type
+  | TInt : width:int_width -> signed:bool -> ir_type
+  | TFloat : width:float_width -> ir_type
+  | TString : ir_type
+  | TChar : ir_type
+  (* References *)
+  | TRef : pointee:ir_type -> ir_type
+  | TPtr : pointee:ir_type -> ir_type  (* Raw, potentially null *)
+  | TOption : inner:ir_type -> ir_type
+  (* Aggregates *)
+  | TArray : element:ir_type -> size:option nat -> ir_type
+  | TStruct : name:string -> fields:list (string * ir_type) -> ir_type
+  | TTuple : elements:list ir_type -> ir_type
+  | TVariant : name:string -> cases:list (string * ir_type) -> ir_type
+  (* Functions *)
+  | TFunc : params:list ir_type -> ret:ir_type -> effects:effect_row -> ir_type
+  | TClosure : captures:list ir_type -> func:ir_type -> ir_type
+  (* Special *)
+  | TAny : ir_type  (* For dynamic languages *)
+  | TNever : ir_type  (* Bottom type, never returns *)
+  | TTypeVar : name:string -> ir_type  (* Generic parameter *)
+
+(* NOTE: In actual F*, int_width and float_width are declared separately
+   as noeq types before ir_type. The 'and' syntax shown here is for
+   illustration of the mutual dependency in the conceptual type system. *)
+and int_width = | I8 | I16 | I32 | I64 | I128 | ISize | IBigInt
+and float_width = | F32 | F64
+\end{fstarcode}
+
+The \texttt{ir\_type} definition demonstrates several key design choices:
+\begin{itemize}
+    \item \texttt{TInt} carries explicit width (\texttt{I8}--\texttt{I128}, \texttt{ISize}, \texttt{IBigInt}) and signedness, preserving platform-specific semantics from C, Rust, and Python
+    \item \texttt{TRef} vs \texttt{TPtr} distinguishes safe references (guaranteed non-null, valid memory) from raw pointers (may be null, may dangle)
+    \item \texttt{TFunc} includes an \texttt{effect\_row} parameter, enabling the effect system from Part VI to track side effects at the type level
+    \item \texttt{TAny} supports dynamic languages (Python, JavaScript) using gradual typing (Siek 2006)
+\end{itemize}
+
+\begin{fstarcode}[title={Type Descriptors for FFI}]
+(* --------------------------------------------------
+   TYPE DESCRIPTORS FOR FFI
+   Source: VeriFFI (Wang et al. 2025)
+
+   IR types can be reified into runtime type descriptors for FFI boundary
+   verification. See Section 9.4.4 for the complete type_descriptor type
+   and the reify_type function that converts ir_type to type_descriptor.
+
+   This enables:
+     - Dynamic type checking at FFI boundaries
+     - Automatic marshalling code generation
+     - Reflection-based contract verification
+
+   Cross-reference: Section 7.5 (Representation Predicates) defines how
+   type descriptors relate to actual memory layout via rep_predicate.
+   -------------------------------------------------- *)
+\end{fstarcode}
+
+The IR value type represents runtime values in a language-neutral way. Key features include
+language-specific null representations (\texttt{VNull} for C/Go, \texttt{VUndefined} for JavaScript,
+\texttt{VNone} for Python) and explicit width annotations for numeric types.
+
+\begin{fstarcode}[title={IR Values --- Pure Data}]
+(* --------------------------------------------------
+   VALUES --- Pure data
+
+   NOTE: F* does not have a built-in 'float' type. In actual implementation,
+   use FStar.Float64.t or an abstract floating-point type. The 'float' here
+   is illustrative pseudo-code representing IEEE 754 floating-point values.
+   -------------------------------------------------- *)
+assume type fp_value : Type  (* Abstract floating-point value *)
+
+type ir_value =
+  | VUnit : ir_value
+  | VBool : b:bool -> ir_value
+  | VInt : i:int -> width:int_width -> ir_value
+  | VFloat : f:fp_value -> width:float_width -> ir_value
+  | VString : s:string -> ir_value
+  | VNull : ir_value           (* C/Go null pointer *)
+  | VUndefined : ir_value      (* JavaScript undefined *)
+  | VNone : ir_value           (* Python None singleton *)
+\end{fstarcode}
+
+IR expressions represent pure computations without side effects. The separation of
+pure expressions from effectful statements (defined below) is fundamental to the
+IR's design, enabling effect-free analysis of expression subgraphs.
+
+\begin{fstarcode}[title={IR Expressions --- Pure Computations}]
+(* --------------------------------------------------
+   EXPRESSIONS --- Pure computations
+
+   Key design: expressions are PURE - they have no side effects. All memory
+   access, I/O, and concurrency operations are in the statement layer.
+   This separation enables compositional reasoning about expression semantics.
+   -------------------------------------------------- *)
+type var_id = string
+type func_id = string
+
+type ir_expr =
+  (* Atoms *)
+  | EVal : v:ir_value -> ir_expr
+  | EVar : v:var_id -> ir_expr
+  | EGlobal : g:var_id -> ir_expr
+  (* Arithmetic *)
+  | EBinOp : op:bin_op -> e1:ir_expr -> e2:ir_expr -> ir_expr
+  | EUnOp : op:un_op -> e:ir_expr -> ir_expr
+  (* Comparisons *)
+  | ECmp : op:cmp_op -> e1:ir_expr -> e2:ir_expr -> ir_expr
+  (* Type operations *)
+  | ECast : e:ir_expr -> target:ir_type -> ir_expr
+  | ETypeOf : e:ir_expr -> ir_expr
+  | EInstanceOf : e:ir_expr -> t:ir_type -> ir_expr
+  (* Aggregate access (pure --- reads from value, not memory) *)
+  | EField : e:ir_expr -> field:string -> ir_expr
+  | EIndex : arr:ir_expr -> idx:ir_expr -> ir_expr
+  | ETupleProj : e:ir_expr -> index:nat -> ir_expr
+  (* Aggregate construction *)
+  | EStruct : name:string -> fields:list (string * ir_expr) -> ir_expr
+  | EArray : elements:list ir_expr -> ir_expr
+  | ETuple : elements:list ir_expr -> ir_expr
+  | EVariant : name:string -> tag:string -> payload:ir_expr -> ir_expr
+  (* Functions *)
+  | ELambda : params:list (var_id * ir_type) ->
+              body:ir_stmt ->
+              captures:list var_id ->
+              ir_expr
+  | EFuncRef : f:func_id -> ir_expr
+  (* Option/null handling *)
+  | ESome : e:ir_expr -> ir_expr
+  | ENone : t:ir_type -> ir_expr
+  | EIsSome : e:ir_expr -> ir_expr
+  | EUnwrap : e:ir_expr -> ir_expr  (* Panics if None *)
+
+and bin_op =
+  | OpAdd | OpSub | OpMul | OpDiv | OpMod | OpPow
+  | OpBitAnd | OpBitOr | OpBitXor | OpShl | OpShr
+  | OpAnd | OpOr
+
+and un_op =
+  | OpNeg | OpNot | OpBitNot
+
+and cmp_op =
+  | OpEq | OpNe | OpLt | OpLe | OpGt | OpGe
+  | OpRefEq  (* Reference equality *)
+\end{fstarcode}
+
+\begin{fstarcode}[title={IR Statements --- Effectful Operations (Part 1)}]
+(* --------------------------------------------------
+   STATEMENTS --- Effectful operations
+   -------------------------------------------------- *)
+type ir_stmt =
+  (* Sequencing *)
+  | SSeq : s1:ir_stmt -> s2:ir_stmt -> ir_stmt
+  | SNop : ir_stmt
+  (* Variable binding *)
+  | SLet : var:var_id -> typ:ir_type -> init:ir_expr -> body:ir_stmt -> ir_stmt
+  | SLetMut : var:var_id -> typ:ir_type -> init:ir_expr -> body:ir_stmt -> ir_stmt
+  | SAssign : var:var_id -> value:ir_expr -> ir_stmt
+  (* Memory operations *)
+  | SAlloc : dst:var_id -> typ:ir_type -> ir_stmt
+  | SAllocArray : dst:var_id -> elem_type:ir_type -> size:ir_expr -> ir_stmt
+  | SFree : ptr:ir_expr -> ir_stmt
+  | SRead : dst:var_id -> ptr:ir_expr -> ir_stmt
+  | SWrite : ptr:ir_expr -> value:ir_expr -> ir_stmt
+  (* Aggregate memory operations *)
+  | SFieldRead : dst:var_id -> obj:ir_expr -> field:string -> ir_stmt
+  | SFieldWrite : obj:ir_expr -> field:string -> value:ir_expr -> ir_stmt
+  | SIndexRead : dst:var_id -> arr:ir_expr -> idx:ir_expr -> ir_stmt
+  | SIndexWrite : arr:ir_expr -> idx:ir_expr -> value:ir_expr -> ir_stmt
+  (* Control flow *)
+  | SIf : cond:ir_expr -> then_:ir_stmt -> else_:ir_stmt -> ir_stmt
+  | SMatch : scrutinee:ir_expr -> cases:list match_case -> ir_stmt
+  | SWhile : cond:ir_expr -> body:ir_stmt -> ir_stmt
+  | SFor : var:var_id -> init:ir_expr -> cond:ir_expr -> update:ir_stmt ->
+           body:ir_stmt -> ir_stmt
+  | SForEach : var:var_id -> iter:ir_expr -> body:ir_stmt -> ir_stmt
+  | SBreak : ir_stmt
+  | SContinue : ir_stmt
+  | SReturn : value:option ir_expr -> ir_stmt
+  (* Function calls *)
+  | SCall : dst:option var_id -> func:ir_expr -> args:list ir_expr -> ir_stmt
+  | STailCall : func:ir_expr -> args:list ir_expr -> ir_stmt
+  (* Exception handling *)
+  | SThrow : exn:ir_expr -> ir_stmt
+  | STry : body:ir_stmt -> catches:list catch_clause ->
+           finally:option ir_stmt -> ir_stmt
+\end{fstarcode}
+
+\begin{fstarcode}[title={IR Statements --- Effectful Operations (Part 2: Concurrency)}]
+  (* Concurrency *)
+  | SSpawn : dst:var_id -> func:ir_expr -> args:list ir_expr -> ir_stmt
+  | SJoin : handle:ir_expr -> ir_stmt
+  | SSend : chan:ir_expr -> value:ir_expr -> ir_stmt
+  | SRecv : dst:var_id -> chan:ir_expr -> ir_stmt
+  | SLock : mutex:ir_expr -> ir_stmt
+  | SUnlock : mutex:ir_expr -> ir_stmt
+  | SAtomic : body:ir_stmt -> ir_stmt
+  (* Channel operations --- Honda 1998 (binary) / Honda 2008 (multiparty) session type primitives.
+     Note: Honda 1998 is sound; Honda 2008 proofs corrected by Scalas & Yoshida 2019. *)
+  | SChanCreate : dst:var_id -> elem_type:ir_type -> buffer_size:nat -> ir_stmt
+      (* Create channel: dst = make(chan elem_type, buffer_size) *)
+  | SChanClose : chan:ir_expr -> ir_stmt
+      (* Close channel: close(chan) *)
+  | SSelect : cases:list select_case -> default:option ir_stmt -> ir_stmt
+      (* Select statement: select { case ch <- v: ...; case x := <-ch: ...; default: ... }
+         Models both Go's select and Rust's tokio::select! *)
+  | SSelectSend : chan:ir_expr -> value:ir_expr -> body:ir_stmt -> ir_stmt
+      (* Select case for send: case chan <- value: body *)
+  | SSelectRecv : dst:var_id -> chan:ir_expr -> body:ir_stmt -> ir_stmt
+      (* Select case for receive: case dst := <-chan: body *)
+  | SChanDelegate : chan:ir_expr -> delegated:ir_expr -> ir_stmt
+      (* Session delegation: transfer session capability through channel *)
+  | SChanBranch : chan:ir_expr -> branches:list (string * ir_stmt) -> ir_stmt
+      (* Offer labeled branches on channel (session type branching) *)
+  | SChanSelect : chan:ir_expr -> label:string -> body:ir_stmt -> ir_stmt
+      (* Select labeled branch on channel (session type selection) *)
+\end{fstarcode}
+
+\begin{fstarcode}[title={IR Statements --- Effectful Operations (Part 3: Resources and SSA)}]
+  (* Resource management *)
+  | SAcquire : dst:var_id -> resource:ir_expr -> ir_stmt
+  | SRelease : resource:ir_expr -> ir_stmt
+  | SDefer : action:ir_stmt -> ir_stmt
+  | SWith : resource:ir_expr -> var:var_id -> body:ir_stmt -> ir_stmt
+  (* SSA *)
+  | SPhi : dst:var_id -> sources:list (var_id * block_id) -> ir_stmt
+  (* Annotations *)
+  | SAssert : cond:ir_expr -> msg:string -> ir_stmt
+  | SAssume : cond:ir_expr -> ir_stmt
+  | SAnnotate : annotation:ir_annotation -> body:ir_stmt -> ir_stmt
+
+and match_case = {
+  pattern : ir_pattern;
+  guard : option ir_expr;
+  body : ir_stmt;
+}
+
+(* Select case for channel select statements (Go select / Rust tokio::select!) *)
+and select_case =
+  | SelectSend : chan:ir_expr -> value:ir_expr -> body:ir_stmt -> select_case
+      (* case chan <- value: body *)
+  | SelectRecv : dst:option var_id -> chan:ir_expr -> body:ir_stmt -> select_case
+      (* case dst := <-chan: body (dst=None for case <-chan:) *)
+  | SelectDefault : body:ir_stmt -> select_case
+      (* default: body *)
+
+and ir_pattern =
+  | PatWildcard : ir_pattern
+  | PatVar : var:var_id -> ir_pattern
+  | PatLiteral : v:ir_value -> ir_pattern
+  | PatVariant : tag:string -> payload:ir_pattern -> ir_pattern
+  | PatTuple : elements:list ir_pattern -> ir_pattern
+  | PatStruct : fields:list (string * ir_pattern) -> ir_pattern
+
+and catch_clause = {
+  exn_type : ir_type;
+  exn_var : var_id;
+  handler : ir_stmt;
+}
+
+and ir_annotation =
+  | AnnPure  (* This code is pure *)
+  | AnnInline  (* Inline at call sites *)
+  | AnnNoReturn  (* This code never returns normally *)
+  | AnnUnsafe  (* This code has unchecked assumptions *)
+  | AnnBoundary : source:string -> target:string -> ir_annotation
+  | AnnTainted  (* Value is tainted *)
+  | AnnSanitized  (* Value has been sanitized *)
+
+and block_id = nat
+\end{fstarcode}
+
+%--------------------------------------------------
+\section{SSA Form Considerations for Channels}
+\label{sec:ssa-channels}
+%--------------------------------------------------
+
+\begin{pillarbox}[title={SSA Form for Channels --- Honda 1998/2008 Linearity}]
+Channel variables have special SSA semantics due to their LINEAR nature:
+\begin{enumerate}
+    \item Channel creation assigns the channel variable exactly once
+    \item Channel operations (send/recv/close) do NOT reassign the channel variable
+    \item Channel closing TERMINATES the channel's SSA lifetime
+    \item Select introduces phi-like merge points for channel state
+\end{enumerate}
+
+Unlike regular SSA where variables can be assigned multiple values (with phi nodes merging), channel endpoints follow session type discipline:
+\begin{itemize}
+    \item Each operation CONSUMES the current session type prefix
+    \item Produces a NEW session type (the continuation)
+    \item The channel VARIABLE stays the same, but its TYPE evolves
+\end{itemize}
+
+This is LINEAR SSA: assignment happens once, but type state changes.
+
+\textbf{Note on Foundations:} Honda 1998 (binary session types) is well-established and has been mechanized. Honda 2008 (multiparty) proofs were corrected by Scalas \& Yoshida 2019; see Part XIV Section 14.3.1.
+\end{pillarbox}
+
+\begin{fstarcode}[title={Channel SSA Form Validation}]
+(* Channel SSA form validation *)
+val validate_channel_ssa : ir_func -> list ssa_violation
+let validate_channel_ssa func =
+  let violations = ref [] in
+  let channel_defs : map var_id node_id = Map.empty in
+  let channel_closed : set var_id = Set.empty in
+
+  let rec check_stmt stmt =
+    match stmt with
+    | SChanCreate dst _ _ ->
+        if Map.mem dst channel_defs then
+          violations := SSAViolation_ChannelRedefined dst :: !violations
+        else
+          channel_defs := Map.add dst (current_node ()) channel_defs
+
+    | SSend ch _ | SRecv _ ch ->
+        let ch_var = extract_var ch in
+        if not (Map.mem ch_var channel_defs) then
+          violations := SSAViolation_UseBeforeDef ch_var :: !violations;
+        if Set.mem ch_var channel_closed then
+          violations := SSAViolation_UseAfterClose ch_var :: !violations
+
+    | SChanClose ch ->
+        let ch_var = extract_var ch in
+        if Set.mem ch_var channel_closed then
+          violations := SSAViolation_DoubleClose ch_var :: !violations;
+        channel_closed := Set.add ch_var channel_closed
+
+    | SSelect cases default ->
+        (* Select creates a merge point for channel state.
+           After select, channel state depends on which case was taken.
+           This is analogous to phi for channel type state. *)
+        let merge_states = List.map (fun case ->
+          match case with
+          | SelectSend ch _ _ -> (extract_var ch, get_type_state ch)
+          | SelectRecv _ ch _ -> (extract_var ch, get_type_state ch)
+          | _ -> (fresh_var (), LTEnd)
+        ) cases in
+        (* Validate all cases lead to consistent merge state *)
+        validate_select_merge merge_states
+
+    | SSeq s1 s2 -> check_stmt s1; check_stmt s2
+    | SIf _ s1 s2 -> check_stmt s1; check_stmt s2
+    | SWhile _ body -> check_stmt body
+    | _ -> ()
+  in
+  check_stmt func.body;
+  !violations
+
+type ssa_violation =
+  | SSAViolation_ChannelRedefined : var_id -> ssa_violation
+  | SSAViolation_UseBeforeDef : var_id -> ssa_violation
+  | SSAViolation_UseAfterClose : var_id -> ssa_violation
+  | SSAViolation_DoubleClose : var_id -> ssa_violation
+  | SSAViolation_SelectMergeMismatch : list var_id -> ssa_violation
+\end{fstarcode}
+
+\begin{fstarcode}[title={Channel Type State Phi Node}]
+(* Channel type state phi node for select statements *)
+type chan_phi = {
+  dst_chan : var_id;
+  sources : list (block_id * local_session_type);
+  (* After select, channel has type that is the "meet" of branch types *)
+  merged_type : local_session_type;
+}
+
+(* Compute merged session type after select (conservative: use most permissive) *)
+val merge_session_types : list local_session_type -> local_session_type
+let rec merge_session_types types =
+  match types with
+  | [] -> LTEnd
+  | [t] -> t
+  | t1 :: t2 :: rest ->
+      let merged = match t1, t2 with
+        | LTEnd, _ -> LTEnd
+        | _, LTEnd -> LTEnd
+        | LTSend p1 c1, LTSend p2 c2 when p1 = p2 ->
+            LTSend p1 (merge_session_types [c1; c2])
+        | LTRecv p1 c1, LTRecv p2 c2 when p1 = p2 ->
+            LTRecv p1 (merge_session_types [c1; c2])
+        | LTSelect bs1, LTSelect bs2 ->
+            (* Merge: intersection of offered labels *)
+            let common = List.filter (fun (l, _) ->
+              List.exists (fun (l', _) -> l = l') bs2) bs1 in
+            LTSelect common
+        | LTBranch bs1, LTBranch bs2 ->
+            (* Merge: union of accepted labels *)
+            LTBranch (bs1 @ bs2)
+        | _, _ -> LTEnd  (* Incompatible types merge to end *)
+      in
+      merge_session_types (merged :: rest)
+\end{fstarcode}
+
+%--------------------------------------------------
+\section{Functions and Programs}
+\label{sec:ir-functions-programs}
+%--------------------------------------------------
+
+\begin{fstarcode}[title={IR Functions and Programs}]
+(* --------------------------------------------------
+   FUNCTIONS AND PROGRAMS
+   -------------------------------------------------- *)
+type ir_func = {
+  id : func_id;
+  name : string;
+  params : list (var_id * ir_type);
+  return_type : ir_type;
+  body : ir_stmt;
+  effect_sig : effect_signature;
+  is_public : bool;
+  source_lang : string;
+}
+
+type ir_program = {
+  functions : list ir_func;
+  globals : list (var_id * ir_type * option ir_expr);
+  entry : option func_id;
+  language : language_config;
+}
+\end{fstarcode}
+
+%==================================================
+\chapter{Semantic IR Principles for Interoperability}
+\label{ch:semantic-ir}
+%==================================================
+
+\textbf{Source}: \textbf{[Patterson22]} -- ``Semantic Soundness for Language Interoperability''
+
+\begin{pillarbox}[title={Semantic IR Design --- Patterson \& Ahmed 2022 (PLDI)}]
+\textbf{KEY INSIGHT}: Language interoperability is soundly achieved by COMPILATION to a common target language, with convertibility relations defining glue.
+
+\textbf{PROBLEM STATEMENT}:
+How can separately-compiled languages safely interoperate while PRESERVING source-level semantic properties (type safety, memory safety)?
+
+\textbf{SOLUTION FRAMEWORK}:
+\begin{enumerate}
+    \item \textbf{REALIZABILITY MODELS}: $\mathcal{V}\llbracket\tau\rrbracket$ = target terms that behave as source $\tau$
+    \item \textbf{CONVERTIBILITY}: $\tau_A \sim \tau_B$ iff types are interconvertible
+    \item \textbf{GLUE CODE}: Target-level conversion functions between representations
+    \item \textbf{SEMANTIC TYPE SOUNDNESS}: Source invariants preserved through compilation
+\end{enumerate}
+
+\textbf{CORE DEFINITIONS} (Patterson Section 3):
+
+\textbf{REALIZABILITY INTERPRETATION} (Definition 3.1):
+\[
+\mathcal{V}\llbracket\tau\rrbracket = \{\text{target\_terms} \mid \text{they satisfy the source type's behavioral spec}\}
+\]
+Example: $\mathcal{V}\llbracket\TInt\rrbracket = \{0, 1, -1, 2, \ldots\}$ target integers \\
+\hspace*{2.3em} $\mathcal{V}\llbracket\TInt \to \TInt\rrbracket = \{\text{target closures that map ints to ints}\}$
+
+\textbf{CONVERTIBILITY RELATION} (Definition 3.3):
+$\tau_A \sim \tau_B$ means there exists target-level glue code that:
+\begin{itemize}
+    \item Converts $\mathcal{V}\llbracket\tau_A\rrbracket$ to $\mathcal{V}\llbracket\tau_B\rrbracket$ (AtoB direction)
+    \item Converts $\mathcal{V}\llbracket\tau_B\rrbracket$ to $\mathcal{V}\llbracket\tau_A\rrbracket$ (BtoA direction)
+    \item Preserves semantic properties (no UB introduced)
+\end{itemize}
+
+\textbf{SEMANTIC TYPE SOUNDNESS} (Theorem 3.5):
+If source program is well-typed, then:
+\begin{itemize}
+    \item Compiled target program preserves source invariants
+    \item Cross-language calls via glue code maintain type safety
+    \item Memory safety violations in source are detected (not introduced)
+\end{itemize}
+
+\textbf{CASE STUDIES} (Patterson Section 5):
+\begin{enumerate}
+    \item Shared memory: $\text{ptr}_A \sim \text{ptr}_B$ via pointer coercion
+    \item Affine/unrestricted: $\text{affine} \sim \text{linear}$ via drop tracking
+    \item GC/manual: $\text{gc\_ptr} \sim \text{raw\_ptr}$ via root registration
+\end{enumerate}
+
+\textbf{APPLICATION TO BRRR-MACHINE IR}:
+The IR serves as the ``target language'' for interoperability.
+Source languages compile to IR preserving their semantic properties.
+Cross-language boundaries are EXPLICIT IR nodes with convertibility specs.
+\end{pillarbox}
+
+%--------------------------------------------------
+\section{Realizability Models}
+\label{sec:realizability-models}
+%--------------------------------------------------
+
+Realizability models formalize the semantic meaning of types across language boundaries.
+Following Patterson \& Ahmed (2022), we define $\mathcal{V}\llbracket\tau\rrbracket$ as the
+set of IR values that ``behave as'' source type $\tau$. This provides the theoretical
+foundation for:
+\begin{itemize}
+    \item \textbf{Type-safe interoperability}: Values crossing language boundaries satisfy target type semantics
+    \item \textbf{Glue code correctness}: Conversion functions preserve behavioral specifications
+    \item \textbf{Sound compilation}: Source-level type invariants are preserved through compilation to IR
+\end{itemize}
+
+The \texttt{realizability\_model} record captures three essential components: type interpretation
+as a predicate on values, soundness evidence linking interpretation to type safety, and
+language-specific compatibility rules.
+
+\begin{fstarcode}[title={Semantic IR for Language Interoperability}]
+(* ==================================================
+   SEMANTIC IR FOR LANGUAGE INTEROPERABILITY
+   Source: Patterson & Ahmed 2022, Section 3
+
+   Formalize IR as a semantic target language where source properties
+   are preserved through compilation via realizability models.
+   ================================================== *)
+
+module BrrrMachine.SemanticIR
+
+(* --------------------------------------------------
+   REALIZABILITY MODELS
+   V[tau] defines the set of IR values that "behave as" source type tau
+   -------------------------------------------------- *)
+
+(* Semantic interpretation of types as sets of IR values *)
+type realizability_model (source_lang : language_id) = {
+  (* Interpret a source type as a predicate on IR values *)
+  interpret : ir_type -> (ir_value -> bool);
+
+  (* Evidence that interpretation is sound *)
+  soundness : forall tau v.
+    interpret tau v ==> ir_value_safe_at_type v tau;
+
+  (* Language-specific type compatibility *)
+  compatible : ir_type -> ir_type -> bool;
+}
+\end{fstarcode}
+
+\begin{fstarcode}[title={Rust Realizability Model}]
+(* Build realizability model for each supported language *)
+val rust_realizability : realizability_model
+let rust_realizability = {
+  interpret = (fun tau v -> match tau, v with
+    (* Rust integers are exact-width *)
+    | TInt I32 true, VInt i I32 -> Int.fits_i32 i
+    | TInt I64 true, VInt i I64 -> Int.fits_i64 i
+
+    (* Rust references are non-null and point to valid memory *)
+    | TRef pointee, VRef ptr ->
+        ptr <> null && valid_memory ptr (size_of pointee)
+
+    (* Rust Options use discriminant tag *)
+    | TOption inner, VVariant "Option" "Some" v -> interpret inner v
+    | TOption _, VVariant "Option" "None" VUnit -> true
+
+    | _, _ -> false
+  );
+  soundness = (fun tau v -> assume_rust_type_soundness tau v);
+  compatible = rust_type_compatible;
+}
+\end{fstarcode}
+
+The Rust realizability model above demonstrates how language-specific semantics are captured:
+\texttt{TInt I32 true} (signed 32-bit integer) realizes only values that fit in the i32 range;
+\texttt{TRef} requires non-null pointers to valid memory; \texttt{TOption} maps to Rust's
+\texttt{Option<T>} with discriminant tags. Each language defines its own model reflecting
+its type semantics.
+
+\begin{fstarcode}[title={Python Realizability Model}]
+(* Python's dynamic typing means most values realize TAny *)
+val python_realizability : realizability_model
+let python_realizability = {
+  interpret = (fun tau v -> match tau, v with
+    (* Python int is arbitrary precision *)
+    | TInt IBigInt _, VInt _ _ -> true
+
+    (* Python None is singleton *)
+    | TOption _, VNone -> true
+    | TOption inner, v -> interpret inner v
+
+    (* Python objects are always heap-allocated *)
+    | TAny, _ -> true
+
+    | _, _ -> false
+  );
+  soundness = (fun tau v -> assume_python_gc_safety tau v);
+  compatible = python_type_compatible;
+}
+\end{fstarcode}
+
+%--------------------------------------------------
+\section{Convertibility Relations}
+\label{sec:convertibility-relations}
+%--------------------------------------------------
+
+Convertibility relations define when types from different languages can be safely interconverted.
+The relation $\tau_A \sim \tau_B$ holds when there exist bidirectional conversion functions
+(``glue code'') that preserve semantic properties. This is the theoretical foundation for
+FFI type checking and automatic marshalling.
+
+The \texttt{convertibility} record captures:
+\begin{itemize}
+    \item Source and target types with their respective languages
+    \item Bidirectional conversion expressions (\texttt{convert\_AtoB}, \texttt{convert\_BtoA})
+    \item Soundness proofs that conversions preserve realizability
+\end{itemize}
+
+\begin{fstarcode}[title={Convertibility Definition}]
+(* --------------------------------------------------
+   CONVERTIBILITY RELATIONS
+   tau_A ~ tau_B iff there exists sound glue code between them
+   -------------------------------------------------- *)
+
+type convertibility = {
+  source_type : ir_type;
+  target_type : ir_type;
+  source_lang : language_id;
+  target_lang : language_id;
+
+  (* Glue code for conversion *)
+  convert_AtoB : ir_expr;  (* Convert source to target *)
+  convert_BtoA : ir_expr;  (* Convert target to source *)
+
+  (* Soundness evidence *)
+  sound_AtoB : forall v.
+    realizes source_lang source_type v ==>
+    realizes target_lang target_type (eval convert_AtoB v);
+
+  sound_BtoA : forall v.
+    realizes target_lang target_type v ==>
+    realizes source_lang source_type (eval convert_BtoA v);
+}
+\end{fstarcode}
+
+\begin{fstarcode}[title={Establishing Convertibility Between Language Types}]
+(* Establish convertibility between language types *)
+val establish_convertibility :
+  source_lang : language_id ->
+  target_lang : language_id ->
+  source_type : ir_type ->
+  target_type : ir_type ->
+  option convertibility
+
+let establish_convertibility src_lang tgt_lang src_ty tgt_ty =
+  match (src_lang, tgt_lang, src_ty, tgt_ty) with
+
+  (* Rust<->C: integers are directly compatible *)
+  | (Rust, C, TInt w1 s1, TInt w2 s2) when w1 = w2 && s1 = s2 ->
+      Some {
+        source_type = src_ty;
+        target_type = tgt_ty;
+        source_lang = Rust;
+        target_lang = C;
+        convert_AtoB = ELambda [("x", src_ty)] (EVar "x") [];  (* Identity *)
+        convert_BtoA = ELambda [("x", tgt_ty)] (EVar "x") [];
+        sound_AtoB = int_identity_sound w1 s1;
+        sound_BtoA = int_identity_sound w1 s1;
+      }
+
+  (* Rust<->C: pointers require null check on Rust side *)
+  | (Rust, C, TRef pointee, TPtr pointee') when pointee = pointee' ->
+      Some {
+        source_type = src_ty;
+        target_type = tgt_ty;
+        source_lang = Rust;
+        target_lang = C;
+        (* Rust ref to C ptr: direct cast (always non-null) *)
+        convert_AtoB = ELambda [("x", src_ty)]
+          (ECast (EVar "x") tgt_ty) [];
+        (* C ptr to Rust ref: must check non-null *)
+        convert_BtoA = ELambda [("x", tgt_ty)]
+          (EIf (ECmp OpNe (EVar "x") ENull)
+               (ECast (EVar "x") src_ty)
+               (ECall (EVar "panic") [EString "null ptr"])) [];
+        sound_AtoB = rust_ref_to_c_ptr_sound pointee;
+        sound_BtoA = c_ptr_to_rust_ref_sound pointee;
+      }
+
+  (* Python<->Rust: requires boxing/unboxing *)
+  | (Python, Rust, TAny, TInt I64 true) ->
+      Some {
+        source_type = TAny;
+        target_type = TInt I64 true;
+        source_lang = Python;
+        target_lang = Rust;
+        (* Python any to Rust i64: runtime type check + extract *)
+        convert_AtoB = ELambda [("x", TAny)]
+          (ECall (EVar "PyLong_AsLongLong") [EVar "x"]) [];
+        (* Rust i64 to Python any: box into PyObject *)
+        convert_BtoA = ELambda [("x", TInt I64 true)]
+          (ECall (EVar "PyLong_FromLongLong") [EVar "x"]) [];
+        sound_AtoB = python_int_extract_sound;
+        sound_BtoA = python_int_box_sound;
+      }
+
+  (* GC<->Manual memory: Patterson Case Study 3 *)
+  | (lang_gc, lang_manual, TRef pointee, TPtr pointee')
+    when is_gc_language lang_gc && is_manual_language lang_manual
+         && pointee = pointee' ->
+      Some {
+        source_type = src_ty;
+        target_type = tgt_ty;
+        source_lang = lang_gc;
+        target_lang = lang_manual;
+        (* GC ref to manual ptr: register as GC root *)
+        convert_AtoB = ELambda [("x", src_ty)]
+          (ESeq
+            (ECall (EVar "gc_register_root") [EAddr (EVar "x")])
+            (ECast (EVar "x") tgt_ty)) [];
+        (* Manual ptr to GC ref: verify not dangling, adopt into GC *)
+        convert_BtoA = ELambda [("x", tgt_ty)]
+          (ECall (EVar "gc_adopt_external") [EVar "x"]) [];
+        sound_AtoB = gc_to_manual_sound lang_gc pointee;
+        sound_BtoA = manual_to_gc_sound lang_manual pointee;
+      }
+
+  | _ -> None  (* No automatic convertibility *)
+\end{fstarcode}
+
+%--------------------------------------------------
+\section{Semantic Type Soundness for Cross-Language Calls}
+\label{sec:semantic-type-soundness}
+%--------------------------------------------------
+
+\begin{fstarcode}[title={Cross-Language Call Definition}]
+(* --------------------------------------------------
+   SEMANTIC TYPE SOUNDNESS FOR CROSS-LANGUAGE CALLS
+   -------------------------------------------------- *)
+
+(* Cross-language call with convertibility specification *)
+type cross_lang_call = {
+  caller_lang : language_id;
+  callee_lang : language_id;
+  callee_func : func_id;
+  arg_conversions : list convertibility;
+  ret_conversion : convertibility;
+  call_site : node_id;
+}
+\end{fstarcode}
+
+\begin{fstarcode}[title={Verify Semantic Soundness of Cross-Language Calls}]
+(* Verify semantic soundness of cross-language call *)
+val verify_cross_lang_soundness :
+  call : cross_lang_call ->
+  caller_state : abstract_state ->
+  callee_contract : ffi_contract ->
+  result (abstract_state, list semantic_violation)
+
+let verify_cross_lang_soundness call caller_state contract =
+  (* Phase 1: Verify all argument conversions are sound *)
+  let arg_violations = List.filter_map (fun conv ->
+    if not conv.sound_AtoB then
+      Some (UnsoundArgConversion conv.source_type conv.target_type)
+    else
+      None
+  ) call.arg_conversions in
+
+  (* Phase 2: Verify preconditions hold after conversion *)
+  let converted_args = List.map2 (fun arg conv ->
+    apply_conversion conv.convert_AtoB arg
+  ) (get_args caller_state) call.arg_conversions in
+
+  let precond_violations = verify_ffi_preconditions
+    converted_args contract.precondition in
+
+  (* Phase 3: Apply callee effects and convert return value *)
+  let callee_post_state = apply_ffi_effects
+    caller_state contract.effect_bounds in
+
+  let return_conversion_sound =
+    call.ret_conversion.sound_BtoA in
+
+  let final_state = if return_conversion_sound then
+    apply_conversion call.ret_conversion.convert_BtoA callee_post_state
+  else
+    callee_post_state (* Return type error *) in
+
+  (* Phase 4: Collect all violations *)
+  let all_violations = arg_violations @
+    precond_violations @
+    (if return_conversion_sound then [] else [UnsoundReturnConversion]) in
+
+  if List.is_empty all_violations then
+    Ok final_state
+  else
+    Error (final_state, all_violations)
+
+type semantic_violation =
+  | UnsoundArgConversion of ir_type * ir_type
+  | UnsoundReturnConversion
+  | RealizabilityViolation of ir_value * ir_type
+  | GlueCodeFailure of string
+\end{fstarcode}
+
+%--------------------------------------------------
+\section{IR Annotations for Semantic Properties}
+\label{sec:ir-semantic-annotations}
+%--------------------------------------------------
+
+\begin{fstarcode}[title={Semantic Annotations for IR Nodes}]
+(* --------------------------------------------------
+   IR ANNOTATIONS FOR SEMANTIC PROPERTIES
+   Mark IR nodes with semantic preservation requirements
+   -------------------------------------------------- *)
+
+(* Extend IR annotations for semantic IR *)
+type semantic_annotation =
+  | AnnRealizesType of ir_type * language_id
+      (* Value realizes source type in language *)
+  | AnnConvertible of convertibility
+      (* Conversion is semantically sound *)
+  | AnnPreservesInvariant of string
+      (* Code preserves named source invariant *)
+  | AnnBoundaryGlue of cross_lang_call
+      (* This is glue code for cross-language call *)
+\end{fstarcode}
+
+%--------------------------------------------------
+\section{Integration with Boundary Analysis}
+\label{sec:semantic-ir-integration}
+%--------------------------------------------------
+
+\begin{pillarbox}[title={Integration with Part IX Boundary Analysis}]
+Semantic IR connects to boundary detection and FFI contracts through the following integration flow:
+
+\textbf{1. Boundary Detection} (Section~\ref{sec:boundary-detection}):
+When \texttt{BoundaryFFI} edge is found, create \texttt{cross\_lang\_call} record.
+
+\textbf{2. Convertibility Establishment} (Section~\ref{sec:ffi-contract-synthesis}):
+For each arg/return type pair, \texttt{establish\_convertibility}.
+If \texttt{None}, report as type mismatch.
+
+\textbf{3. Glue Code Generation} (Section~\ref{sec:boundary-guards}):
+Generate guards from convertibility's \texttt{convert\_AtoB}/\texttt{convert\_BtoA}.
+Guards implement the runtime checks for conversion.
+
+\textbf{4. Semantic Verification}:
+\texttt{verify\_cross\_lang\_soundness} ensures:
+\begin{itemize}
+    \item All conversions are sound (soundness evidence exists)
+    \item Preconditions hold post-conversion
+    \item Return value correctly converted back
+\end{itemize}
+
+\textbf{5. FFI Contract Synthesis} (Section~\ref{sec:furr-type-inference}):
+Furr's type inference infers representational types.
+Patterson's convertibility validates inferred specs.
+Combined: inferred types + semantic soundness proofs.
+
+\textbf{CROSS-REFERENCES}:
+\begin{itemize}
+    \item Section~\ref{sec:representation-predicates} (Representation Predicates): \texttt{rep\_predicate} connects to realizability interpretation $\mathcal{V}\llbracket\tau\rrbracket$
+    \item Section~\ref{sec:boundary-risk} (Boundary Risk): convertibility failure = high risk
+    \item Sections~\ref{sec:ffi-contracts-preconditions}--\ref{sec:ffi-contracts-type-errors} (FFI Contracts): contracts specify what convertibility must establish
+    \item Section~\ref{sec:furr-type-inference} (Furr 2008): representational types align with Patterson's target-level type interpretation
+\end{itemize}
+\end{pillarbox}

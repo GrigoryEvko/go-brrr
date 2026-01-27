@@ -428,7 +428,7 @@ val advance_recv : ch:channel_endpoint -> option channel_endpoint
 val lookup_branch : lbl:label -> branches:list (label & session_type) -> option session_type
 
 (* Select a labeled branch on internal choice *)
-val select_branch : ch:channel_endpoint -> lbl:label -> option channel_endpoint
+val select_labeled_branch : ch:channel_endpoint -> lbl:label -> option channel_endpoint
 
 (* Offer a branch on external choice *)
 val offer_branch : ch:channel_endpoint -> lbl:label -> option channel_endpoint

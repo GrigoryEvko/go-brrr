@@ -828,7 +828,7 @@ let rec lookup_branch (lbl: label) (branches: list (label & session_type))
   | (l, s) :: rest -> if l = lbl then Some s else lookup_branch lbl rest
 
 (* Select a labeled branch on internal choice *)
-let select_branch (ch: channel_endpoint) (lbl: label) : option channel_endpoint =
+let select_labeled_branch (ch: channel_endpoint) (lbl: label) : option channel_endpoint =
   match ch.ch_session with
   | SSelect branches ->
       (match lookup_branch lbl branches with

@@ -187,6 +187,12 @@ val extend : var_id -> value -> env -> env
     Later bindings in the list shadow earlier ones. *)
 val extend_many : list (var_id & value) -> env -> env
 
+(** extend_many with singleton list equals extend.
+    This is used in let-binding proofs. *)
+val extend_many_singleton : x:var_id -> v:value -> e:env ->
+    Lemma (ensures extend_many [(x, v)] e == extend x v e)
+    [SMTPat (extend_many [(x, v)] e)]
+
 (** Remove variable from environment.
     Removes all bindings for the given variable. *)
 val remove : var_id -> env -> env
@@ -260,6 +266,9 @@ val bind : #a:Type -> #b:Type -> result a -> (a -> result b) -> result b
 
 (** Map function over result *)
 val map_result : #a:Type -> #b:Type -> (a -> b) -> result a -> result b
+
+(** Extract value from ROk result. Requires ROk? r as precondition. *)
+val result_value : #a:Type -> r:result a{ROk? r} -> a
 
 (** ============================================================================
     STATE TYPE AND MONAD
@@ -585,6 +594,12 @@ val field_pattern_list_size : list (string & pattern) -> Tot nat
     expression evaluation context.
 *)
 val match_pattern : pattern -> value -> Tot match_result
+
+(** PatVar patterns always match and bind the value.
+    This is a fundamental property used in let-binding proofs. *)
+val match_pattern_patvar : x:var_id -> v:value ->
+    Lemma (ensures match_pattern (locate_dummy (PatVar x)) v == Some [(x, v)])
+    [SMTPat (match_pattern (locate_dummy (PatVar x)) v)]
 
 (** Match multiple patterns against multiple values *)
 val match_patterns : list pattern -> list value -> Tot match_result

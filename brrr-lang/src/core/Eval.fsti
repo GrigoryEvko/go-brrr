@@ -292,22 +292,6 @@ val eval_unary_int : unary_op -> int -> option int
 (** Evaluate unary operation on boolean *)
 val eval_unary_bool : unary_op -> bool -> option bool
 
-(** Evaluate binary operation on integers.
-    Returns None for division by zero or overflow. *)
-val eval_binary_int : binary_op -> int -> int -> option value
-
-(** Evaluate binary operation on booleans *)
-val eval_binary_bool : binary_op -> bool -> bool -> option value
-
-(** Evaluate binary operation on strings *)
-val eval_binary_string : binary_op -> string -> string -> option value
-
-(** High-level unary operation evaluator *)
-val do_unary : unary_op -> value -> result value
-
-(** High-level binary operation evaluator *)
-val do_binary : binary_op -> value -> value -> result value
-
 (** ============================================================================
     BITWISE OPERATIONS - 64-bit signed integer semantics
     ============================================================================
@@ -316,6 +300,8 @@ val do_binary : binary_op -> value -> value -> result value
     Values must be within the 64-bit signed integer range [-2^63, 2^63-1].
     Out-of-range values return None (runtime error).
     Shift amounts must be in [0, 63] range.
+
+    NOTE: These must be declared before eval_binary_int since it uses them.
 *)
 
 (** Safely convert int to Int64.t with bounds check *)
@@ -338,6 +324,23 @@ val eval_shift_left : int -> int -> option value
 
 (** Arithmetic right shift *)
 val eval_shift_right : int -> int -> option value
+
+(** Evaluate binary operation on integers.
+    Returns None for division by zero or overflow.
+    Uses bitwise operations above for OpBitAnd, OpBitOr, etc. *)
+val eval_binary_int : binary_op -> int -> int -> option value
+
+(** Evaluate binary operation on booleans *)
+val eval_binary_bool : binary_op -> bool -> bool -> option value
+
+(** Evaluate binary operation on strings *)
+val eval_binary_string : binary_op -> string -> string -> option value
+
+(** High-level unary operation evaluator *)
+val do_unary : unary_op -> value -> result value
+
+(** High-level binary operation evaluator *)
+val do_binary : binary_op -> value -> value -> result value
 
 (** ============================================================================
     RUNTIME TYPE EXTRACTION
@@ -385,6 +388,11 @@ val list_update : #a:Type -> list a -> nat -> a -> Tot (list a)
     These functions are mutually recursive and form the core of the evaluator.
 *)
 
+(** Apply function value to arguments.
+    NOTE: Must be declared first in mutual recursion to match Eval.fst order. *)
+val eval_apply : (fuel: nat) -> value -> list value -> eval_state ->
+    Tot (result value & eval_state) (decreases fuel)
+
 (** Main expression evaluator.
 
     Evaluates expression e in state st with given fuel.
@@ -402,10 +410,6 @@ val eval_exprs : (fuel: nat) -> list expr -> eval_state ->
 (** Evaluate struct field expressions *)
 val eval_field_exprs : (fuel: nat) -> list (string & expr) -> eval_state ->
     Tot (result (list (string & value)) & eval_state) (decreases fuel)
-
-(** Apply function value to arguments *)
-val eval_apply : (fuel: nat) -> value -> list value -> eval_state ->
-    Tot (result value & eval_state) (decreases fuel)
 
 (** Evaluate match arms until one matches *)
 val eval_match_arms : (fuel: nat) -> value -> list match_arm -> eval_state ->
@@ -518,20 +522,6 @@ val eval_fuel_monotonic : fuel1:nat -> fuel2:nat{fuel2 >= fuel1} -> e:expr -> st
             let (r2, st2) = eval_expr fuel2 e st in
             r1 == r2 /\ st1 == st2))
 
-(** Fuel monotonicity: adding fuel preserves successful results.
-    SMTPat enables automatic application by Z3. *)
-val eval_fuel_monotone : fuel:nat -> k:nat -> e:expr -> st:eval_state ->
-    Lemma (requires ROk? (fst (eval_expr fuel e st)))
-          (ensures eval_expr (fuel + k) e st == eval_expr fuel e st)
-    [SMTPat (eval_expr (fuel + k) e st)]
-
-(** Fuel sufficiency: if we don't diverge, more fuel gives same result. *)
-val eval_fuel_sufficient : fuel1:nat -> fuel2:nat -> e:expr -> st:eval_state ->
-    Lemma (requires fuel2 >= fuel1 /\ ~(RDiv? (fst (eval_expr fuel1 e st))))
-          (ensures fst (eval_expr fuel2 e st) == fst (eval_expr fuel1 e st))
-
-#pop-options
-
 (** Sufficient fuel axiom.
 
     For any expression that would terminate with infinite fuel, there exists
@@ -548,7 +538,7 @@ val eval_ok_not_div : fuel:nat -> e:expr -> st:eval_state ->
           (ensures ~(RDiv? (fst (eval_expr fuel e st))))
 
 (** ----------------------------------------------------------------------------
-    TYPE PRESERVATION
+    TYPE PRESERVATION (before fuel monotonicity to match Eval.fst order)
     ---------------------------------------------------------------------------- *)
 
 (** Type preservation: evaluation preserves types.
@@ -561,7 +551,21 @@ val eval_preserves_type : fuel:nat -> e:expr -> st:eval_state ->
                           gamma:typing_env -> t:brrr_type ->
     Lemma (requires well_typed e gamma t)
           (ensures (let (r, st') = eval_expr fuel e st in
-                    ROk? r ==> value_well_typed (ROk?.v r) st'.es_heap t))
+                    ROk? r ==> value_well_typed (result_value r) st'.es_heap t))
+
+(** Fuel monotonicity: adding fuel preserves successful results.
+    SMTPat enables automatic application by Z3. *)
+val eval_fuel_monotone : fuel:nat -> k:nat -> e:expr -> st:eval_state ->
+    Lemma (requires ROk? (fst (eval_expr fuel e st)))
+          (ensures eval_expr (fuel + k) e st == eval_expr fuel e st)
+    [SMTPat (eval_expr (fuel + k) e st)]
+
+(** Fuel sufficiency: if we don't diverge, more fuel gives same result. *)
+val eval_fuel_sufficient : fuel1:nat -> fuel2:nat -> e:expr -> st:eval_state ->
+    Lemma (requires fuel2 >= fuel1 /\ ~(RDiv? (fst (eval_expr fuel1 e st))))
+          (ensures fst (eval_expr fuel2 e st) == fst (eval_expr fuel1 e st))
+
+#pop-options
 
 (** ----------------------------------------------------------------------------
     CLOSED TERM EVALUATION
@@ -736,14 +740,14 @@ val effect_subset : effect_row -> effect_row -> bool
 val eval_async_creates_pending : fuel:nat -> body:expr -> st:eval_state ->
     Lemma (requires fuel >= 1)
           (ensures (let (r, _) = eval_expr fuel (mk_expr_dummy (EAsync body)) st in
-                    ROk? r ==> VFuture? (ROk?.v r) /\
-                               RFutPending? (VFuture?._0 (ROk?.v r))))
+                    ROk? r ==> VFuture? (result_value r) /\
+                               RFutPending? (VFuture?._0 (result_value r))))
 
 (** spawn evaluates body and creates resolved/failed future *)
 val eval_spawn_evaluates : fuel:nat -> body:expr -> st:eval_state ->
     Lemma (requires fuel >= 2)
           (ensures (let (r, _) = eval_expr fuel (mk_expr_dummy (ESpawn body)) st in
-                    ROk? r ==> VFuture? (ROk?.v r)))
+                    ROk? r ==> VFuture? (result_value r)))
 
 (** ============================================================================
     DELIMITED CONTINUATION SPECIFICATIONS
@@ -770,7 +774,7 @@ val eval_reset_value : fuel:nat -> lbl:label -> body:expr -> st:eval_state -> v:
 *)
 
 (** Configuration: expression + state *)
-noeq type config = expr & eval_state
+type config = expr & eval_state
 
 (** Single-step reduction relation (declarative).
     Implemented as a relation, not a function, for flexibility. *)
@@ -800,7 +804,7 @@ val step_deterministic : c:config -> c1:config -> c2:config ->
 val type_safety : fuel:nat -> e:expr -> st:eval_state -> gamma:typing_env -> t:brrr_type ->
     Lemma (requires well_typed e gamma t /\ fuel > 0)
           (ensures (let (r, st') = eval_expr fuel e st in
-                    (ROk? r ==> value_well_typed (ROk?.v r) st'.es_heap t) /\
+                    (ROk? r ==> value_well_typed (result_value r) st'.es_heap t) /\
                     (r == RDiv \/ ROk? r \/ RErr? r \/ RBreak? r \/ RCont? r \/
                      RRet? r \/ RYield? r \/ RPerform? r \/ RAbort? r)))
 

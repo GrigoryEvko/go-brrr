@@ -268,19 +268,7 @@ test-output/
 # Research papers and documentation (large files)
 brrr-machine/papers/
 brrr-machine/reviews/
-brrr-machine/synthesis/
 
-# =============================================================================
-# TEST DATA AND FFI FIXTURES
-# =============================================================================
-
-# Test project data (cloned repos for testing - large, regenerated)
-data/projects/
-**/data/projects/
-
-# FFI test fixtures (external code)
-data/ffi/
-**/data/ffi/
 
 # =============================================================================
 # F* SMT QUERY DUMPS

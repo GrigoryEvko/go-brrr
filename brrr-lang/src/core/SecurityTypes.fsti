@@ -206,29 +206,6 @@ val sec_label_leq_trans : l1:sec_label -> l2:sec_label -> l3:sec_label ->
         (ensures sec_label_leq l1 l3 = true)
 
 (** ============================================================================
-    TAINT SET UNION LEMMAS
-    ============================================================================ *)
-
-(** taint_set_union includes left operand *)
-val taint_set_union_includes_left : k:taint_kind -> ks1:taint_set -> ks2:taint_set ->
-  Lemma (requires taint_in_set k ks1 = true)
-        (ensures taint_in_set k (taint_set_union ks1 ks2) = true)
-        (decreases ks1)
-
-(** taint_set_union includes right operand *)
-val taint_set_union_includes_right : k:taint_kind -> ks1:taint_set -> ks2:taint_set ->
-  Lemma (requires taint_in_set k ks2 = true)
-        (ensures taint_in_set k (taint_set_union ks1 ks2) = true)
-        (decreases ks1)
-
-(** taint_set_union preserves left operand as subset: ts1 subset (union ts1 ts2)
- *  This is the set-theoretic property: A subseteq (A union B)
- *)
-val taint_set_union_subset_left : ts1:taint_set -> ts2:taint_set ->
-  Lemma (ensures taint_set_subset ts1 (taint_set_union ts1 ts2) = true)
-        (decreases ts1)
-
-(** ============================================================================
     LATTICE LAW LEMMAS - ANTISYMMETRY
     ============================================================================ *)
 
