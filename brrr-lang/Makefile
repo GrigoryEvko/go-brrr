@@ -13,7 +13,7 @@ OUTPUT_DIR = _output
 CACHE_DIR  = _cache
 
 # Source directories (add more as needed)
-SOURCE_DIRS = src/core
+SOURCE_DIRS = src/core src/translation src/axioms src/theorems tests
 
 # ============================================================================
 # F* FLAGS
@@ -46,7 +46,7 @@ SMT_OPTIONS = \
 FSTAR_FLAGS = \
   --cache_dir $(CACHE_DIR) \
   --odir $(OUTPUT_DIR) \
-  --warn_error -321 \
+  --warn_error -271 \
   $(SMT_OPTIONS) \
   $(FSTAR_INCLUDES)
 

@@ -1,17 +1,53 @@
 (**
  * BrrrLang.Core.Types
  *
- * Complete type system for Brrr-Lang IR.
- * Based on brrr_lang_spec_v0.4.tex Parts II-III.
+ * Complete type system for Brrr-Lang IR with gradual typing support.
+ * Based on brrr_lang_spec_v0.4.tex Parts II-III, Section 3 (Type System).
+ *
+ * KEY DESIGN DECISIONS:
+ *
+ * 1. GRADUAL TYPING (Siek & Taha 2006, "Gradual Typing for Functional Languages")
+ *    This module implements a hybrid static/dynamic type system where:
+ *    - Static types are checked at compile time (most types)
+ *    - Dynamic types defer checking to runtime (PDynamic, PUnknown)
+ *    - The consistency relation (~) replaces strict equality for type checking
+ *    - Casts are inserted at static/dynamic boundaries
+ *
+ *    The "gradual guarantee" ensures:
+ *    - Adding type annotations never causes runtime failures
+ *    - Removing type annotations never introduces new compile-time errors
+ *
+ * 2. SMT TRACTABILITY OPTIMIZATION
+ *    Original design had 27 type constructors, but Z3 transitivity proofs
+ *    require O(n^3) case analysis. We group related types under discriminators:
+ *    - 7 primitives -> 1 TPrim constructor with prim_kind discriminator
+ *    - 9 wrappers -> 1 TWrap constructor with wrapper_kind discriminator
+ *    - Result: 27^3 = 19,683 -> 12^3 = 1,728 cases (91% reduction)
+ *
+ * 3. DUAL TOP TYPES: PDynamic vs PUnknown
+ *    - PDynamic: UNSAFE top type (like TypeScript's 'any')
+ *      * Any operation allowed without runtime checks
+ *      * Used for FFI boundaries, unsafe code blocks
+ *      * Subtyping: forall T. T <: Dynamic
+ *    - PUnknown: SAFE top type for gradual typing (like TypeScript's 'unknown')
+ *      * Operations require explicit type guards/narrowing
+ *      * Used for unknown data from external sources
+ *      * Subtyping: forall T. T <: Unknown, but NOT Unknown <: T
+ *
+ * REFERENCES:
+ *   - Siek & Taha 2006: "Gradual Typing for Functional Languages" (Scheme Workshop)
+ *   - Garcia et al. 2016: "Abstracting Gradual Typing" (POPL)
+ *   - HACL-star: Lib.IntTypes for verified integer types
+ *   - EverParse: with_meta_t pattern for source location tracking
  *
  * Depends on: Primitives, Modes, Effects
  *)
 module BrrrTypes
 
-open Primitives
-open Modes
-open Effects
-open Utils  (* Shared utilities - zip_lists, option combinators, etc. *)
+open BrrrPrimitives
+open BrrrModes
+open BrrrEffects
+open BrrrUtils  (* Shared utilities - zip_lists, option combinators, etc. *)
 open FStar.List.Tot
 open FStar.Classical
 
@@ -32,7 +68,7 @@ open FStar.Classical
     - type_range: A span from start to end position
     - with_type_loc: A wrapper that attaches location to any type
 
-    Note: Expressions.fst has its own pos/range for expression-level tracking.
+    Note: BrrrExpressions.fst has its own pos/range for expression-level tracking.
     These type-level locations are for type definitions, type errors, etc.
     ============================================================================ *)
 
@@ -155,19 +191,73 @@ type type_id = nat
     These discriminator types group related type variants under fewer top-level
     constructors. This reduces Z3 proof complexity from 27^3 = 19,683 combinations
     to 12^3 = 1,728 combinations for transitivity proofs.
+
+    The discriminator pattern follows HACL-star's approach in Lib.IntTypes where
+    inttype groups (U8, U16, U32, U64, S8, S16, S32, S64) under one type with
+    a width/sign discriminator.
     ============================================================================ *)
 
-(* Primitive type kinds - 7 variants combined into 1 constructor *)
+(** PRIMITIVE TYPE KINDS - 7 variants combined into 1 TPrim constructor
+
+    These are the "atomic" types that don't contain other types.
+
+    TYPE LATTICE POSITION:
+    - PNever (bottom): Uninhabited type, subtype of all types. Used for:
+      * Diverging computations (infinite loops, panics)
+      * Exhaustive match arms that prove a case is impossible
+    - PUnit (singleton): Single value (), used for side-effectful returns
+    - PBool/PString/PChar: Standard value types
+    - PDynamic/PUnknown (top types): See detailed documentation below
+
+    GRADUAL TYPING SEMANTICS (Siek & Taha 2006):
+    The type system supports gradual typing via two top types:
+
+    1. PDynamic - The UNSAFE top type (equivalent to TypeScript's 'any')
+       - Consistency: Dynamic ~ T for all T (bidirectional)
+       - Semantics: Operations on Dynamic values are UNCHECKED at compile time
+       - Use cases:
+         * FFI boundaries with untyped languages (C, JavaScript)
+         * Legacy code migration where full typing is impractical
+         * Unsafe blocks where programmer asserts correctness
+       - WARNING: Dynamic defeats the type system's safety guarantees!
+         A Dynamic value can be used as any type without runtime checks.
+
+    2. PUnknown - The SAFE top type (equivalent to TypeScript's 'unknown')
+       - Consistency: T ~ Unknown for all T, but Unknown ~/~ T (one-directional)
+       - Semantics: Operations on Unknown values REQUIRE type narrowing
+       - Use cases:
+         * User input that needs validation before use
+         * Deserialized data from external sources
+         * Generic containers with heterogeneous contents
+       - Safety: Unknown values cannot be used directly; they must be:
+         * Type-guarded: if (x instanceof T) { use x as T }
+         * Type-cast: x as T (inserts runtime check)
+         * Pattern-matched: match x { T y => ... }
+
+    SUBTYPING RULES:
+      forall T. Never <: T         -- Never is bottom
+      forall T. T <: Dynamic       -- Dynamic is unsafe top
+      forall T. T <: Unknown       -- Unknown is safe top
+      NOT: Unknown <: T            -- Unknown requires narrowing
+      Dynamic <: Unknown           -- Dynamic can become Unknown
+
+    The key difference: Dynamic allows IMPLICIT coercion to any type,
+    while Unknown requires EXPLICIT type evidence before use.
+
+    Reference: brrr_lang_spec_v0.4.tex, Section "Dynamic Type" and "Unknown Type"
+*)
 type prim_kind =
-  | PUnit   : prim_kind   (* () - unit type *)
-  | PNever  : prim_kind   (* ! - bottom type, no values *)
-  | PBool   : prim_kind   (* bool *)
-  | PString : prim_kind   (* String *)
-  | PChar   : prim_kind   (* char *)
-  | PDynamic: prim_kind   (* Dynamic/any type - UNSAFE: allows any operation without checks *)
-  | PUnknown: prim_kind   (* Unknown type - SAFE top type: requires runtime checks before use
-                             For gradual typing: gamma(Unknown) = {all static types}
-                             Unlike Dynamic, operations on Unknown require type guards/casts *)
+  | PUnit   : prim_kind   (** () - unit type, single inhabitant *)
+  | PNever  : prim_kind   (** ! - bottom type, uninhabited, subtype of all types *)
+  | PBool   : prim_kind   (** bool - Boolean with true/false *)
+  | PString : prim_kind   (** String - UTF-8 encoded text *)
+  | PChar   : prim_kind   (** char - Unicode scalar value (U+0000 to U+10FFFF, excluding surrogates) *)
+  | PDynamic: prim_kind   (** Dynamic - UNSAFE top type: any operation allowed without checks.
+                              Used for FFI, unsafe blocks. Equivalent to TypeScript's 'any'. *)
+  | PUnknown: prim_kind   (** Unknown - SAFE top type for gradual typing (Siek & Taha 2006).
+                              Operations require explicit type guards or casts.
+                              Equivalent to TypeScript's 'unknown'.
+                              gamma(Unknown) = {all static types} in gradual typing literature. *)
 
 (* Numeric type - integers and floats with their width/precision *)
 type numeric_type =
@@ -181,31 +271,113 @@ let numeric_eq (n1 n2: numeric_type) : bool =
   | NumFloat p1, NumFloat p2 -> p1 = p2
   | _, _ -> false
 
-(* Wrapper kinds - 9 single-type wrappers combined into 1 constructor *)
-type wrapper_kind =
-  | WArray  : wrapper_kind   (* [T] - array *)
-  | WSlice  : wrapper_kind   (* &[T] - slice *)
-  | WOption : wrapper_kind   (* T? - optional *)
-  | WBox    : wrapper_kind   (* Box<T> - owned heap *)
-  | WRef    : wrapper_kind   (* &T - shared ref *)
-  | WRefMut : wrapper_kind   (* &mut T - exclusive ref *)
-  | WRc     : wrapper_kind   (* Rc<T> - reference counted *)
-  | WArc    : wrapper_kind   (* Arc<T> - atomic RC *)
-  | WRaw    : wrapper_kind   (* *T - raw pointer *)
+(** WRAPPER KINDS - 9 single-type wrappers combined into 1 TWrap constructor
 
-(* Is this wrapper covariant (subtype inner -> subtype outer)?
-   RefMut is invariant; all others are covariant *)
+    These are type constructors that wrap a single inner type T.
+    The key property is VARIANCE - how subtyping of the inner type
+    relates to subtyping of the wrapper type.
+
+    VARIANCE RULES:
+    - Covariant (+): If A <: B, then Wrapper<A> <: Wrapper<B>
+      * Used for read-only access (can safely return a subtype)
+    - Contravariant (-): If A <: B, then Wrapper<B> <: Wrapper<A>
+      * Used for write-only access (can safely accept a supertype)
+    - Invariant (=): Wrapper<A> <: Wrapper<B> only if A = B
+      * Used for read-write access (must be exact)
+
+    VARIANCE OF EACH WRAPPER:
+    - WArray:   Covariant - Arrays are immutable by default in Brrr
+    - WSlice:   Covariant - Slices are borrowed views, read-only
+    - WOption:  Covariant - Option<A> <: Option<B> when A <: B
+    - WBox:     Covariant - Owned heap allocation, can read as supertype
+    - WRef:     Covariant - Shared reference, read-only
+    - WRefMut:  INVARIANT - Mutable reference, requires exact type match
+    - WRc:      Covariant - Reference counted, shared ownership
+    - WArc:     Covariant - Atomic ref counted, thread-safe shared ownership
+    - WRaw:     Covariant - Raw pointer (unsafe, but defaults to covariant)
+
+    WHY IS WRefMut INVARIANT?
+    Consider: struct Animal; struct Cat <: Animal;
+    If &mut Cat <: &mut Animal were allowed, then:
+      let cat: Cat = Cat();
+      let animal_ref: &mut Animal = &mut cat;  // Hypothetically allowed
+      *animal_ref = Dog();  // Would write Dog into Cat storage!
+    This would violate memory safety. Hence &mut T is invariant in T.
+
+    Reference: Rust Reference on variance, Liskov Substitution Principle
+*)
+type wrapper_kind =
+  | WArray  : wrapper_kind   (** [T] - Owned array, fixed size, heap allocated *)
+  | WSlice  : wrapper_kind   (** &[T] - Borrowed slice view into contiguous memory *)
+  | WOption : wrapper_kind   (** T? or Option<T> - Optional value, None or Some(T) *)
+  | WBox    : wrapper_kind   (** Box<T> - Owned heap allocation, single owner *)
+  | WRef    : wrapper_kind   (** &T - Shared (immutable) borrow *)
+  | WRefMut : wrapper_kind   (** &mut T - Exclusive (mutable) borrow, INVARIANT *)
+  | WRc     : wrapper_kind   (** Rc<T> - Reference counted, single-threaded shared ownership *)
+  | WArc    : wrapper_kind   (** Arc<T> - Atomic reference counted, thread-safe shared ownership *)
+  | WRaw    : wrapper_kind   (** *T - Raw pointer, requires unsafe to dereference *)
+
+(** Is this wrapper covariant (subtype inner -> subtype outer)?
+    RefMut is INVARIANT for soundness; all others are covariant.
+
+    This function is critical for the subtype relation:
+      subtype (TWrap w t1) (TWrap w t2) =
+        if wrapper_is_covariant w then subtype t1 t2
+        else type_eq t1 t2  -- invariant requires exact match
+*)
 let wrapper_is_covariant (w: wrapper_kind) : bool =
   match w with
-  | WRefMut -> false  (* Invariant: &mut T requires exact T match *)
-  | _ -> true         (* Covariant: inner subtype implies outer subtype *)
+  | WRefMut -> false  (* INVARIANT: &mut T requires exact T match for soundness *)
+  | _ -> true         (* COVARIANT: inner subtype implies outer subtype *)
 
-(* Modal reference kinds - for fractional permissions *)
+(** MODAL REFERENCE KINDS - Fractional permissions for fine-grained sharing
+
+    Modal types encode FRACTIONAL PERMISSIONS from separation logic
+    (Boyland 2003, "Checking Interference with Fractional Permissions").
+
+    BACKGROUND: In traditional ownership systems (like Rust), you have:
+    - Exclusive ownership (write access)
+    - Shared references (read access)
+
+    Fractional permissions generalize this:
+    - Permission 1 (full) = exclusive access (read + write)
+    - Permission 1/2 = shared access (read only)
+    - Permission 1/4 = shared with more parties
+    - etc.
+
+    KEY INSIGHT: Permissions are ADDITIVE.
+    If you have two 1/2 permissions to the same resource,
+    you can combine them to get full permission (1/2 + 1/2 = 1).
+
+    MODAL KINDS:
+    - MBoxMod (Box modality, written as [] in modal logic):
+      * Syntax: []T @ p where p is a permission fraction
+      * Semantics: Shared reference to T with permission p
+      * When p = 1: equivalent to full ownership
+      * When p < 1: read-only shared access
+
+    - MDiamondMod (Diamond modality, written as <> in modal logic):
+      * Syntax: <>T
+      * Semantics: Exclusive reference with full permission (p = 1)
+      * Guarantees unique access, can read and write
+
+    CONNECTION TO RUST:
+    - &T corresponds to []T @ 1/n (shared read access)
+    - &mut T corresponds to <>T (exclusive access)
+    - The permission system is more expressive than Rust's borrow checker
+
+    Reference: brrr_lang_spec_v0.4.tex Chapter 9 (Modal Types)
+    Reference: Boyland 2003 "Checking Interference with Fractional Permissions"
+*)
 type modal_kind =
-  | MBoxMod     : ref_kind -> modal_kind   (* □τ @ p - shared ref with permission p *)
-  | MDiamondMod : modal_kind               (* ◇τ - exclusive ref (permission = 1) *)
+  | MBoxMod     : ref_kind -> modal_kind   (** []T @ p - Box modality: shared ref with permission p.
+                                               The ref_kind contains the permission fraction. *)
+  | MDiamondMod : modal_kind               (** <>T - Diamond modality: exclusive ref (permission = 1).
+                                               Guarantees unique access for mutation. *)
 
-(* Modal kind equality *)
+(** Modal kind equality - compares permission fractions.
+    Two MBoxMod are equal if their permission fractions are equal.
+    Two MDiamondMod are always equal (both represent full permission). *)
 let modal_eq (m1 m2: modal_kind) : bool =
   match m1, m2 with
   | MBoxMod rk1, MBoxMod rk2 -> frac_eq (ref_permission rk1) (ref_permission rk2)
@@ -216,51 +388,104 @@ let modal_eq (m1 m2: modal_kind) : bool =
     CORE TYPE CONSTRUCTORS - Restructured for SMT Tractability
     ============================================================================
 
-    12 constructors instead of 27:
-    1. TPrim    - covers 6 primitive types
-    2. TNumeric - covers all integer and float types
-    3. TWrap    - covers 9 single-type wrappers
-    4. TModal   - covers Box/Diamond modal references
-    5. TResult  - Result<T, E> binary type
-    6. TTuple   - (T1, T2, ...) product type
-    7. TFunc    - function types
-    8. TVar     - type variables
-    9. TApp     - type application F<T1, T2>
-    10. TNamed  - named type references
-    11. TStruct - struct types
-    12. TEnum   - enum types
+    The Brrr-Lang type system uses 12 constructors instead of the original 27.
+    This restructuring is critical for SMT (Z3) proof tractability:
+
+    COMPLEXITY ANALYSIS:
+    - Subtype transitivity proofs require O(n^3) case analysis
+    - Original: 27^3 = 19,683 cases
+    - Optimized: 12^3 = 1,728 cases (91% reduction!)
+
+    CONSTRUCTOR GROUPINGS:
+    1. TPrim    - 7 primitives: Unit, Never, Bool, String, Char, Dynamic, Unknown
+    2. TNumeric - All integers (i8-i64, u8-u64) and floats (f32, f64)
+    3. TWrap    - 9 wrappers: Array, Slice, Option, Box, Ref, RefMut, Rc, Arc, Raw
+    4. TModal   - 2 modalities: Box (shared), Diamond (exclusive)
+    5. TResult  - Result<T, E> for error handling
+    6. TTuple   - Product types: (T1, T2, ..., Tn)
+    7. TFunc    - Function types with effects: (T1, ...) -> T with effects
+    8. TVar     - Type variables for polymorphism: alpha, beta, ...
+    9. TApp     - Type application for generics: List<int>, Map<K, V>
+    10. TNamed  - Named type references for nominal typing
+    11. TStruct - Struct types (labeled products)
+    12. TEnum   - Enum types (labeled sums)
+
+    WHY 'noeq'?
+    The 'noeq' annotation tells F* not to derive decidable equality for this type.
+    This is necessary because:
+    - func_type contains effect_row which may have function-typed elements
+    - Equality of functions is undecidable in general
+    - We provide our own type_eq function that compares structural equality
+
+    TYPE LATTICE STRUCTURE:
+                     Dynamic (unsafe top)
+                        |
+                     Unknown (safe top)
+                        |
+           +-----------+-----------+
+           |           |           |
+       primitives  wrappers   functions
+           |           |           |
+           +-----------+-----------+
+                        |
+                      Never (bottom)
+
+    Reference: brrr_lang_spec_v0.4.tex Section "Subtyping Lattice"
     ============================================================================ *)
 
-(* The main type definition - mutually recursive with function types *)
+(** The main type definition - mutually recursive with auxiliary record types.
+    Uses 'noeq' because equality is undecidable for function types. *)
 noeq type brrr_type =
-  (* Primitives: 1 constructor covers 6 types *)
+  (** TPrim - Primitive types grouped under prim_kind discriminator.
+      Covers: Unit, Never, Bool, String, Char, Dynamic, Unknown *)
   | TPrim    : prim_kind -> brrr_type
 
-  (* Numerics: 1 constructor covers int/float with all widths *)
+  (** TNumeric - Numeric types with width/precision discriminator.
+      Covers: i8, i16, i32, i64, u8, u16, u32, u64, f32, f64 *)
   | TNumeric : numeric_type -> brrr_type
 
-  (* Wrappers: 1 constructor covers 9 single-type wrappers *)
+  (** TWrap - Single-type wrappers grouped under wrapper_kind discriminator.
+      Covers: Array, Slice, Option, Box, Ref, RefMut, Rc, Arc, Raw *)
   | TWrap    : wrapper_kind -> brrr_type -> brrr_type
 
-  (* Modal refs: 1 constructor covers Box/Diamond modalities *)
+  (** TModal - Modal reference types with permission fractions.
+      Covers: Box modality (shared), Diamond modality (exclusive) *)
   | TModal   : modal_kind -> brrr_type -> brrr_type
 
-  (* Binary type constructor *)
-  | TResult  : brrr_type -> brrr_type -> brrr_type (* Result<T, E> *)
+  (** TResult - Result type for recoverable error handling.
+      Result<T, E> where T is success type, E is error type.
+      Covariant in both T and E. *)
+  | TResult  : brrr_type -> brrr_type -> brrr_type
 
-  (* Collection type *)
-  | TTuple   : list brrr_type -> brrr_type         (* (T1, T2, ...) *)
+  (** TTuple - Product type: (T1, T2, ..., Tn).
+      Empty list represents unit; single element is NOT unwrapped.
+      Covariant in all positions. *)
+  | TTuple   : list brrr_type -> brrr_type
 
-  (* Function type *)
+  (** TFunc - Function type with effects and modes.
+      Carries full function signature including parameter modes and effects.
+      Contravariant in parameters, covariant in return type. *)
   | TFunc    : func_type -> brrr_type
 
-  (* Type variables and applications *)
-  | TVar     : type_var -> brrr_type               (* α *)
-  | TApp     : brrr_type -> list brrr_type -> brrr_type  (* F<T1, T2> *)
-  | TNamed   : type_name -> brrr_type              (* Named type reference *)
+  (** TVar - Type variable for parametric polymorphism.
+      Bound by forall quantification in type schemes. *)
+  | TVar     : type_var -> brrr_type
 
-  (* Algebraic types *)
+  (** TApp - Type application for generic instantiation.
+      TApp F [T1, T2] represents F<T1, T2>.
+      Base type F must be a type constructor (TNamed or TVar). *)
+  | TApp     : brrr_type -> list brrr_type -> brrr_type
+
+  (** TNamed - Named type reference for nominal typing.
+      Points to a type definition by name; resolved during type checking. *)
+  | TNamed   : type_name -> brrr_type
+
+  (** TStruct - Struct type: labeled product with named fields.
+      Carries full struct definition including field visibility and repr. *)
   | TStruct  : struct_type -> brrr_type
+
+  (** TEnum - Enum type: labeled sum with named variants.
+      Each variant can carry data (tuple-like) or be a unit variant. *)
   | TEnum    : enum_type -> brrr_type
 
 (* Function type with effects and modes *)
@@ -295,7 +520,8 @@ and enum_type = {
 and field_type = {
   field_name : string;
   field_ty   : brrr_type;
-  field_vis  : visibility
+  field_vis  : visibility;
+  field_tag  : option string       (* Struct field tag metadata, e.g. Go `json:"name"` *)
 }
 
 (* Enum variant *)
@@ -304,29 +530,110 @@ and variant_type = {
   variant_fields : list brrr_type   (* Tuple-like or unit *)
 }
 
-(* Visibility *)
-and visibility =
-  | Public  : visibility
-  | Private : visibility
-  | Module  : visibility            (* Visible within module *)
+(** VISIBILITY - Access control for struct/enum fields and items
 
-(* Helper: check if n is a power of 2 (n = 2^k for some k >= 0)
-   Valid alignments: 1, 2, 4, 8, 16, 32, 64, 128, 256, ... *)
+    Visibility controls which code can access a field or item.
+    This follows Rust's visibility model with three levels:
+
+    ACCESS SEMANTICS:
+    - Public:  Accessible from any module in any crate
+               Syntax: `pub field: T`
+    - Private: Accessible only within the defining module
+               Syntax: `field: T` (no modifier)
+    - Module:  Accessible within the module hierarchy (parent + children)
+               Syntax: `pub(crate) field: T` or `pub(super) field: T`
+
+    VISIBILITY AND SUBTYPING:
+    Visibility affects structural subtyping for records:
+    - A struct S1 is a subtype of S2 only if all fields visible in S2
+      are also visible (and subtypes) in S1
+    - Private fields are not visible to external code, so they don't
+      affect external subtyping relationships
+
+    ENCAPSULATION PATTERN:
+    Use Private for implementation details, Public for API surface:
+      struct Counter {
+        pub value: i32,      // Public: API users can read
+        internal_id: u64,    // Private: implementation detail
+      }
+
+    Reference: Rust Reference "Visibility and Privacy"
+*)
+and visibility =
+  | Public  : visibility   (** Accessible from anywhere - the public API surface *)
+  | Private : visibility   (** Accessible only within the defining module *)
+  | Module  : visibility   (** Accessible within module hierarchy (pub(crate)/pub(super)) *)
+
+(** Helper: check if n is a power of 2 (n = 2^k for some k >= 0)
+    Valid alignments: 1, 2, 4, 8, 16, 32, 64, 128, 256, ...
+    This is important because CPU memory alignment must be powers of 2
+    for efficient memory access and cache line alignment. *)
 let rec is_power_of_2 (n: pos) : Tot bool (decreases n) =
   if n = 1 then true
   else if n % 2 <> 0 then false
   else is_power_of_2 (n / 2)
 
-(* Valid alignment: positive power of 2, at most 2^29 (reasonable max for memory alignment) *)
+(** Valid alignment: positive power of 2, at most 2^29 (536MB)
+    The upper bound of 2^29 is chosen to be reasonable for any platform
+    while avoiding overflow issues in alignment calculations. *)
 type valid_alignment = n:pos{is_power_of_2 n && n <= 536870912}
 
-(* Memory representation attribute *)
+(** MEMORY REPRESENTATION ATTRIBUTES - ABI and layout control
+
+    These attributes control how structs are laid out in memory.
+    They correspond directly to Rust's #[repr(...)] attributes and
+    are critical for:
+    - FFI (Foreign Function Interface) compatibility with C
+    - Memory-mapped I/O and hardware registers
+    - Network protocols with specific byte layouts
+    - Performance optimization (cache alignment)
+
+    REPR SEMANTICS:
+
+    ReprRust (default):
+      - Rust is free to reorder and pad fields for optimization
+      - Layout is NOT stable across compiler versions
+      - May reorder fields to minimize padding
+      - Use when: No ABI compatibility requirements
+
+    ReprC:
+      - Fields laid out in declaration order (no reordering)
+      - Padding follows C ABI rules for the target platform
+      - Layout IS stable and matches C struct layout
+      - Use when: Interfacing with C code, writing FFI bindings
+      Example: #[repr(C)] struct Point { x: i32, y: i32 }
+
+    ReprPacked:
+      - No padding between fields (alignment = 1)
+      - WARNING: May cause unaligned access (slow or UB on some platforms)
+      - Use when: Reading binary formats with no padding
+      Example: #[repr(packed)] struct Header { magic: u8, len: u32 }
+
+    ReprTransparent:
+      - Struct has same ABI as its single non-ZST field
+      - Allows safe transmute between wrapper and inner type
+      - Use when: Creating newtype wrappers that should be FFI-transparent
+      Example: #[repr(transparent)] struct UserId(u64);
+
+    ReprAlign(n):
+      - Minimum alignment of n bytes (must be power of 2)
+      - May add padding at end to maintain alignment
+      - Use when: Cache line alignment, SIMD requirements, hardware regs
+      Example: #[repr(align(64))] struct CacheLine { data: [u8; 64] }
+
+    COMBINING ATTRIBUTES:
+    Some combinations are valid:
+      - repr(C, align(n)): C layout with increased alignment
+      - repr(C, packed): C layout with no padding (dangerous!)
+
+    Reference: Rust Reference "Type Layout", Rustonomicon "repr(C)"
+*)
 and repr_attr =
-  | ReprRust        : repr_attr     (* Default Rust layout *)
-  | ReprC           : repr_attr     (* C-compatible layout *)
-  | ReprPacked      : repr_attr     (* No padding *)
-  | ReprTransparent : repr_attr     (* Same as inner type *)
-  | ReprAlign       : valid_alignment -> repr_attr  (* Aligned to n bytes, must be power of 2 *)
+  | ReprRust        : repr_attr     (** Default Rust layout - may reorder fields, not ABI stable *)
+  | ReprC           : repr_attr     (** C-compatible layout - stable ABI, no field reordering *)
+  | ReprPacked      : repr_attr     (** No padding - alignment 1, may cause unaligned access *)
+  | ReprTransparent : repr_attr     (** Same ABI as single field - for newtype wrappers *)
+  | ReprAlign       : valid_alignment -> repr_attr  (** Explicit alignment in bytes (must be power of 2) *)
 
 (** ============================================================================
     MODED TYPES (Type + Mode)

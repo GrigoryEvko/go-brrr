@@ -1,28 +1,66 @@
 (**
  * BrrrLang.Core.Types - Interface
  *
- * Public interface for the Brrr-Lang type system.
- * Based on brrr_lang_spec_v0.4.tex Parts II-III.
+ * Public interface for the Brrr-Lang type system with gradual typing support.
+ * Based on brrr_lang_spec_v0.4.tex Parts II-III, Section 3 (Type System).
  *
- * This interface follows HACL-star/EverParse patterns:
- *   - unfold for simple type aliases (enables inlining for verification)
- *   - inline_for_extraction for extracted type constructors (C/Rust extraction)
- *   - [@(strict_on_arguments [n])] for strict argument evaluation
- *   - val declarations with refinement types and pre/post conditions
- *   - SMTPat triggers for automatic lemma application by Z3
+ * GRADUAL TYPING OVERVIEW (Siek & Taha 2006):
+ * ===========================================================================
+ * Brrr-Lang implements gradual typing, allowing seamless mixing of static
+ * and dynamic typing within the same program. Key concepts:
  *
- * Key design decisions:
- *   - 12 type constructors (reduced from 27) for SMT tractability
- *   - noeq for recursive types (equality not decidable on function types)
- *   - Termination measures via type_size for recursive functions
+ * - CONSISTENCY RELATION (~): Replaces strict equality for type checking
+ *   * T ~ T (reflexivity)
+ *   * Dynamic ~ T and T ~ Dynamic (dynamic is consistent with anything)
+ *   * Unknown ~ T only via explicit casts
+ *
+ * - CASTS: Automatically inserted at static/dynamic boundaries
+ *   * Compile-time: No overhead for consistent types
+ *   * Runtime: Checked casts for Dynamic/Unknown conversions
+ *
+ * - BLAME TRACKING: Runtime errors point to the cast that failed
+ *
+ * DUAL TOP TYPES:
+ * ===========================================================================
+ * PDynamic (Dynamic): UNSAFE top type, like TypeScript's 'any'
+ *   - Any operation allowed without type checking
+ *   - Subtyping: forall T. T <: Dynamic
+ *   - Use: FFI, unsafe code, legacy interop
+ *   - WARNING: Bypasses type safety entirely!
+ *
+ * PUnknown (Unknown): SAFE top type, like TypeScript's 'unknown'
+ *   - Operations require explicit type narrowing
+ *   - Subtyping: forall T. T <: Unknown, but NOT Unknown <: T
+ *   - Use: External input, deserialized data, safe heterogeneous containers
+ *   - Safety: Must use type guards before operations
+ *
+ * F* INTERFACE PATTERNS (from HACL-star/EverParse):
+ * ===========================================================================
+ *   - unfold: Inline type aliases during verification (transparent to Z3)
+ *   - inline_for_extraction: Inline during extraction to C/Rust/OCaml
+ *   - [@(strict_on_arguments [n])]: Force evaluation of argument n
+ *   - val ... : ... -> Tot ...: Total function (always terminates)
+ *   - val ... : ... -> Lemma ...: Proof obligation (returns unit)
+ *   - SMTPat: Z3 quantifier instantiation trigger
+ *
+ * SMT TRACTABILITY:
+ * ===========================================================================
+ * 12 type constructors (reduced from 27) for O(n^3) proof complexity:
+ *   Original: 27^3 = 19,683 cases
+ *   Optimized: 12^3 = 1,728 cases (91% reduction)
+ *
+ * REFERENCES:
+ *   - Siek & Taha 2006: "Gradual Typing for Functional Languages"
+ *   - Garcia et al. 2016: "Abstracting Gradual Typing" (POPL)
+ *   - brrr_lang_spec_v0.4.tex Section 3 "Type System"
  *
  * Depends on: Primitives, Modes, Effects
  *)
 module BrrrTypes
 
-open Primitives
-open Modes
-open Effects
+open BrrrPrimitives
+open BrrrModes
+open BrrrEffects
 open FStar.List.Tot
 
 (* Z3 solver options for SMT tractability - following HACL-star/EverParse patterns
@@ -57,16 +95,50 @@ type type_id = nat
     combinations to 12^3 = 1,728 combinations for transitivity proofs.
     ============================================================================ *)
 
-(* Primitive type kinds - 7 variants for unit, never, bool, string, char, dynamic, unknown
-   Full definition exposed for pattern matching in client code *)
+(** PRIMITIVE TYPE KINDS - 7 variants for atomic types
+
+    These are the "base" types that don't contain other types.
+
+    TYPE LATTICE POSITION (from bottom to top):
+    - PNever:   Bottom type, subtype of all. No inhabitants.
+    - PUnit:    Singleton type with single value ().
+    - PBool/PString/PChar: Standard value types.
+    - PUnknown: Safe top type - requires type guards for operations.
+    - PDynamic: Unsafe top type - allows any operation unchecked.
+
+    GRADUAL TYPING SEMANTICS (Siek & Taha 2006):
+
+    PDynamic (UNSAFE top type):
+      - Consistency: Dynamic ~ T for all T (bidirectional)
+      - Subtyping: forall T. T <: Dynamic
+      - Operations: Allowed WITHOUT runtime checks
+      - Use cases: FFI, unsafe blocks, legacy code
+      - DANGER: Defeats type safety guarantees!
+      Example: let x: Dynamic = 42; x.someMethod() // No compile error!
+
+    PUnknown (SAFE top type):
+      - Consistency: T ~ Unknown only via explicit casts
+      - Subtyping: forall T. T <: Unknown, but NOT Unknown <: T
+      - Operations: REQUIRE type narrowing first
+      - Use cases: User input, deserialized data, safe containers
+      - Safety: Must use type guards or explicit casts
+      Example:
+        let x: Unknown = getUserInput();
+        // x.someMethod()  // COMPILE ERROR: Unknown has no methods
+        if let y: String = x as String {  // Runtime check
+          y.len()  // OK: y is known to be String
+        }
+
+    Reference: brrr_lang_spec_v0.4.tex Section "Dynamic Type" and "Unknown Type"
+*)
 type prim_kind =
-  | PUnit   : prim_kind   (* () - unit type, single inhabitant *)
-  | PNever  : prim_kind   (* ! - bottom type, uninhabited *)
-  | PBool   : prim_kind   (* bool - two inhabitants: true, false *)
-  | PString : prim_kind   (* String - UTF-8 string *)
-  | PChar   : prim_kind   (* char - Unicode scalar value *)
-  | PDynamic: prim_kind   (* Dynamic/any - UNSAFE top type, allows any operation *)
-  | PUnknown: prim_kind   (* Unknown - SAFE top type for gradual typing *)
+  | PUnit   : prim_kind   (** () - Unit type, single inhabitant. For side-effectful returns. *)
+  | PNever  : prim_kind   (** ! - Bottom type, uninhabited. For diverging/panicking code. *)
+  | PBool   : prim_kind   (** bool - Boolean: true or false. *)
+  | PString : prim_kind   (** String - UTF-8 encoded text. *)
+  | PChar   : prim_kind   (** char - Unicode scalar value (U+0000..U+10FFFF, no surrogates). *)
+  | PDynamic: prim_kind   (** Dynamic - UNSAFE top (like 'any'). Operations unchecked. FFI use. *)
+  | PUnknown: prim_kind   (** Unknown - SAFE top (like 'unknown'). Requires type guards. *)
 
 (* Numeric types - integers and floats with width/precision
    Uses int_type and float_prec from Primitives module *)
@@ -78,18 +150,43 @@ type numeric_type =
    Exposed for type checking implementation *)
 val numeric_eq : n1:numeric_type -> n2:numeric_type -> Tot bool
 
-(* Wrapper type kinds - 9 single-type wrappers
-   Full definition exposed for covariance/invariance analysis *)
+(** WRAPPER TYPE KINDS - 9 single-type wrappers
+
+    Type constructors that wrap a single inner type.
+    Critical property: VARIANCE (how inner subtyping affects outer subtyping).
+
+    VARIANCE RULES:
+    - Covariant (+): If A <: B then W<A> <: W<B>   [read-only]
+    - Invariant (=): W<A> <: W<B> only if A = B   [read-write]
+
+    WRAPPER VARIANCE:
+    - WArray:   COVARIANT - [T] is read-only by default
+    - WSlice:   COVARIANT - &[T] is a borrowed view
+    - WOption:  COVARIANT - Option<A> <: Option<B> when A <: B
+    - WBox:     COVARIANT - Box<T> owns but can be read as supertype
+    - WRef:     COVARIANT - &T is shared (immutable) borrow
+    - WRefMut:  INVARIANT - &mut T requires exact type for soundness!
+    - WRc:      COVARIANT - Rc<T> is shared ownership
+    - WArc:     COVARIANT - Arc<T> is thread-safe shared ownership
+    - WRaw:     COVARIANT - *T raw pointer (unsafe defaults to covariant)
+
+    WHY IS WRefMut INVARIANT?
+    If &mut Cat <: &mut Animal were allowed:
+      let cat: Cat = Cat();
+      let animal_ref: &mut Animal = &mut cat;  // Hypothetically OK
+      *animal_ref = Dog();  // Would write Dog into Cat storage!
+    This violates memory safety. Hence &mut T is invariant in T.
+*)
 type wrapper_kind =
-  | WArray  : wrapper_kind   (* [T] - owned array *)
-  | WSlice  : wrapper_kind   (* &[T] - borrowed slice view *)
-  | WOption : wrapper_kind   (* T? - optional value *)
-  | WBox    : wrapper_kind   (* Box<T> - owned heap allocation *)
-  | WRef    : wrapper_kind   (* &T - shared borrow *)
-  | WRefMut : wrapper_kind   (* &mut T - exclusive borrow *)
-  | WRc     : wrapper_kind   (* Rc<T> - reference counted *)
-  | WArc    : wrapper_kind   (* Arc<T> - atomic reference counted *)
-  | WRaw    : wrapper_kind   (* *T - raw pointer *)
+  | WArray  : wrapper_kind   (** [T] - Owned array, heap allocated, fixed size *)
+  | WSlice  : wrapper_kind   (** &[T] - Borrowed slice, view into contiguous memory *)
+  | WOption : wrapper_kind   (** T? / Option<T> - Optional value: None or Some(T) *)
+  | WBox    : wrapper_kind   (** Box<T> - Owned heap allocation, single owner *)
+  | WRef    : wrapper_kind   (** &T - Shared (immutable) borrow, COVARIANT *)
+  | WRefMut : wrapper_kind   (** &mut T - Exclusive (mutable) borrow, INVARIANT *)
+  | WRc     : wrapper_kind   (** Rc<T> - Reference counted, single-threaded sharing *)
+  | WArc    : wrapper_kind   (** Arc<T> - Atomic ref counted, thread-safe sharing *)
+  | WRaw    : wrapper_kind   (** *T - Raw pointer, requires unsafe to dereference *)
 
 (* Covariance check for wrappers - critical for subtyping
    RefMut is invariant (requires exact type match), all others covariant
@@ -102,44 +199,105 @@ let wrapper_is_covariant (w: wrapper_kind) : bool =
   | WRefMut -> false  (* Invariant: &mut T requires exact T match *)
   | _ -> true         (* Covariant: inner subtype implies outer subtype *)
 
-(* Modal reference kinds - for fractional permissions (Chapter 9)
-   MBoxMod carries a ref_kind with permission fraction *)
-type modal_kind =
-  | MBoxMod     : ref_kind -> modal_kind   (* Box τ @ p - shared ref with permission *)
-  | MDiamondMod : modal_kind               (* Diamond τ - exclusive ref (full permission) *)
+(** MODAL REFERENCE KINDS - Fractional permissions (Chapter 9)
 
-(* Modal kind equality - decidable, compares permission fractions
-   Exposed for modal type checking *)
+    Encode FRACTIONAL PERMISSIONS from separation logic for fine-grained
+    sharing control beyond Rust's simple borrow/own model.
+
+    PERMISSION MODEL (Boyland 2003):
+    - Permission 1 (full): exclusive read+write access
+    - Permission 1/2: shared read-only access
+    - Permission 1/4: shared with more parties
+    - Permissions are ADDITIVE: 1/2 + 1/2 = 1
+
+    MODAL KINDS:
+    - MBoxMod (Box modality, []): Shared ref with permission fraction p
+      * Syntax: []T @ p
+      * p = 1: equivalent to exclusive ownership
+      * p < 1: read-only shared access
+
+    - MDiamondMod (Diamond modality, <>): Exclusive ref, full permission
+      * Syntax: <>T
+      * Always p = 1 (unique access)
+      * Can read and write
+
+    CONNECTION TO RUST:
+    - &T is like []T @ (1/n) for n shared borrows
+    - &mut T is like <>T (exclusive access)
+
+    Reference: brrr_lang_spec_v0.4.tex Chapter 9 (Modal Types)
+    Reference: Boyland 2003 "Checking Interference with Fractional Permissions"
+*)
+type modal_kind =
+  | MBoxMod     : ref_kind -> modal_kind   (** []T @ p - Box modality: shared ref with permission p *)
+  | MDiamondMod : modal_kind               (** <>T - Diamond modality: exclusive ref (permission = 1) *)
+
+(** Modal kind equality - compares permission fractions.
+    MBoxMod equal if permission fractions equal; MDiamondMod always equal. *)
 val modal_eq : m1:modal_kind -> m2:modal_kind -> Tot bool
 
 (** ============================================================================
-    VISIBILITY - Access control for struct/enum fields
-    ============================================================================ *)
+    VISIBILITY - Access control for struct/enum fields and items
+    ============================================================================
+
+    Controls which code can access a field, method, or type definition.
+    Follows Rust's visibility model with three access levels.
+
+    SEMANTICS:
+    - Public:  Accessible from any module in any crate (pub)
+    - Private: Accessible only within the defining module (default)
+    - Module:  Accessible within module hierarchy (pub(crate)/pub(super))
+
+    IMPACT ON SUBTYPING:
+    Private fields are NOT visible externally, so they don't affect
+    structural subtyping relationships for external code.
+*)
 
 type visibility =
-  | Public  : visibility   (* Accessible from anywhere *)
-  | Private : visibility   (* Accessible only within defining module *)
-  | Module  : visibility   (* Accessible within module hierarchy *)
+  | Public  : visibility   (** Accessible from anywhere - public API surface *)
+  | Private : visibility   (** Accessible only within defining module - encapsulation *)
+  | Module  : visibility   (** Accessible within module hierarchy - internal API *)
 
 (** ============================================================================
-    MEMORY REPRESENTATION ATTRIBUTES
-    ============================================================================ *)
+    MEMORY REPRESENTATION ATTRIBUTES - ABI and layout control
+    ============================================================================
 
-(* Power of 2 check for alignment values - total, terminating *)
+    Control how structs and enums are laid out in memory.
+    Corresponds to Rust's #[repr(...)] attributes.
+
+    CRITICAL FOR:
+    - FFI (Foreign Function Interface) with C code
+    - Memory-mapped I/O and hardware registers
+    - Network protocols with specific byte layouts
+    - Performance optimization (cache alignment)
+
+    REPR SEMANTICS:
+    - ReprRust: Default, may reorder fields, NOT ABI stable
+    - ReprC: C-compatible, declaration order, stable ABI
+    - ReprPacked: No padding (alignment 1), may cause unaligned access
+    - ReprTransparent: Same ABI as single non-ZST field (newtype wrapper)
+    - ReprAlign(n): Minimum alignment of n bytes (power of 2)
+
+    Reference: Rust Reference "Type Layout", Rustonomicon "repr(C)"
+*)
+
+(** Power of 2 check for alignment values.
+    CPU memory alignment must be powers of 2 for efficient access. *)
 val is_power_of_2 : n:pos -> Tot bool (decreases n)
 
-(* Valid alignment: positive power of 2, at most 2^29
-   Refinement ensures only valid alignments can be constructed *)
+(** Valid alignment: positive power of 2, at most 2^29 (536MB).
+    Refinement type ensures only valid alignments can be constructed.
+    The upper bound avoids overflow in alignment calculations. *)
 unfold
 type valid_alignment = n:pos{is_power_of_2 n && n <= 536870912}
 
-(* Memory layout representation - affects ABI compatibility *)
+(** Memory layout representation - affects ABI compatibility *)
 type repr_attr =
-  | ReprRust        : repr_attr   (* Default Rust layout - may reorder fields *)
-  | ReprC           : repr_attr   (* C-compatible layout - stable ABI *)
-  | ReprPacked      : repr_attr   (* No padding between fields *)
-  | ReprTransparent : repr_attr   (* Same layout as inner type *)
-  | ReprAlign       : valid_alignment -> repr_attr  (* Explicit alignment *)
+  | ReprRust        : repr_attr   (** Default Rust layout - may reorder fields, not ABI stable *)
+  | ReprC           : repr_attr   (** C-compatible layout - stable ABI, no field reordering *)
+  | ReprPacked      : repr_attr   (** No padding - alignment 1, may cause unaligned access *)
+  | ReprTransparent : repr_attr   (** Same ABI as single field - for FFI-safe newtype wrappers *)
+  | ReprAlign       : valid_alignment -> repr_attr  (** Explicit alignment in bytes *)
 
 (** ============================================================================
     CORE TYPE CONSTRUCTORS - 12 constructors for SMT tractability
@@ -212,7 +370,8 @@ and enum_type = {
 and field_type = {
   field_name : string;
   field_ty   : brrr_type;
-  field_vis  : visibility
+  field_vis  : visibility;
+  field_tag  : option string       (* Struct field tag metadata, e.g. Go `json:"name"` *)
 }
 
 (* Enum variant - optionally carries data *)
