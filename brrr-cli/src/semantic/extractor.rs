@@ -457,7 +457,7 @@ fn get_language_extensions(lang: &str) -> &'static [&'static str] {
         "rust" => &[".rs"],
         "java" => &[".java"],
         "c" => &[".c", ".h"],
-        "cpp" => &[".cpp", ".hpp", ".cc", ".hh", ".cxx", ".hxx", ".h++", ".c++"],
+        "cpp" => &[".cpp", ".hpp", ".cc", ".hh", ".cxx", ".hxx", ".h++", ".c++", ".cu", ".cuh", ".h"],
         _ => &[],
     }
 }
@@ -847,8 +847,11 @@ fn process_file_uncached(
     // Read file content with BOM handling and encoding fallback (RS-15 fix)
     let content = read_file_content(file_path)?;
 
-    // Parse with AST extractor
-    let module_info = AstExtractor::extract_file(file_path)?;
+    // Parse with AST extractor using the caller's language, not auto-detection.
+    // This is critical for `.h` files in mixed C/C++ projects: when the C++ pass
+    // scans `.h` files, they must be parsed with the C++ grammar (which handles
+    // both C and C++ code), not the C grammar which would reject C++ headers.
+    let module_info = AstExtractor::extract_file_as(file_path, language)?;
 
     // Extract dependencies from imports (RS-12 fix)
     // This enriches semantic search by including what modules each code unit depends on

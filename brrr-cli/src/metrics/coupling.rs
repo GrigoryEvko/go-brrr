@@ -1104,7 +1104,7 @@ pub fn analyze_coupling(
                 "js" | "jsx" => "javascript",
                 "java" => "java",
                 "c" | "h" => "c",
-                "cpp" | "cc" | "cxx" | "hpp" => "cpp",
+                "cpp" | "cc" | "cxx" | "hpp" | "cu" | "cuh" => "cpp",
                 _ => "unknown",
             })
             .unwrap_or("unknown")

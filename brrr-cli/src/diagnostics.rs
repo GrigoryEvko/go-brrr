@@ -110,7 +110,7 @@ pub fn detect_language(file_path: &Path) -> &'static str {
         "rs" => "rust",
         "java" => "java",
         "c" | "h" => "c",
-        "cpp" | "cc" | "cxx" | "hpp" => "cpp",
+        "cpp" | "cc" | "cxx" | "hpp" | "cu" | "cuh" => "cpp",
         "rb" => "ruby",
         "php" => "php",
         "kt" => "kotlin",

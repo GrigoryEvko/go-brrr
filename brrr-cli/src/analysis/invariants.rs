@@ -2005,7 +2005,7 @@ fn detect_language(path: &str) -> Result<String> {
         "kt" => Ok("kotlin".to_string()),
         "cs" => Ok("csharp".to_string()),
         "c" => Ok("c".to_string()),
-        "cpp" | "cc" | "cxx" | "hpp" => Ok("cpp".to_string()),
+        "cpp" | "cc" | "cxx" | "hpp" | "cu" | "cuh" => Ok("cpp".to_string()),
         _ => Err(BrrrError::from(InvariantError::UnsupportedLanguage {
             lang: ext.to_string(),
         })),

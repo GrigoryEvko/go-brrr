@@ -53,6 +53,9 @@ static EXTENSION_TO_LANGUAGE: Lazy<Vec<(&'static str, &'static str)>> = Lazy::ne
         ("cxx", "cpp"),
         ("hpp", "cpp"),
         ("hxx", "cpp"),
+        // CUDA (C++ superset)
+        ("cu", "cpp"),
+        ("cuh", "cpp"),
         // C#
         ("cs", "csharp"),
         // PHP

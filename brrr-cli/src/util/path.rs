@@ -210,6 +210,9 @@ const EXTENSION_TO_LANG: &[(&str, &str)] = &[
     ("cxx", "cpp"),
     ("hpp", "cpp"),
     ("hh", "cpp"),
+    // CUDA (C++ superset, parsed as cpp)
+    ("cu", "cpp"),
+    ("cuh", "cpp"),
     // Ruby
     ("rb", "ruby"),
     // PHP

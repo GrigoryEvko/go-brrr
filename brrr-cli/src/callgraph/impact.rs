@@ -752,7 +752,7 @@ fn matches_language(file: &str, lang: &str) -> bool {
         "go" => &[".go"],
         "java" => &[".java"],
         "c" => &[".c", ".h"],
-        "cpp" => &[".cpp", ".cc", ".cxx", ".hpp", ".hxx"],
+        "cpp" => &[".cpp", ".cc", ".cxx", ".hpp", ".hxx", ".cu", ".cuh"],
         "csharp" => &[".cs"],
         "ruby" => &[".rb"],
         "php" => &[".php"],

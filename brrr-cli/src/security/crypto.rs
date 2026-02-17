@@ -1493,10 +1493,10 @@ impl WeakCryptoDetector {
             Some("rust") => ["rs"].iter().copied().collect(),
             Some("java") => ["java"].iter().copied().collect(),
             Some("c") => ["c", "h"].iter().copied().collect(),
-            Some("cpp") => ["cpp", "cc", "cxx", "hpp", "h"].iter().copied().collect(),
+            Some("cpp") => ["cpp", "cc", "cxx", "hpp", "h", "cu", "cuh"].iter().copied().collect(),
             _ => [
                 "py", "ts", "tsx", "js", "jsx", "mjs", "cjs", "go", "rs", "java", "c", "h", "cpp",
-                "cc", "cxx", "hpp",
+                "cc", "cxx", "hpp", "cu", "cuh",
             ]
             .iter()
             .copied()

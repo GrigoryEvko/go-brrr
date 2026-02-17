@@ -2328,7 +2328,7 @@ impl Language for Cpp {
     }
 
     fn extensions(&self) -> &[&'static str] {
-        &[".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h++", ".c++"]
+        &[".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h++", ".c++", ".cu", ".cuh"]
     }
 
     fn parser(&self) -> Result<Parser> {

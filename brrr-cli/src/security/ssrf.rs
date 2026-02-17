@@ -2087,7 +2087,7 @@ fn detect_language(path: &Path) -> &'static str {
         Some("rs") => "rust",
         Some("java") => "java",
         Some("c") | Some("h") => "c",
-        Some("cpp") | Some("cc") | Some("cxx") | Some("hpp") => "cpp",
+        Some("cpp") | Some("cc") | Some("cxx") | Some("hpp") | Some("cu") | Some("cuh") => "cpp",
         _ => "",
     }
 }
