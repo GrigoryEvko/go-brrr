@@ -75,6 +75,7 @@
 //! let truncated = truncate_to_tokens(text, 1000);
 //! ```
 
+pub mod cache;
 pub mod chunker;
 pub mod extractor;
 pub mod types;
@@ -85,8 +86,8 @@ pub mod types;
 
 // Core types
 pub use types::{
-    ChunkInfo, CodeComplexity, CodeLocation, ContentHashedIndex, EmbeddingUnit, SearchResult,
-    SemanticPattern, UnitKind,
+    ChunkInfo, CodeComplexity, CodeLocation, ContentHashedIndex, EmbeddingUnit, FileHashEntry,
+    HashCache, SearchResult, SemanticPattern, UnitKind,
 };
 
 // Constants
@@ -98,8 +99,17 @@ pub use types::{
 // Function Re-exports
 // =============================================================================
 
+// File-hash cache for incremental indexing
+pub use cache::{
+    build_entry, classify_files, compute_file_hash, is_file_unchanged, load_cache, save_cache,
+    FileClassification,
+};
+
 // Main extraction API
-pub use extractor::{extract_units, extract_units_from_file, extract_units_with_callgraph};
+pub use extractor::{
+    extract_units, extract_units_from_file, extract_units_from_paths, extract_units_with_callgraph,
+    scan_project_files,
+};
 
 // Unit cache management
 pub use extractor::{
@@ -127,8 +137,8 @@ pub use chunker::{chunk_code, chunk_code_default, chunk_code_with_overlap, needs
 // Tokenizer configuration and TEI-based token counting (BUG-02 fix)
 pub use chunker::{
     compare_tokenizer_counts, count_tokens_batch_tei, count_tokens_tei,
-    estimate_tokens_unicode_aware, get_tokenizer_type, set_tokenizer_type, ChunkConfig,
-    TokenizerType,
+    ensure_tokenizer_loaded, estimate_tokens_unicode_aware, get_tokenizer_type,
+    set_tokenizer_type, ChunkConfig, TokenizerType,
 };
 
 // =============================================================================
@@ -151,6 +161,9 @@ mod tests {
             let _: Option<SemanticPattern> = None;
             let _: Option<ContentHashedIndex> = None;
             let _: Option<CodeLocation> = None;
+            let _: Option<FileHashEntry> = None;
+            let _: Option<HashCache> = None;
+            let _: Option<FileClassification> = None;
         }
     }
 
@@ -187,6 +200,21 @@ mod tests {
             let _ = clear_unit_cache as fn();
             let _ = unit_cache_stats as fn() -> usize;
             let _ = invalidate_unit_cache as fn(&std::path::Path);
+        }
+    }
+
+    #[test]
+    fn test_file_hash_cache_functions_exported() {
+        // Verify file-hash cache functions are callable
+        fn _assert_hash_cache_fns() {
+            let _ = load_cache
+                as fn(&std::path::Path, &str) -> Option<HashCache>;
+            let _ = save_cache
+                as fn(&std::path::Path, &HashCache) -> std::io::Result<()>;
+            let _ = compute_file_hash
+                as fn(&std::path::Path) -> std::io::Result<String>;
+            let _ = is_file_unchanged
+                as fn(&std::path::Path, &FileHashEntry) -> bool;
         }
     }
 

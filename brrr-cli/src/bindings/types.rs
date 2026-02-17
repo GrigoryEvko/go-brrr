@@ -14,6 +14,8 @@ pub enum BindingSystem {
     Pybind11,
     Ctypes,
     RustFfi,
+    /// serde rename_all would produce "c_go" -- override to match the canonical name.
+    #[serde(rename = "cgo")]
     CGo,
     Jni,
     NapiRs,
@@ -72,11 +74,11 @@ impl fmt::Display for BindingSystem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BindingDirection {
-    /// Host language exposes a function to target (e.g., C++ → Python via pybind11).
+    /// Host language exposes a function to target (e.g., C++ -> Python via pybind11).
     Export,
-    /// Host language calls into target (e.g., Python → C via ctypes).
+    /// Host language calls into target (e.g., Python -> C via ctypes).
     Import,
-    /// Registration/dispatch pattern (e.g., REGISTER_DISPATCH linking stub → kernel).
+    /// Registration/dispatch pattern (e.g., REGISTER_DISPATCH linking stub -> kernel).
     Dispatch,
 }
 
@@ -99,7 +101,7 @@ pub struct BindingDeclaration {
     pub direction: BindingDirection,
     /// The exposed name visible in the target language.
     pub exposed_name: String,
-    /// The host-side function that implements the binding (may be partial — name only, no file).
+    /// The host-side function that implements the binding (may be partial -- name only, no file).
     pub host_function: Option<FunctionRef>,
     /// The target-side function reference (populated by cross-file resolver).
     pub target_function: Option<FunctionRef>,
@@ -113,7 +115,7 @@ pub struct BindingDeclaration {
     pub class_name: Option<String>,
     /// Raw matched text for debugging.
     pub raw_pattern: Option<String>,
-    /// Confidence score (0.0–1.0). 1.0 for macro patterns, lower for heuristic.
+    /// Confidence score (0.0-1.0). 1.0 for macro patterns, lower for heuristic.
     pub confidence: f64,
 }
 
@@ -144,7 +146,7 @@ impl BindingReport {
 
         for decl in &declarations {
             *by_system.entry(decl.system.as_str().to_string()).or_default() += 1;
-            if decl.host_function.is_none() && decl.target_function.is_none() {
+            if is_unresolved(decl) {
                 unresolved_count += 1;
             }
         }
@@ -156,6 +158,30 @@ impl BindingReport {
             files_with_bindings,
             unresolved_count,
         }
+    }
+}
+
+/// A binding is unresolved if any function ref that should have been resolved
+/// is still missing or has an empty file (name-only stub from the detector).
+fn is_unresolved(decl: &BindingDeclaration) -> bool {
+    let host_resolved = decl
+        .host_function
+        .as_ref()
+        .is_some_and(|f| !f.file.is_empty());
+    let target_resolved = decl
+        .target_function
+        .as_ref()
+        .is_some_and(|f| !f.file.is_empty());
+
+    match decl.direction {
+        // Export: host is the implementation being exposed -- must be resolved.
+        // Target (the foreign-language side) may not exist in the codebase.
+        BindingDirection::Export => !host_resolved,
+        // Import: target is the native function being called -- must be resolved.
+        // Host (the calling side) may not have a concrete function ref.
+        BindingDirection::Import => !target_resolved,
+        // Dispatch: both sides should be resolved (stub -> kernel).
+        BindingDirection::Dispatch => !host_resolved || !target_resolved,
     }
 }
 

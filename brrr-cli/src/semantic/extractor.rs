@@ -4,6 +4,7 @@
 //! a project and prepare them for semantic embedding. Handles chunking of
 //! oversized units and semantic pattern detection.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use parking_lot::RwLock;
@@ -23,6 +24,7 @@ use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
 use crate::util::ignore::BrrrIgnore;
 
+use super::chunker::ensure_tokenizer_loaded;
 use super::types::{
     ChunkInfo, CodeComplexity, EmbeddingUnit, UnitKind, CHUNK_OVERLAP_TOKENS,
     MAX_CODE_PREVIEW_TOKENS, MAX_EMBEDDING_TOKENS, SEMANTIC_PATTERNS,
@@ -43,10 +45,19 @@ pub use super::chunker::{count_tokens, truncate_to_tokens};
 // =============================================================================
 
 /// Compiled regex patterns for semantic detection.
+/// Patterns are compiled with case-insensitive flag to avoid allocating
+/// a lowercased copy of the entire code string on every call.
 static COMPILED_PATTERNS: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+    use regex::RegexBuilder;
     SEMANTIC_PATTERNS
         .iter()
-        .filter_map(|p| Regex::new(p.pattern).ok().map(|re| (p.name, re)))
+        .filter_map(|p| {
+            RegexBuilder::new(p.pattern)
+                .case_insensitive(true)
+                .build()
+                .ok()
+                .map(|re| (p.name, re))
+        })
         .collect()
 });
 
@@ -167,11 +178,12 @@ pub fn detect_semantic_patterns(code: &str) -> Vec<String> {
         return Vec::new();
     }
 
-    let code_lower = code.to_lowercase();
+    // Patterns are compiled case-insensitive, so no need to allocate
+    // a lowercased copy of the (potentially huge) code string.
     let mut matched = Vec::new();
 
     for (name, regex) in COMPILED_PATTERNS.iter() {
-        if regex.is_match(&code_lower) {
+        if regex.is_match(code) {
             matched.push((*name).to_string());
         }
     }
@@ -185,17 +197,20 @@ pub fn detect_semantic_patterns(code: &str) -> Vec<String> {
 // =============================================================================
 
 /// Calculate indentation depth handling both tabs and spaces.
-/// Expands tabs to 4 spaces before counting.
+///
+/// Counts leading whitespace treating tabs as 4 spaces, without allocating.
+/// Called on every line during complexity analysis, so allocation-free is critical.
+#[inline]
 fn get_indent_depth(line: &str) -> usize {
-    let stripped = line.trim_start();
-    if stripped.is_empty() {
-        return 0;
+    let mut width = 0;
+    for b in line.bytes() {
+        match b {
+            b'\t' => width += 4,
+            b' ' => width += 1,
+            _ => break,
+        }
     }
-
-    let leading_len = line.len() - stripped.len();
-    let leading = &line[..leading_len];
-    let expanded = leading.replace('\t', "    ");
-    expanded.len() / 4
+    width / 4
 }
 
 /// Analyze code complexity without full AST parsing.
@@ -302,7 +317,7 @@ pub fn chunk_unit(unit: &EmbeddingUnit) -> Vec<EmbeddingUnit> {
         .enumerate()
         .map(|(i, chunk)| {
             let chunk_name = format!("{}[{}/{}]", unit.name, i + 1, chunks.len());
-            let lines_before = unit.code[..chunk.start_char].matches('\n').count();
+            let lines_before = memchr::memchr_iter(b'\n', unit.code[..chunk.start_char].as_bytes()).count();
 
             EmbeddingUnit {
                 id: format!("{}#chunk{}", unit.id, i + 1),
@@ -322,7 +337,7 @@ pub fn chunk_unit(unit: &EmbeddingUnit) -> Vec<EmbeddingUnit> {
                 } else {
                     unit.start_line + lines_before
                 },
-                end_line: unit.start_line + lines_before + chunk.text.matches('\n').count(),
+                end_line: unit.start_line + lines_before + memchr::memchr_iter(b'\n', chunk.text.as_bytes()).count(),
                 token_count: count_tokens(&chunk.text),
                 semantic_tags: detect_semantic_patterns(&chunk.text),
                 parent: Some(unit.name.clone()),
@@ -456,13 +471,19 @@ fn get_language_extensions(lang: &str) -> &'static [&'static str] {
         "go" => &[".go"],
         "rust" => &[".rs"],
         "java" => &[".java"],
-        "c" => &[".c", ".h"],
+        // `.h` files are handled exclusively by C++ -- the C++ tree-sitter grammar
+        // parses both C and C++ headers correctly, while the C grammar rejects C++
+        // constructs. Listing `.h` under both "c" and "cpp" would cause duplicate
+        // processing of every header file.
+        "c" => &[".c"],
         "cpp" => &[".cpp", ".hpp", ".cc", ".hh", ".cxx", ".hxx", ".h++", ".c++", ".cu", ".cuh", ".h"],
         _ => &[],
     }
 }
 
 /// Check if a file is binary by looking for null bytes.
+///
+/// Uses SIMD-accelerated memchr for fast null byte detection in the first 8KB.
 fn is_binary_file(path: &Path) -> bool {
     use std::fs::File;
     use std::io::Read;
@@ -476,7 +497,8 @@ fn is_binary_file(path: &Path) -> bool {
         return false;
     };
 
-    buffer[..bytes_read].contains(&0)
+    // SIMD-accelerated null byte search via memchr
+    memchr::memchr(0, &buffer[..bytes_read]).is_some()
 }
 
 /// Read file content with BOM handling and graceful encoding fallback.
@@ -509,7 +531,7 @@ fn read_file_content(path: &Path) -> std::io::Result<String> {
     // UTF-8 BOM (EF BB BF) - common in files created on Windows
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         let content = String::from_utf8_lossy(&bytes[3..]).into_owned();
-        return Ok(normalize_line_endings(&content));
+        return Ok(normalize_line_endings_owned(content));
     }
 
     // UTF-16 LE BOM (FF FE) - Windows default for some editors
@@ -519,7 +541,7 @@ fn read_file_content(path: &Path) -> std::io::Result<String> {
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk.get(1).copied().unwrap_or(0)]))
             .collect();
         let content = String::from_utf16_lossy(&utf16);
-        return Ok(normalize_line_endings(&content));
+        return Ok(normalize_line_endings_owned(content));
     }
 
     // UTF-16 BE BOM (FE FF)
@@ -529,7 +551,7 @@ fn read_file_content(path: &Path) -> std::io::Result<String> {
             .map(|chunk| u16::from_be_bytes([chunk[0], chunk.get(1).copied().unwrap_or(0)]))
             .collect();
         let content = String::from_utf16_lossy(&utf16);
-        return Ok(normalize_line_endings(&content));
+        return Ok(normalize_line_endings_owned(content));
     }
 
     // Try UTF-8 first (most common), fall back to lossy conversion
@@ -541,7 +563,19 @@ fn read_file_content(path: &Path) -> std::io::Result<String> {
     // Normalize line endings to LF for consistent processing across platforms.
     // This ensures token counts match between Python and Rust implementations.
     // Order matters: CRLF must be replaced before standalone CR.
-    Ok(normalize_line_endings(&content))
+    Ok(normalize_line_endings_owned(content))
+}
+
+/// Normalize line endings to LF (Unix-style) for consistent processing.
+/// Takes an owned String and returns it unchanged if no CR bytes are found,
+/// avoiding an unnecessary allocation in the common case.
+#[inline]
+fn normalize_line_endings_owned(content: String) -> String {
+    // Fast path: SIMD scan for any CR byte. Most files have no CR at all.
+    if memchr::memchr(b'\r', content.as_bytes()).is_none() {
+        return content;
+    }
+    normalize_line_endings_impl(&content)
 }
 
 /// Normalize line endings to LF (Unix-style) for consistent processing.
@@ -550,17 +584,44 @@ fn read_file_content(path: &Path) -> std::io::Result<String> {
 /// - CRLF (Windows): \r\n -> \n
 /// - CR (Classic Mac): \r -> \n
 ///
+/// Uses SIMD-accelerated memchr for fast CR detection and single-pass replacement.
 /// This ensures consistent behavior across platforms and matching token counts
 /// with the Python implementation.
 #[inline]
+#[cfg_attr(not(test), allow(dead_code))]
 fn normalize_line_endings(content: &str) -> String {
-    // Fast path: if no carriage returns, return as-is
-    if !content.contains('\r') {
+    // Fast path: SIMD scan for any CR byte. Most files have no CR at all.
+    if memchr::memchr(b'\r', content.as_bytes()).is_none() {
         return content.to_string();
     }
+    normalize_line_endings_impl(content)
+}
 
-    // Replace CRLF first, then any remaining standalone CR
-    content.replace("\r\n", "\n").replace('\r', "\n")
+/// Inner implementation: single-pass CR replacement using memchr.
+fn normalize_line_endings_impl(content: &str) -> String {
+    let bytes = content.as_bytes();
+    let mut result = String::with_capacity(content.len());
+    let mut pos = 0;
+    while pos < bytes.len() {
+        match memchr::memchr(b'\r', &bytes[pos..]) {
+            Some(offset) => {
+                // Copy everything before this CR
+                result.push_str(&content[pos..pos + offset]);
+                result.push('\n');
+                pos += offset + 1;
+                // Skip the \n in CRLF pairs
+                if pos < bytes.len() && bytes[pos] == b'\n' {
+                    pos += 1;
+                }
+            }
+            None => {
+                // No more CRs, copy the rest
+                result.push_str(&content[pos..]);
+                break;
+            }
+        }
+    }
+    result
 }
 
 /// Scan project for source files of the specified language.
@@ -714,17 +775,58 @@ fn methods_to_units(
 }
 
 /// Extract code for a function/class given line numbers.
+///
+/// Uses SIMD-accelerated memchr to find newline byte offsets, then slices
+/// directly from the content string. Avoids collecting all lines into a Vec
+/// (which was O(total_lines) even for a small function at the end of a file).
 fn extract_function_code(content: &str, start_line: usize, end_line: Option<usize>) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-
-    let start_idx = start_line.saturating_sub(1);
-    let end_idx = end_line.unwrap_or(lines.len()).min(lines.len());
-
-    if start_idx >= lines.len() {
+    if content.is_empty() || start_line == 0 {
         return String::new();
     }
 
-    lines[start_idx..end_idx].join("\n")
+    let bytes = content.as_bytes();
+    let target_start = start_line - 1; // Convert 1-indexed to 0-indexed
+
+    // Find byte offset of the start line
+    let mut line_count = 0;
+    let byte_start = if target_start == 0 {
+        0
+    } else {
+        let mut offset = 0;
+        for pos in memchr::memchr_iter(b'\n', bytes) {
+            line_count += 1;
+            if line_count == target_start {
+                offset = pos + 1;
+                break;
+            }
+        }
+        if line_count < target_start {
+            return String::new(); // start_line beyond file
+        }
+        offset
+    };
+
+    // Find byte offset of the end line
+    let byte_end = match end_line {
+        Some(end_idx) => {
+            // end_line is 1-indexed, inclusive. We want bytes up to end of that line.
+            let target_end = end_idx; // number of lines from start of file
+            let mut current_line = line_count; // lines counted so far
+            for pos in memchr::memchr_iter(b'\n', &bytes[byte_start..]) {
+                current_line += 1;
+                if current_line == target_end {
+                    // Return content up to (but not including) this newline
+                    let newline_offset = byte_start + pos;
+                    return content[byte_start..newline_offset].to_string();
+                }
+            }
+            // Reached end of content before end_line
+            content.len()
+        }
+        None => content.len(),
+    };
+
+    content[byte_start..byte_end].to_string()
 }
 
 // =============================================================================
@@ -761,6 +863,15 @@ pub fn extract_units(project_path: &str, language: &str) -> Result<Vec<Embedding
         )));
     }
 
+    // Eagerly initialize the tokenizer on the main thread BEFORE spawning
+    // rayon workers. The QWEN3_TOKENIZER uses once_cell::Lazy which blocks
+    // all threads during initialization. If the first access happens inside
+    // par_iter, ALL rayon worker threads block on the Lazy init, and if the
+    // init involves a network download (HuggingFace Hub), this can hang for
+    // minutes or indefinitely. By forcing init here, we pay the cost once
+    // on the main thread before any parallelism begins.
+    ensure_tokenizer_loaded();
+
     // Scan for source files
     let source_files = scan_source_files(&project, language);
 
@@ -768,14 +879,114 @@ pub fn extract_units(project_path: &str, language: &str) -> Result<Vec<Embedding
         return Ok(Vec::new());
     }
 
-    // Process files in parallel with caching
-    let units: Vec<EmbeddingUnit> = source_files
+    // Process files in parallel.
+    //
+    // DEADLOCK FIX: Previously used process_file_cached() which acquired
+    // UNIT_CACHE.read() then UNIT_CACHE.write() inside each par_iter task.
+    // With parking_lot's write-preferring RwLock, a queued writer blocks
+    // ALL new readers. When N rayon threads are all trying to write their
+    // results while new iterations need read access, the threads starve
+    // each other, causing effective deadlock on large codebases (100K+ files).
+    //
+    // The fix: use process_file_uncached() directly in par_iter (no shared
+    // mutable state). Cache is populated in bulk AFTER parallel processing
+    // completes, using a single write lock acquisition.
+    let results: Vec<(PathBuf, Vec<EmbeddingUnit>)> = source_files
         .par_iter()
-        .flat_map(|file_path| {
-            process_file_cached(&project, file_path, language).unwrap_or_default()
+        .filter_map(|file_path| {
+            match process_file_uncached(&project, file_path, language) {
+                Ok(units) if !units.is_empty() => Some((file_path.clone(), units)),
+                _ => None,
+            }
         })
         .collect();
 
+    // Bulk-populate cache with a single write lock (no contention).
+    // We clone units for the cache and consume the originals for the return,
+    // avoiding a second deep clone.
+    let mut all_units = Vec::with_capacity(results.iter().map(|(_, u)| u.len()).sum());
+    {
+        let mut cache = UNIT_CACHE.write();
+        for (file_path, units) in results {
+            if let Ok(canonical_path) = file_path.canonicalize() {
+                if let Ok(mtime) = file_path.metadata().and_then(|m| m.modified()) {
+                    cache.insert(
+                        canonical_path,
+                        CachedUnits {
+                            mtime,
+                            language: language.to_string(),
+                            units: units.clone(),
+                        },
+                    );
+                }
+            }
+            all_units.extend(units);
+        }
+    }
+
+    Ok(all_units)
+}
+
+/// Scan a project directory for source files matching the given language.
+///
+/// This is the public entry point for file discovery, used by the incremental
+/// indexing pipeline to enumerate files before classifying them against the
+/// hash cache.
+///
+/// # Arguments
+///
+/// * `project_path` - Canonicalized project root
+/// * `language` - Language filter (e.g., "python", "typescript")
+///
+/// # Returns
+///
+/// Sorted list of absolute paths to source files.
+pub fn scan_project_files(project_path: &Path, language: &str) -> Vec<PathBuf> {
+    scan_source_files(project_path, language)
+}
+
+/// Extract semantic units from a specific set of files (incremental mode).
+///
+/// Unlike `extract_units` which scans the entire project, this function
+/// processes only the provided file list. Used by the incremental indexing
+/// pipeline to reprocess only changed files.
+///
+/// # Arguments
+///
+/// * `project_root` - Canonicalized project root for relative path computation
+/// * `files` - List of absolute file paths to process
+/// * `language` - Programming language for AST parsing
+///
+/// # Returns
+///
+/// Vector of `EmbeddingUnit` objects from the specified files.
+pub fn extract_units_from_paths(
+    project_root: &Path,
+    files: &[PathBuf],
+    language: &str,
+) -> Result<Vec<EmbeddingUnit>> {
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Ensure tokenizer is loaded before parallel work (deadlock prevention)
+    ensure_tokenizer_loaded();
+
+    let results: Vec<(PathBuf, Vec<EmbeddingUnit>)> = files
+        .par_iter()
+        .filter_map(|file_path| {
+            match process_file_uncached(project_root, file_path, language) {
+                Ok(units) if !units.is_empty() => Some((file_path.clone(), units)),
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::debug!("Failed to extract units from {}: {}", file_path.display(), e);
+                    None
+                }
+            }
+        })
+        .collect();
+
+    let units: Vec<EmbeddingUnit> = results.into_iter().flat_map(|(_, units)| units).collect();
     Ok(units)
 }
 
@@ -982,6 +1193,12 @@ pub fn extract_units_with_callgraph(
     // Extract units as before
     let mut units = extract_units(project_path, language)?;
 
+    // Build a name-based index from the call graph for O(1) lookup per unit.
+    // The old approach iterated ALL edges for EVERY unit -- O(units * edges),
+    // with canonicalize() syscalls in the inner loop. For PyTorch (~100k edges,
+    // ~50k units) this caused extreme slowness. Now it's O(units + edges).
+    let func_index = build_callgraph_index(&call_graph);
+
     // Enrich with call graph data
     for unit in &mut units {
         // Skip chunks - they inherit call info from parent
@@ -989,26 +1206,35 @@ pub fn extract_units_with_callgraph(
             continue;
         }
 
-        // Find matching function in call graph
-        if let Some(func_ref) = find_function_in_graph(
-            &call_graph,
+        // Find matching function in call graph via index
+        if let Some(func_ref) = find_function_in_index(
+            &func_index,
             &project,
             &unit.file,
             &unit.name,
             unit.parent.as_deref(),
         ) {
-            // Get functions this unit calls (callees)
+            // Get functions this unit calls (callees).
+            // Sort and dedup BEFORE truncating to 20 -- the old order
+            // (take then sort/dedup) discarded valid entries and left
+            // non-deterministic results due to HashSet iteration order.
             if let Some(callees) = call_graph.callees.get(&func_ref) {
-                unit.calls = callees.iter().map(|f| f.name.clone()).take(20).collect();
-                unit.calls.sort();
-                unit.calls.dedup();
+                let mut names: Vec<String> =
+                    callees.iter().map(|f| f.name.clone()).collect();
+                names.sort();
+                names.dedup();
+                names.truncate(20);
+                unit.calls = names;
             }
 
             // Get functions that call this unit (callers)
             if let Some(callers) = call_graph.callers.get(&func_ref) {
-                unit.called_by = callers.iter().map(|f| f.name.clone()).take(20).collect();
-                unit.called_by.sort();
-                unit.called_by.dedup();
+                let mut names: Vec<String> =
+                    callers.iter().map(|f| f.name.clone()).collect();
+                names.sort();
+                names.dedup();
+                names.truncate(20);
+                unit.called_by = names;
             }
         }
     }
@@ -1019,82 +1245,96 @@ pub fn extract_units_with_callgraph(
     Ok(units)
 }
 
-/// Find a function reference in the call graph matching the given unit.
+/// Index of function name -> deduplicated list of FunctionRefs with that name.
 ///
-/// Handles matching between EmbeddingUnit (relative paths) and FunctionRef
-/// (absolute paths) by normalizing paths for comparison.
-fn find_function_in_graph(
-    graph: &CallGraph,
+/// Built once from the call graph, then used for O(1) name lookup
+/// instead of O(edges) linear scan per unit.
+type CallGraphIndex = FxHashMap<String, Vec<FunctionRef>>;
+
+/// Build a name-based index from a call graph.
+///
+/// Collects all unique FunctionRefs (from edges and index maps) keyed by name.
+/// Built ONCE then queried for each unit, replacing O(N*E) with O(N + E).
+fn build_callgraph_index(graph: &CallGraph) -> CallGraphIndex {
+    let mut index: CallGraphIndex = FxHashMap::default();
+
+    // Collect from edges
+    for edge in &graph.edges {
+        index
+            .entry(edge.caller.name.clone())
+            .or_default()
+            .push(edge.caller.clone());
+        index
+            .entry(edge.callee.name.clone())
+            .or_default()
+            .push(edge.callee.clone());
+    }
+
+    // Collect from index maps (may contain functions not in edges)
+    for func_ref in graph.callees.keys().chain(graph.callers.keys()) {
+        index
+            .entry(func_ref.name.clone())
+            .or_default()
+            .push(func_ref.clone());
+    }
+
+    // Deduplicate each bucket
+    for refs in index.values_mut() {
+        refs.sort_by(|a, b| a.file.cmp(&b.file));
+        refs.dedup();
+    }
+
+    index
+}
+
+/// Find a function reference in the pre-built index.
+///
+/// Uses O(1) name lookup then checks file path match among the (typically few)
+/// candidates sharing that name. No syscalls (canonicalize) in the hot path --
+/// only cheap string comparisons.
+fn find_function_in_index(
+    index: &CallGraphIndex,
     project_root: &Path,
     unit_file: &str,
     unit_name: &str,
     parent_class: Option<&str>,
 ) -> Option<FunctionRef> {
-    // Build expected absolute path from unit's relative path
+    let candidates = index.get(unit_name)?;
+
+    // Build expected absolute path once per lookup (not per candidate)
     let expected_path = project_root.join(unit_file);
     let expected_path_str = expected_path.to_string_lossy();
 
-    // Also try the unit file directly in case it's already absolute or a suffix match
     let matches_file = |func_file: &str| -> bool {
-        // Exact match
-        if func_file == expected_path_str {
+        // Exact match (most common case)
+        if func_file == expected_path_str.as_ref() {
             return true;
         }
         // Suffix match for relative paths
         if func_file.ends_with(unit_file) {
             return true;
         }
-        // Path normalization match
-        if let Ok(canonical) = Path::new(func_file).canonicalize() {
-            if canonical == expected_path {
-                return true;
-            }
+        // Reverse suffix match
+        if expected_path_str.ends_with(func_file) {
+            return true;
         }
         false
     };
 
-    // Search for matching function
-    for edge in &graph.edges {
-        // Check caller
-        if edge.caller.name == unit_name && matches_file(&edge.caller.file) {
-            // For methods, also check class match via qualified name
-            if let Some(class) = parent_class {
-                if let Some(ref qname) = edge.caller.qualified_name {
-                    if qname.contains(class) {
-                        return Some(edge.caller.clone());
-                    }
-                }
-            } else {
-                return Some(edge.caller.clone());
-            }
+    for func_ref in candidates {
+        if !matches_file(&func_ref.file) {
+            continue;
         }
-
-        // Check callee
-        if edge.callee.name == unit_name && matches_file(&edge.callee.file) {
-            if let Some(class) = parent_class {
-                if let Some(ref qname) = edge.callee.qualified_name {
-                    if qname.contains(class) {
-                        return Some(edge.callee.clone());
-                    }
+        // For methods, also check class match via qualified name
+        if let Some(class) = parent_class {
+            if let Some(ref qname) = func_ref.qualified_name {
+                if qname.contains(class) {
+                    return Some(func_ref.clone());
                 }
-            } else {
-                return Some(edge.callee.clone());
             }
-        }
-    }
-
-    // Also check the callees/callers indexes for functions that only appear in indexes
-    for func_ref in graph.callees.keys().chain(graph.callers.keys()) {
-        if func_ref.name == unit_name && matches_file(&func_ref.file) {
-            if let Some(class) = parent_class {
-                if let Some(ref qname) = func_ref.qualified_name {
-                    if qname.contains(class) {
-                        return Some(func_ref.clone());
-                    }
-                }
-            } else {
-                return Some(func_ref.clone());
-            }
+            // Parent class specified but no qualified name match -- skip candidate
+        } else {
+            return Some(func_ref.clone());
         }
     }
 
@@ -1302,8 +1542,13 @@ fn is_valid_comment(comment: &str) -> bool {
 
     // Skip if the comment is ONLY a noise pattern (allow "TODO: actual description")
     for pattern in noise_patterns {
-        if lower == pattern
-            || lower.starts_with(&format!("{} ", pattern)) && lower.len() < pattern.len() + 5
+        if lower == pattern {
+            return false;
+        }
+        // Short noise like "TODO fix" (pattern + space + <4 chars) -- not useful
+        if lower.len() < pattern.len() + 5
+            && lower.starts_with(pattern)
+            && lower.as_bytes().get(pattern.len()) == Some(&b' ')
         {
             return false;
         }
@@ -1520,110 +1765,134 @@ fn generate_semantic_description(unit: &EmbeddingUnit) -> String {
 /// suitable for embedding with a language model.
 #[must_use]
 pub fn build_embedding_text(unit: &EmbeddingUnit) -> String {
-    let mut parts = Vec::new();
+    // Pre-allocate a single buffer instead of N format!() allocations + join().
+    // Typical embedding text is ~1-8 KB; the code section dominates size.
+    let capacity = 256 + unit.code.len() + unit.signature.len();
+    let mut buf = String::with_capacity(capacity);
 
     // Header with type and name
-    let header = if unit.is_chunk() {
-        format!(
+    if unit.is_chunk() {
+        let _ = write!(
+            buf,
             "Chunk [{}/{}] of {}",
             unit.chunk_index + 1,
             unit.chunk_total,
             unit.parent.as_deref().unwrap_or(&unit.name)
-        )
+        );
     } else {
-        format!("{}: {}", unit.kind.as_str().to_uppercase(), unit.name)
-    };
-    parts.push(header);
+        // kind.as_str() returns lowercase; uppercase inline to avoid allocation
+        let kind = unit.kind.as_str();
+        for c in kind.chars() {
+            for upper in c.to_uppercase() {
+                buf.push(upper);
+            }
+        }
+        let _ = write!(buf, ": {}", unit.name);
+    }
 
     // Semantic tags
     if !unit.semantic_tags.is_empty() {
-        parts.push(format!("Categories: {}", unit.semantic_tags.join(", ")));
+        buf.push_str("\nCategories: ");
+        for (i, tag) in unit.semantic_tags.iter().enumerate() {
+            if i > 0 {
+                buf.push_str(", ");
+            }
+            buf.push_str(tag);
+        }
     }
 
     // Description: prefer docstring, fall back to generated description
     let has_docstring = unit
         .docstring
         .as_ref()
-        .map(|d| !d.is_empty())
-        .unwrap_or(false);
+        .is_some_and(|d| !d.is_empty());
 
     if has_docstring {
-        parts.push(format!("Description: {}", unit.docstring.as_ref().unwrap()));
+        buf.push_str("\nDescription: ");
+        buf.push_str(unit.docstring.as_ref().unwrap());
     } else {
-        // Generate rich semantic description when no docstring
         let description = generate_semantic_description(unit);
         if !description.is_empty() {
-            parts.push(format!("Purpose: {}", description));
+            buf.push_str("\nPurpose: ");
+            buf.push_str(&description);
         }
     }
 
-    // Only add separate "Purpose" line if we have a docstring
-    // (to supplement the docstring with parsed name)
+    // Supplement docstring with parsed name meaning
     if has_docstring {
         let name_words = parse_identifier_to_words(&unit.name);
         if !name_words.is_empty() && name_words != unit.name.to_lowercase() {
-            parts.push(format!("Name meaning: {}", name_words));
+            buf.push_str("\nName meaning: ");
+            buf.push_str(&name_words);
         }
     }
 
     // Signature
     if !unit.signature.is_empty() {
-        parts.push(format!("Signature: {}", unit.signature));
+        buf.push_str("\nSignature: ");
+        buf.push_str(&unit.signature);
     }
 
     // Complexity
     if let Some(complexity_desc) = unit.complexity.describe() {
-        parts.push(format!("Complexity: {}", complexity_desc));
+        buf.push_str("\nComplexity: ");
+        buf.push_str(&complexity_desc);
     }
 
     // Call relationships
     if !unit.calls.is_empty() {
-        let calls_words: Vec<_> = unit
-            .calls
-            .iter()
-            .take(5)
-            .map(|c| parse_identifier_to_words(c))
-            .filter(|w| !w.is_empty())
-            .collect();
-        if !calls_words.is_empty() {
-            parts.push(format!("Uses: {}", calls_words.join(", ")));
+        let mut first = true;
+        for word in unit.calls.iter().take(5).map(|c| parse_identifier_to_words(c)).filter(|w| !w.is_empty()) {
+            if first {
+                buf.push_str("\nUses: ");
+                first = false;
+            } else {
+                buf.push_str(", ");
+            }
+            buf.push_str(&word);
         }
     }
 
     if !unit.called_by.is_empty() {
-        let callers_words: Vec<_> = unit
-            .called_by
-            .iter()
-            .take(5)
-            .map(|c| parse_identifier_to_words(c))
-            .filter(|w| !w.is_empty())
-            .collect();
-        if !callers_words.is_empty() {
-            parts.push(format!("Used by: {}", callers_words.join(", ")));
+        let mut first = true;
+        for word in unit.called_by.iter().take(5).map(|c| parse_identifier_to_words(c)).filter(|w| !w.is_empty()) {
+            if first {
+                buf.push_str("\nUsed by: ");
+                first = false;
+            } else {
+                buf.push_str(", ");
+            }
+            buf.push_str(&word);
         }
     }
 
     // Dependencies
     if !unit.dependencies.is_empty() {
-        parts.push(format!("Dependencies: {}", unit.dependencies));
+        buf.push_str("\nDependencies: ");
+        buf.push_str(&unit.dependencies);
     }
 
     // Inline comments (valuable natural language for semantic search)
     if !unit.code.is_empty() {
         let comments = extract_inline_comments(&unit.code, &unit.language);
         if !comments.is_empty() {
-            parts.push(format!("Code comments: {}", comments.join("; ")));
+            buf.push_str("\nCode comments: ");
+            for (i, comment) in comments.iter().enumerate() {
+                if i > 0 {
+                    buf.push_str("; ");
+                }
+                buf.push_str(comment);
+            }
         }
     }
 
     // Code preview
     if !unit.code.is_empty() {
-        parts.push(format!("Code:\n{}", unit.code));
+        buf.push_str("\nCode:\n");
+        buf.push_str(&unit.code);
     }
 
-    // Join and truncate
-    let result = parts.join("\n");
-    truncate_to_tokens(&result, MAX_EMBEDDING_TOKENS)
+    truncate_to_tokens(&buf, MAX_EMBEDDING_TOKENS)
 }
 
 // =============================================================================

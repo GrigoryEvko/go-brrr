@@ -212,6 +212,22 @@ impl FunctionIndex {
             self.by_qualified.insert(qname.clone(), idx);
         }
 
+        // For C/C++: also register namespace-qualified names without the file-stem prefix.
+        // C++ qualified names in real code use namespace::function, not filestem::namespace::function.
+        // Binding detectors (pybind11, CUDA dispatch) produce names like "at::native::threshold_kernel"
+        // but the full qualified name in the index is "Activation::at::native::threshold_kernel".
+        // By also registering the namespace-only form, we enable direct lookup without suffix matching.
+        if matches!(func_def.language.as_str(), "c" | "cpp") {
+            if let Some(ref class_name) = func_def.class_name {
+                // class_name is the namespace/class path (e.g., "at::native" or "MyClass")
+                // Register class_name::func_name directly
+                let ns_qname = format!("{}::{}", class_name, name);
+                if func_def.func_ref.qualified_name.as_ref() != Some(&ns_qname) {
+                    self.by_qualified.entry(ns_qname).or_insert(idx);
+                }
+            }
+        }
+
         // Index by simple module (Python compatibility: "module.func" lookups)
         if let Some(ref simple_module) = func_def.simple_module {
             // Add to by_simple_module: (simple_module, func_name) -> Vec<usize>
@@ -226,13 +242,18 @@ impl FunctionIndex {
             // Example: nested.Outer.Middle.Inner -> simple: nested.Inner (WRONG, loses path)
             //
             // Nesting detection:
-            // - For methods (is_method=true): nested if class_name contains a dot (e.g., "Outer.Middle")
+            // - For methods (is_method=true): nested if class_name contains a nesting separator
+            //   (e.g., "Outer.Middle" for Python, "Outer::Middle" for C++)
             // - For classes (is_method=false): nested if class_name is Some (parent class exists)
+            let nesting_sep = match func_def.language.as_str() {
+                "c" | "cpp" => "::",
+                _ => ".",
+            };
             let is_nested_item = if func_def.is_method {
                 func_def
                     .class_name
                     .as_ref()
-                    .is_some_and(|c| c.contains('.'))
+                    .is_some_and(|c| c.contains(nesting_sep))
             } else {
                 func_def.class_name.is_some()
             };
@@ -440,6 +461,56 @@ impl FunctionIndex {
     #[allow(dead_code)]
     pub fn iter(&self) -> impl Iterator<Item = &FunctionDef> {
         self.functions.iter()
+    }
+
+    /// Look up functions whose qualified name ends with the given suffix.
+    ///
+    /// Critical for C/C++ binding resolution where detectors produce
+    /// namespace-qualified names like `at::native::threshold_kernel` but
+    /// the index stores them with a file-stem prefix like
+    /// `Activation::at::native::threshold_kernel`.
+    ///
+    /// Uses separator boundary checking to ensure suffix matches occur at
+    /// component boundaries (not in the middle of an identifier).
+    ///
+    /// # Arguments
+    /// * `suffix` - The qualified name suffix to match (e.g., `"at::native::threshold_kernel"`)
+    ///
+    /// # Returns
+    /// * `Vec<&FunctionRef>` - All functions whose qualified name ends with this suffix
+    ///
+    /// # Performance
+    /// O(n) where n is the number of entries in by_qualified. This is a fallback
+    /// lookup method; prefer exact lookup_qualified when possible.
+    pub fn lookup_by_suffix(&self, suffix: &str) -> Vec<&FunctionRef> {
+        if suffix.is_empty() {
+            return Vec::new();
+        }
+
+        let mut results = Vec::new();
+        for (qname, &idx) in &self.by_qualified {
+            if qname.ends_with(suffix) {
+                // Verify the match is at a separator boundary, not mid-identifier.
+                // For "foo::bar" matching "module::foo::bar", the char before the
+                // suffix must be a separator (::, ., /) or the suffix must be the
+                // entire string.
+                let prefix_len = qname.len() - suffix.len();
+                if prefix_len == 0 {
+                    // Exact match
+                    results.push(&self.functions[idx].func_ref);
+                } else {
+                    // Check separator boundary
+                    let prefix = &qname[..prefix_len];
+                    let is_boundary = prefix.ends_with("::")
+                        || prefix.ends_with('.')
+                        || prefix.ends_with('/');
+                    if is_boundary {
+                        results.push(&self.functions[idx].func_ref);
+                    }
+                }
+            }
+        }
+        results
     }
 }
 
@@ -665,9 +736,14 @@ fn index_class_recursive(
     simple_module: &Option<String>,
     functions: &mut Vec<FunctionDef>,
 ) {
-    // Build the full class path including parent context
+    // Build the full class path including parent context.
+    // Use language-appropriate separator: C/C++ use "::", others use ".".
+    let class_nesting_sep = match language {
+        "c" | "cpp" => "::",
+        _ => ".",
+    };
     let full_class_path = match parent_class_path {
-        Some(parent) => format!("{}.{}", parent, class.name),
+        Some(parent) => format!("{}{}{}", parent, class_nesting_sep, class.name),
         None => class.name.clone(),
     };
 
@@ -879,7 +955,7 @@ fn build_qualified_name(module: &str, class: Option<&str>, name: &str, language:
     // Others (Python, Java, Go): use . for everything
     let (module_sep, class_sep) = match language {
         "typescript" | "javascript" => ("/", "."),
-        "rust" | "c" => ("::", "::"),
+        "rust" | "c" | "cpp" => ("::", "::"),
         _ => (".", "."), // Python, Java, Go, and default
     };
 
@@ -922,7 +998,7 @@ fn build_qualified_name(module: &str, class: Option<&str>, name: &str, language:
 #[inline]
 fn build_simple_qualified_name(simple_module: &str, name: &str, language: &str) -> String {
     let sep = match language {
-        "rust" | "c" => "::",
+        "rust" | "c" | "cpp" => "::",
         "typescript" | "javascript" => "/",
         _ => ".",
     };
@@ -1733,6 +1809,189 @@ class Parent:
         assert!(
             not_found.is_empty(),
             "Should NOT find child_method with class_name='Child' (needs full path)"
+        );
+    }
+
+    // =========================================================================
+    // C++ Namespace/Class Separator and Lookup Tests
+    // =========================================================================
+
+    #[test]
+    fn test_cpp_class_path_uses_double_colon_separator() {
+        // BUG FIX TEST: C++ nested classes/namespaces should use "::" separator
+        // in class_name and qualified names, not ".".
+        //
+        // Previously: class_name = "at.native" (Python-style, WRONG for C++)
+        // Fixed:      class_name = "at::native" (C++-style)
+        let dir = TempDir::new().unwrap();
+
+        let content = r#"
+namespace at {
+namespace native {
+
+void threshold_kernel() {}
+
+}
+}
+"#;
+        let file = create_temp_file(&dir, "Activation.cpp", content);
+        let index = FunctionIndex::build_with_root(&[file], Some(dir.path())).unwrap();
+
+        // The class_name for threshold_kernel should use :: separator
+        let funcs = index.lookup("threshold_kernel");
+        assert!(!funcs.is_empty(), "Should find threshold_kernel");
+
+        let qname = funcs[0].qualified_name.as_ref().unwrap();
+        let def = index.get_definition(qname).unwrap();
+        assert_eq!(
+            def.class_name,
+            Some("at::native".to_string()),
+            "C++ nested namespace class_name should use :: separator, not ."
+        );
+
+        // lookup_method should work with :: separator
+        let methods = index.lookup_method("at::native", "threshold_kernel");
+        assert!(
+            !methods.is_empty(),
+            "lookup_method should find threshold_kernel with 'at::native'"
+        );
+
+        // lookup_method should NOT work with dot separator (Python-style)
+        let wrong = index.lookup_method("at.native", "threshold_kernel");
+        assert!(
+            wrong.is_empty(),
+            "lookup_method should NOT find with 'at.native' (dot separator)"
+        );
+    }
+
+    #[test]
+    fn test_cpp_namespace_qualified_name_without_file_stem() {
+        // C++ functions inside namespaces should be findable by their
+        // namespace-qualified name without the file-stem prefix.
+        //
+        // pybind11 detector produces: "at::native::threshold_kernel"
+        // Full qualified name stored: "Activation::at::native::threshold_kernel"
+        // Namespace-only form also:   "at::native::threshold_kernel"
+        let dir = TempDir::new().unwrap();
+
+        let content = r#"
+namespace at {
+namespace native {
+void threshold_kernel() {}
+void leaky_relu_kernel() {}
+}
+}
+"#;
+        let file = create_temp_file(&dir, "Activation.cpp", content);
+        let index = FunctionIndex::build_with_root(&[file], Some(dir.path())).unwrap();
+
+        // Should be findable by namespace::function (without file stem)
+        let result = index.lookup_qualified("at::native::threshold_kernel");
+        assert!(
+            result.is_some(),
+            "Should find threshold_kernel by namespace-only qualified name"
+        );
+
+        // Full qualified name (with file stem) should also work
+        let result_full = index.lookup_qualified("Activation::at::native::threshold_kernel");
+        assert!(
+            result_full.is_some(),
+            "Should also find by full qualified name with file stem"
+        );
+    }
+
+    #[test]
+    fn test_cpp_nested_namespace_cpp17_syntax() {
+        // C++17 nested namespace syntax: namespace at::native { ... }
+        let dir = TempDir::new().unwrap();
+
+        let content = r#"
+namespace at::native {
+void threshold_kernel() {}
+}
+"#;
+        let file = create_temp_file(&dir, "Activation.cpp", content);
+        let index = FunctionIndex::build_with_root(&[file], Some(dir.path())).unwrap();
+
+        // Should be findable by the namespace path
+        let result = index.lookup_qualified("at::native::threshold_kernel");
+        assert!(
+            result.is_some(),
+            "Should find threshold_kernel via C++17 nested namespace syntax"
+        );
+    }
+
+    #[test]
+    fn test_lookup_by_suffix() {
+        // Test the suffix-matching lookup for C++ qualified names
+        let dir = TempDir::new().unwrap();
+
+        let content = r#"
+namespace at {
+namespace native {
+void threshold_kernel() {}
+}
+}
+void global_func() {}
+"#;
+        let file = create_temp_file(&dir, "Activation.cpp", content);
+        let index = FunctionIndex::build_with_root(&[file], Some(dir.path())).unwrap();
+
+        // Suffix lookup should find by namespace::function
+        let results = index.lookup_by_suffix("at::native::threshold_kernel");
+        assert!(
+            !results.is_empty(),
+            "lookup_by_suffix should find threshold_kernel"
+        );
+
+        // Should NOT match partial identifiers
+        let partial = index.lookup_by_suffix("reshold_kernel");
+        assert!(
+            partial.is_empty(),
+            "lookup_by_suffix should NOT match partial identifiers (no separator boundary)"
+        );
+
+        // Should find with just the function name as suffix (if unique in by_qualified)
+        // Note: this matches "Activation::global_func" suffix "global_func"
+        let simple_suffix = index.lookup_by_suffix("global_func");
+        // The entry "Activation::global_func" ends with "global_func" and prefix "Activation::" ends with "::"
+        assert!(
+            !simple_suffix.is_empty(),
+            "lookup_by_suffix should find global_func with :: boundary"
+        );
+
+        // Empty suffix should return empty
+        let empty = index.lookup_by_suffix("");
+        assert!(empty.is_empty(), "Empty suffix should return empty");
+    }
+
+    #[test]
+    fn test_cpp_class_method_qualified_name() {
+        // C++ class methods should also get namespace-qualified entries
+        let dir = TempDir::new().unwrap();
+
+        let content = r#"
+class MyClass {
+public:
+    void myMethod() {}
+    static void staticMethod() {}
+};
+"#;
+        let file = create_temp_file(&dir, "utils.cpp", content);
+        let index = FunctionIndex::build_with_root(&[file], Some(dir.path())).unwrap();
+
+        // Method should be findable by class::method
+        let result = index.lookup_qualified("MyClass::myMethod");
+        assert!(
+            result.is_some(),
+            "Should find MyClass::myMethod by class-qualified name"
+        );
+
+        // And by lookup_method
+        let methods = index.lookup_method("MyClass", "myMethod");
+        assert!(
+            !methods.is_empty(),
+            "Should find myMethod via lookup_method"
         );
     }
 }

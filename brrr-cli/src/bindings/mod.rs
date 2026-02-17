@@ -52,7 +52,7 @@ pub fn scan_bindings(
 
 /// Scan pre-discovered files for bindings using an existing function index.
 ///
-/// This is the callgraph-integration entry point — avoids duplicate scanning
+/// This is the callgraph-integration entry point -- avoids duplicate scanning
 /// when the callgraph builder already has the file list and index.
 pub fn scan_bindings_from_files(
     files: &[PathBuf],
@@ -103,7 +103,17 @@ fn scan_file_bindings(
     }
 
     // Read source
-    let source = std::fs::read(path).ok()?;
+    let source = match std::fs::read(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "brrr: bindings: failed to read {}: {}",
+                path.display(),
+                e
+            );
+            return None;
+        }
+    };
 
     // Quick check: any detector interested?
     let interested: Vec<_> = detectors
@@ -114,16 +124,43 @@ fn scan_file_bindings(
         return None;
     }
 
-    // Parse once with cached tree-sitter parser
-    let mut parser = lang.parser_for_path(path).ok()?;
-    let tree = parser.parse(&source, None)?;
+    // Parse once with tree-sitter
+    let mut parser = match lang.parser_for_path(path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "brrr: bindings: parser init failed for {}: {}",
+                path.display(),
+                e
+            );
+            return None;
+        }
+    };
+    let tree = match parser.parse(&source, None) {
+        Some(t) => t,
+        None => {
+            eprintln!(
+                "brrr: bindings: tree-sitter parse failed for {}",
+                path.display()
+            );
+            return None;
+        }
+    };
 
     // Run all interested detectors
     let mut declarations = Vec::new();
     let file_str = path.display().to_string();
     for detector in interested {
-        if let Ok(mut decls) = detector.detect(&tree, &source, &file_str, language) {
-            declarations.append(&mut decls);
+        match detector.detect(&tree, &source, &file_str, language) {
+            Ok(mut decls) => declarations.append(&mut decls),
+            Err(e) => {
+                eprintln!(
+                    "brrr: bindings: {} detector failed on {}: {}",
+                    detector.system(),
+                    path.display(),
+                    e
+                );
+            }
         }
     }
 

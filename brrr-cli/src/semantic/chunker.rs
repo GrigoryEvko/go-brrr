@@ -45,7 +45,6 @@
 use std::sync::OnceLock;
 
 use once_cell::sync::Lazy;
-use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer;
@@ -465,6 +464,24 @@ static QWEN3_TOKENIZER: Lazy<Option<Tokenizer>> =
             }
         },
     );
+
+/// Eagerly initialize the tokenizer on the calling thread.
+///
+/// Forces `QWEN3_TOKENIZER` to load synchronously. This MUST be called on the
+/// main thread before any rayon `par_iter` that uses `count_tokens`, because:
+///
+/// 1. `QWEN3_TOKENIZER` is a `Lazy<Option<Tokenizer>>` backed by `once_cell`.
+/// 2. On first access, it downloads the tokenizer from HuggingFace Hub (network I/O).
+/// 3. All concurrent callers of the `Lazy` block until initialization finishes.
+/// 4. If first access happens inside a rayon `par_iter`, ALL worker threads block
+///    on the Lazy init, and if the download is slow/hangs, the entire pipeline hangs.
+///
+/// By calling this before par_iter, we pay the network cost once on the main
+/// thread, then all rayon workers get instant access.
+pub fn ensure_tokenizer_loaded() {
+    // Force the Lazy to initialize by dereferencing it.
+    let _ = QWEN3_TOKENIZER.as_ref();
+}
 
 /// Count tokens in a string using the Qwen3-Embedding tokenizer.
 ///
@@ -947,6 +964,12 @@ pub async fn compare_tokenizer_counts(
 ///
 /// The formula is: number of newlines + 1 = number of lines.
 ///
+/// ## Performance
+///
+/// Uses `memchr` for SIMD-accelerated newline counting. The `memchr` crate
+/// automatically selects optimal SIMD width (AVX2/SSE2/NEON) and has a
+/// highly tuned inner loop that outperforms hand-rolled SIMD for byte search.
+///
 /// # Examples
 ///
 /// - `""` -> 0 (empty string has no lines)
@@ -958,37 +981,15 @@ pub async fn compare_tokenizer_counts(
 #[inline]
 #[must_use]
 pub fn count_lines(content: &str) -> usize {
-    use std::simd::{cmp::SimdPartialEq, u8x32};
-
     if content.is_empty() {
         return 0;
     }
 
-    let bytes = content.as_bytes();
-    let len = bytes.len();
-    let newline_vec = u8x32::splat(b'\n');
-
-    let mut count = 0_usize;
-    let mut offset = 0_usize;
-
-    // SIMD: process 32 bytes at a time
-    while offset + 32 <= len {
-        // SAFETY: bounds check guarantees bytes[offset..offset+32] is valid
-        let chunk = u8x32::from_slice(&bytes[offset..offset + 32]);
-        let mask = chunk.simd_eq(newline_vec);
-        count += mask.to_bitmask().count_ones() as usize;
-        offset += 32;
-    }
-
-    // Scalar: handle remaining bytes (0..31)
-    for &byte in &bytes[offset..] {
-        if byte == b'\n' {
-            count += 1;
-        }
-    }
+    // memchr uses SIMD-accelerated byte search (AVX2/SSE2/NEON automatically)
+    let newline_count = memchr::memchr_iter(b'\n', content.as_bytes()).count();
 
     // Number of lines = number of newlines + 1
-    count + 1
+    newline_count + 1
 }
 
 /// Truncate text to fit within a token limit.
@@ -1017,47 +1018,53 @@ pub fn truncate_to_tokens(text: &str, max_tokens: usize) -> String {
         return String::new();
     }
 
-    let current_tokens = count_tokens(text);
-    if current_tokens <= max_tokens {
-        return text.to_string();
-    }
-
-    // Use the Qwen3 tokenizer for precise truncation (matches Python exactly)
+    // Encode ONCE and use the result for both counting and truncation.
+    // Previously this called count_tokens() first (full BPE pass), then
+    // encoded again for truncation -- two full tokenizer passes on the
+    // entire text. Now we do a single pass.
     match QWEN3_TOKENIZER.as_ref() {
-        Some(tokenizer) => {
-            // encode without adding special tokens (matches Python's add_special_tokens=False)
-            match tokenizer.encode(text, false) {
-                Ok(encoding) => {
-                    let ids = encoding.get_ids();
-                    if ids.len() <= max_tokens {
-                        return text.to_string();
-                    }
-                    // Truncate to max_tokens and decode back to text
-                    let truncated_ids: Vec<u32> = ids[..max_tokens].to_vec();
-                    tokenizer.decode(&truncated_ids, true).unwrap_or_else(|_| {
-                        // Fallback on decode error: estimate character count
-                        truncate_by_chars(text, max_tokens)
-                    })
+        Some(tokenizer) => match tokenizer.encode(text, false) {
+            Ok(encoding) => {
+                let ids = encoding.get_ids();
+                if ids.len() <= max_tokens {
+                    return text.to_string();
                 }
-                Err(_) => truncate_by_chars(text, max_tokens),
+                // Truncate to max_tokens and decode back to text
+                let truncated_ids = &ids[..max_tokens];
+                tokenizer.decode(truncated_ids, true).unwrap_or_else(|_| {
+                    truncate_by_chars(text, max_tokens)
+                })
+            }
+            Err(_) => truncate_by_chars(text, max_tokens),
+        },
+        None => {
+            // Fallback: use char estimation for both check and truncation
+            let estimated = estimate_tokens_unicode_aware(text);
+            if estimated <= max_tokens {
+                text.to_string()
+            } else {
+                truncate_by_chars(text, max_tokens)
             }
         }
-        None => truncate_by_chars(text, max_tokens),
     }
 }
 
 /// Fallback character-based truncation when tokenizer unavailable.
 ///
 /// Estimates ~4 characters per token and tries to find a clean word boundary.
+/// Uses `floor_char_boundary` to avoid panicking on multi-byte UTF-8 sequences.
 #[inline]
 fn truncate_by_chars(text: &str, max_tokens: usize) -> String {
-    let max_chars = max_tokens * 4;
-    if text.len() <= max_chars {
+    let max_bytes = max_tokens * 4;
+    if text.len() <= max_bytes {
         return text.to_string();
     }
 
+    // Snap to a valid UTF-8 char boundary to avoid panic on multi-byte chars.
+    let safe_end = text.floor_char_boundary(max_bytes);
+    let truncated = &text[..safe_end];
+
     // Find nearest word boundary for clean truncation
-    let truncated = &text[..max_chars.min(text.len())];
     match truncated.rfind(char::is_whitespace) {
         Some(pos) => truncated[..pos].to_string(),
         None => truncated.to_string(),
@@ -1419,8 +1426,8 @@ struct BoundaryPatterns {
     class_start: Regex,
     /// Matches comment lines
     comment: Regex,
-    /// Matches blank or whitespace-only lines
-    blank: Regex,
+    // NOTE: `blank` regex removed -- blank line detection now uses
+    // `trim().is_empty()` which is faster than regex for this case.
 }
 
 impl BoundaryPatterns {
@@ -1464,9 +1471,6 @@ impl BoundaryPatterns {
             comment: Regex::new(
                 r#"^\s*(?:#(?:$|[^!\[#])|//|/\*|"""|'''|--(?:$|[^>])|\(\*|%(?:$|[^%=])|;|<!--|!(?:\s|$)|'(?:$|[^']))"#
             ).expect("valid regex"),
-
-            // Blank line
-            blank: Regex::new(r"^\s*$").expect("valid regex"),
         }
     }
 }
@@ -1474,16 +1478,25 @@ impl BoundaryPatterns {
 /// Detect code boundaries in the given lines.
 ///
 /// Scans each line and identifies potential split points based on
-/// code structure patterns.
+/// code structure patterns. Blank-line detection uses a simple
+/// `trim_ascii().is_empty()` check instead of a regex for speed.
 fn detect_boundaries(lines: &[&str], line_offsets: &[usize]) -> Vec<Boundary> {
-    let mut boundaries = Vec::new();
+    let mut boundaries = Vec::with_capacity(lines.len() / 4);
     let patterns = &*BOUNDARY_PATTERNS;
 
     for (idx, line) in lines.iter().enumerate() {
         let char_offset = line_offsets.get(idx).copied().unwrap_or(0);
+        let trimmed = line.trim();
 
-        // Check patterns in order of priority (highest first)
-        if patterns.class_start.is_match(line) {
+        // Fast path: blank lines are extremely common and need no regex
+        if trimmed.is_empty() {
+            boundaries.push(Boundary {
+                line_idx: idx,
+                char_offset,
+                kind: BoundaryKind::BlankLine,
+            });
+        } else if patterns.class_start.is_match(line) {
+            // Check class/struct/impl patterns (highest priority after blank)
             boundaries.push(Boundary {
                 line_idx: idx,
                 char_offset,
@@ -1494,12 +1507,6 @@ fn detect_boundaries(lines: &[&str], line_offsets: &[usize]) -> Vec<Boundary> {
                 line_idx: idx,
                 char_offset,
                 kind: BoundaryKind::FunctionStart,
-            });
-        } else if patterns.blank.is_match(line) {
-            boundaries.push(Boundary {
-                line_idx: idx,
-                char_offset,
-                kind: BoundaryKind::BlankLine,
             });
         } else if patterns.comment.is_match(line) {
             boundaries.push(Boundary {
@@ -1512,20 +1519,11 @@ fn detect_boundaries(lines: &[&str], line_offsets: &[usize]) -> Vec<Boundary> {
         // Detect block ends by checking for any dedent (single or multiple levels).
         // For Python/indent-based languages, any dedent back to a lower indent level
         // marks the end of a code block (if, for, while, with, try, etc.).
-        //
-        // Example:
-        //   def foo():
-        //       if x:
-        //           pass
-        //       bar()  # Single dedent from indent=2 to indent=1 - should be detected
-        //
-        // Previously this required 2-level dedents (prev_indent > curr_indent + 1),
-        // which missed single-level dedents like the `bar()` line above.
-        if idx > 0 {
+        if idx > 0 && !trimmed.is_empty() {
             let prev_indent = get_indent_depth(lines[idx - 1]);
             let curr_indent = get_indent_depth(line);
             // Any dedent (prev_indent > curr_indent) indicates potential block end
-            if prev_indent > curr_indent && !line.trim().is_empty() {
+            if prev_indent > curr_indent {
                 boundaries.push(Boundary {
                     line_idx: idx,
                     char_offset,
@@ -1540,20 +1538,19 @@ fn detect_boundaries(lines: &[&str], line_offsets: &[usize]) -> Vec<Boundary> {
 
 /// Calculate indentation depth of a line.
 ///
-/// Expands tabs to 4 spaces for consistent counting.
+/// Counts leading whitespace treating tabs as 4 spaces, without allocating.
+/// Called on every line during boundary detection, so allocation-free is critical.
 #[inline]
 fn get_indent_depth(line: &str) -> usize {
-    let stripped = line.trim_start();
-    if stripped.is_empty() {
-        return 0;
+    let mut width = 0;
+    for b in line.bytes() {
+        match b {
+            b'\t' => width += 4,
+            b' ' => width += 1,
+            _ => break,
+        }
     }
-
-    let leading_len = line.len() - stripped.len();
-    let leading = &line[..leading_len];
-    // Expand tabs to 4 spaces
-    let expanded_len: usize = leading.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum();
-
-    expanded_len / 4
+    width / 4
 }
 
 // =============================================================================
@@ -1683,22 +1680,35 @@ fn chunk_with_boundaries(
 ) -> Vec<Chunk> {
     let mut chunks = Vec::new();
 
-    // Pre-compute all line token counts in parallel using rayon.
-    // This leverages the thread-local tokenizer to parallelize token counting,
-    // reducing O(n) sequential tokenizer calls to O(n/cores) parallel calls.
-    // For a 1000-line file on 8 cores, this is ~8x faster.
+    // Pre-compute all line token counts SEQUENTIALLY.
+    //
+    // DEADLOCK FIX: This function is called from within rayon par_iter (file-level
+    // parallelism in extract_units). Using par_iter here creates NESTED parallelism
+    // on the same rayon thread pool. While rayon handles nesting via work-stealing,
+    // the combination with global RwLock acquisitions in the outer loop creates a
+    // deadlock scenario: inner par_iter tasks queue on worker threads that are
+    // blocked on RwLock writes from the outer par_iter. Sequential iteration here
+    // is fast enough (tokenization per line is ~1us) and eliminates the deadlock.
+    //
+    // Token counting includes the newline byte for all lines except the last,
+    // matching the accounting used elsewhere. We avoid per-line String allocation
+    // by counting the line alone and adding 1 for the newline token -- newlines
+    // encode as exactly 1 token in Qwen3-Embedding and most BPE tokenizers.
+    let last_line_idx = lines.len().saturating_sub(1);
     let line_token_counts: Vec<usize> = lines
-        .par_iter()
+        .iter()
         .enumerate()
         .map(|(idx, line)| {
-            let with_newline = if idx < lines.len() - 1 {
-                format!("{}\n", line)
-            } else {
-                (*line).to_string()
-            };
-            count_tokens(&with_newline)
+            let base = count_tokens(line);
+            // Add 1 token for the newline on all lines except the last
+            if idx < last_line_idx { base + 1 } else { base }
         })
         .collect();
+
+    // Build a HashSet of boundary line indices for O(1) lookup.
+    // Replaces `boundaries.iter().any(|b| b.line_idx == line_idx)` which was O(B) per line.
+    let boundary_set: std::collections::HashSet<usize> =
+        boundaries.iter().map(|b| b.line_idx).collect();
 
     // Track current chunk state
     let mut chunk_start_line = 0;
@@ -1709,7 +1719,7 @@ fn chunk_with_boundaries(
     let mut overlap_lines: Vec<usize>;
     let mut overlap_token_count: usize;
 
-    for (line_idx, _line) in lines.iter().enumerate() {
+    for line_idx in 0..lines.len() {
         // Use pre-computed token count instead of calling count_tokens each iteration
         let line_tokens = line_token_counts[line_idx];
 
@@ -1724,9 +1734,10 @@ fn chunk_with_boundaries(
                 create_chunk_from_range(code, lines, line_offsets, chunk_start_line, split_line);
             chunks.push(chunk);
 
-            // Calculate overlap for next chunk (only scan within current chunk)
+            // Calculate overlap for next chunk (only scan within current chunk).
+            // Uses pre-computed token counts to avoid re-tokenizing lines.
             (overlap_lines, overlap_token_count) =
-                calculate_overlap(lines, chunk_start_line, split_line, overlap_tokens);
+                calculate_overlap_precomputed(&line_token_counts, chunk_start_line, split_line, overlap_tokens);
 
             // Start new chunk with overlap
             chunk_start_line = split_line.saturating_sub(overlap_lines.len());
@@ -1734,8 +1745,8 @@ fn chunk_with_boundaries(
             last_good_boundary = None;
         }
 
-        // Check if this line is a good boundary
-        if boundaries.iter().any(|b| b.line_idx == line_idx) {
+        // O(1) boundary check via HashSet instead of O(B) linear scan
+        if boundary_set.contains(&line_idx) {
             last_good_boundary = Some(line_idx);
         }
 
@@ -1766,6 +1777,8 @@ fn chunk_with_boundaries(
 }
 
 /// Find the best line to split at, preferring natural boundaries.
+///
+/// Avoids allocating a temporary Vec by using iterator `max_by_key` directly.
 fn find_best_split(
     chunk_start: usize,
     current_line: usize,
@@ -1779,13 +1792,13 @@ fn find_best_split(
         }
     }
 
-    // Second choice: find the highest priority boundary in range
-    let candidates: Vec<_> = boundaries
+    // Second choice: find the highest priority boundary in range.
+    // No allocation needed -- iterate and find max directly.
+    if let Some(best) = boundaries
         .iter()
         .filter(|b| b.line_idx > chunk_start && b.line_idx < current_line)
-        .collect();
-
-    if let Some(best) = candidates.iter().max_by_key(|b| b.kind) {
+        .max_by_key(|b| b.kind)
+    {
         return best.line_idx;
     }
 
@@ -1858,14 +1871,14 @@ fn create_chunk_from_range(
     )
 }
 
-/// Calculate overlap lines for context continuity.
+/// Calculate overlap lines using pre-computed token counts.
 ///
 /// Only iterates over lines within the current chunk (from `chunk_start_line` to `split_line`)
 /// to avoid O(n^2) performance when processing large files.
 ///
 /// # Arguments
 ///
-/// * `lines` - All lines in the file
+/// * `line_token_counts` - Pre-computed token count for each line (including newline)
 /// * `chunk_start_line` - Start line of the current chunk (0-indexed)
 /// * `split_line` - Line where the chunk is being split (0-indexed)
 /// * `overlap_tokens` - Target number of overlap tokens
@@ -1873,32 +1886,62 @@ fn create_chunk_from_range(
 /// # Returns
 ///
 /// Tuple of (line indices for overlap, total token count of overlap)
+fn calculate_overlap_precomputed(
+    line_token_counts: &[usize],
+    chunk_start_line: usize,
+    split_line: usize,
+    overlap_tokens: usize,
+) -> (Vec<usize>, usize) {
+    let mut token_count = 0;
+    let mut first_overlap_idx = split_line;
+
+    // Go backwards from split point to find the start of overlap.
+    // Only scan within the current chunk -- O(chunk_size) not O(file_size).
+    for line_idx in (chunk_start_line..split_line).rev() {
+        let line_tokens = line_token_counts[line_idx];
+
+        if token_count + line_tokens > overlap_tokens {
+            break;
+        }
+
+        first_overlap_idx = line_idx;
+        token_count += line_tokens;
+    }
+
+    // Build the overlap line indices as a contiguous range (no insert(0,...) shifting)
+    let overlap_lines: Vec<usize> = (first_overlap_idx..split_line).collect();
+
+    (overlap_lines, token_count)
+}
+
+/// Calculate overlap lines for context continuity (tokenizes on-the-fly).
+///
+/// This variant re-tokenizes lines. Kept as a fallback for contexts where
+/// pre-computed token counts are not available.
+#[allow(dead_code)]
 fn calculate_overlap(
     lines: &[&str],
     chunk_start_line: usize,
     split_line: usize,
     overlap_tokens: usize,
 ) -> (Vec<usize>, usize) {
-    let mut overlap_lines = Vec::new();
     let mut token_count = 0;
+    let mut first_overlap_idx = split_line;
 
     // Go backwards from split point, but only within the current chunk
-    // This is O(chunk_size) instead of O(file_size)
     for line_idx in (chunk_start_line..split_line).rev() {
         let line = lines.get(line_idx).copied().unwrap_or("");
-        // Add 1 token for the newline character to match the main chunking loop's accounting.
-        // Newlines typically encode as 1 token in most tokenizers (including Qwen3-Embedding).
-        // All lines in the overlap range have newlines since they're not the last line of the file.
         let line_tokens = count_tokens(line) + 1;
 
         if token_count + line_tokens > overlap_tokens {
             break;
         }
 
-        overlap_lines.insert(0, line_idx);
+        first_overlap_idx = line_idx;
         token_count += line_tokens;
     }
 
+    let overlap_lines: Vec<usize> = (first_overlap_idx..split_line).collect();
     (overlap_lines, token_count)
 }
 
@@ -2021,12 +2064,9 @@ fn force_split_by_lines(
 
         // Only add newline if not last line, OR if original had trailing newline
         let should_add_newline = !is_last_line || has_trailing_newline;
-        let line_with_optional_newline = if should_add_newline {
-            format!("{}\n", line)
-        } else {
-            (*line).to_string()
-        };
-        let line_tokens = count_tokens(&line_with_optional_newline);
+        // Avoid format!() allocation: count tokens on the line itself and add 1 for
+        // the newline token. Newlines encode as exactly 1 token in Qwen3/BPE tokenizers.
+        let line_tokens = count_tokens(line) + if should_add_newline { 1 } else { 0 };
         let line_byte_len = if should_add_newline {
             line.len() + 1
         } else {
@@ -2066,7 +2106,10 @@ fn force_split_by_lines(
             current_start_char = base_char + char_offset;
         }
 
-        current_content.push_str(&line_with_optional_newline);
+        current_content.push_str(line);
+        if should_add_newline {
+            current_content.push('\n');
+        }
         current_tokens += line_tokens;
         char_offset += line_byte_len;
     }

@@ -470,22 +470,22 @@ impl ContentHashedIndex {
 
     /// Compute content hash for code with whitespace normalization.
     ///
-    /// Normalizes code by:
-    /// - Trimming each line
-    /// - Removing empty lines
-    /// - Joining with single newlines
-    ///
-    /// This ensures code with different indentation or blank lines
-    /// but identical content produces the same hash.
+    /// Streams raw bytes of each trimmed non-empty line (with newline separators)
+    /// into the hasher. Avoids the Vec collect + String join allocation of the
+    /// original approach while producing consistent hashes for identical content.
     fn hash_content(content: &str) -> u64 {
         let mut hasher = DefaultHasher::new();
-        let normalized: String = content
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-        normalized.hash(&mut hasher);
+        let mut first = true;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                if !first {
+                    hasher.write(b"\n");
+                }
+                hasher.write(trimmed.as_bytes());
+                first = false;
+            }
+        }
         hasher.finish()
     }
 
@@ -570,6 +570,72 @@ impl ContentHashedIndex {
         } else {
             self.duplicates_found as f64 / total as f64
         }
+    }
+}
+
+// =============================================================================
+// File Hash Cache Types
+// =============================================================================
+
+/// Cached metadata for a single source file in the semantic index.
+///
+/// Stores enough information to determine whether a file needs reprocessing
+/// on subsequent `brrr semantic index` runs. Uses a two-level invalidation
+/// strategy: fast path checks mtime+size, slow path computes content hash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileHashEntry {
+    /// Content hash as "xxh3:<hex>" for change detection.
+    pub content_hash: String,
+    /// File modification time in nanoseconds since UNIX epoch.
+    pub mtime_ns: u128,
+    /// File size in bytes.
+    pub size: u64,
+    /// Number of embedding units extracted from this file.
+    pub unit_count: usize,
+    /// Indices into the global unit/vector arrays for this file's units.
+    pub unit_ids: Vec<usize>,
+}
+
+/// Persistent file-hash cache for incremental semantic indexing.
+///
+/// Stored at `.brrr_index/file_hashes.json`. On re-index, files whose
+/// mtime+size match their cached entry are skipped entirely. If only mtime
+/// changed (e.g., `touch`), the content hash is recomputed as a fallback.
+///
+/// The cache is invalidated wholesale when the embedding model changes,
+/// since different models produce incompatible vectors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HashCache {
+    /// Cache format version for forward compatibility.
+    pub version: String,
+    /// Embedding model that produced the cached vectors.
+    /// A model change forces full re-index.
+    pub model: String,
+    /// Per-file cache entries keyed by relative path from project root.
+    pub entries: HashMap<String, FileHashEntry>,
+}
+
+impl HashCache {
+    /// Current cache format version.
+    pub const VERSION: &'static str = "1.0";
+
+    /// Create a new empty cache for the given model.
+    #[must_use]
+    pub fn new(model: impl Into<String>) -> Self {
+        Self {
+            version: Self::VERSION.to_string(),
+            model: model.into(),
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Check whether this cache is compatible with the given model.
+    ///
+    /// Returns `false` if the model changed, meaning all cached vectors
+    /// are stale and must be regenerated.
+    #[must_use]
+    pub fn is_compatible(&self, model: &str) -> bool {
+        self.version == Self::VERSION && self.model == model
     }
 }
 
