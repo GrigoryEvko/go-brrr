@@ -5845,31 +5845,47 @@ async fn cmd_semantic_index(
     backend: SemanticBackend,
     dimension: Option<usize>,
 ) -> Result<()> {
-    use brrr::embedding::{IndexConfig, Metric, TeiClient, TeiClientConfig, VectorIndex};
-    use brrr::semantic::{build_embedding_text, extract_units};
+    use go_brrr::embedding::{IndexConfig, Metric, TeiClient, TeiClientConfig, VectorIndex};
+    use go_brrr::semantic::{
+        build_embedding_text, cache, classify_files, extract_units_from_paths, scan_project_files,
+        EmbeddingUnit, HashCache,
+    };
     use indicatif::{ProgressBar, ProgressStyle};
     use std::time::Instant;
 
     let start_time = Instant::now();
-    // Resolve project root (walks up to find .git, Cargo.toml, etc.)
     let root = resolve_project_root(path);
     let root_str = root.to_string_lossy();
     let model_name = model.unwrap_or_else(|| "bge-large-en-v1.5".to_string());
     let lang_str = lang.to_string();
 
-    // Determine language filter
-    let language_filter = if lang_str == "all" {
-        "python"
-    } else {
-        &lang_str
-    };
+    // Ensure index directory exists early so we can load the cache
+    let index_dir = root.join(".brrr_index");
+    std::fs::create_dir_all(&index_dir).context("Failed to create index directory")?;
+    let metadata_path = index_dir.join("metadata.json");
+
+    // =========================================================================
+    // Step 1: Load file-hash cache and previous metadata for incremental reuse
+    // =========================================================================
+    let hash_cache = cache::load_cache(&index_dir, &model_name);
+    let cache_hit = hash_cache.is_some();
+
+    // Load previous units from metadata.json, keyed by file path for lookup.
+    // This allows reusing extracted units for unchanged files without re-parsing.
+    let old_units_by_file: std::collections::HashMap<String, Vec<EmbeddingUnit>> =
+        if cache_hit {
+            load_old_units_by_file(&metadata_path).unwrap_or_default()
+        } else {
+            std::collections::HashMap::new()
+        };
 
     eprintln!("Extracting semantic units from: {}", root_str);
 
-    // Step 1: Extract semantic units from the codebase
-    let units = if lang_str == "all" {
-        // For "all" languages, extract from each supported language
-        let languages = [
+    // =========================================================================
+    // Step 2: Scan files, classify against cache, extract only changed files
+    // =========================================================================
+    let languages: Vec<&str> = if lang_str == "all" {
+        vec![
             "python",
             "typescript",
             "javascript",
@@ -5878,27 +5894,169 @@ async fn cmd_semantic_index(
             "java",
             "c",
             "cpp",
-        ];
-        let mut all_units = Vec::new();
-        for lang in &languages {
-            match extract_units(&root_str, lang) {
-                Ok(lang_units) => {
-                    if !lang_units.is_empty() {
-                        eprintln!("  Found {} {} units", lang_units.len(), lang);
-                        all_units.extend(lang_units);
+        ]
+    } else {
+        vec![&lang_str]
+    };
+
+    let project = root
+        .canonicalize()
+        .context("Failed to canonicalize project root")?;
+
+    let mut all_units: Vec<EmbeddingUnit> = Vec::new();
+    let mut total_changed = 0usize;
+    let mut total_cached = 0usize;
+    // Collect per-file unit info for cache rebuild
+    let mut file_unit_map: Vec<(String, std::path::PathBuf, usize, usize)> = Vec::new();
+
+    for language in &languages {
+        // Scan source files for this language
+        let source_files = scan_project_files(&project, language);
+        if source_files.is_empty() {
+            continue;
+        }
+
+        // Classify files against the hash cache
+        let classification = classify_files(&source_files, &project, hash_cache.as_ref());
+
+        let n_changed = classification.changed.len();
+        let n_unchanged = classification.unchanged.len();
+        let n_deleted = classification.deleted_keys.len();
+
+        if n_changed > 0 || n_deleted > 0 || !cache_hit {
+            eprintln!(
+                "  {}: {} files ({} changed, {} cached, {} deleted)",
+                language,
+                n_changed + n_unchanged,
+                n_changed,
+                n_unchanged,
+                n_deleted
+            );
+        } else {
+            eprintln!(
+                "  {}: {} files (all cached)",
+                language,
+                n_unchanged
+            );
+        }
+
+        // Reuse cached units for unchanged files
+        for (_abs_path, rel_key) in &classification.unchanged {
+            if let Some(cached_units) = old_units_by_file.get(rel_key) {
+                let base_idx = all_units.len();
+                let count = cached_units.len();
+                file_unit_map.push((
+                    rel_key.clone(),
+                    _abs_path.clone(),
+                    base_idx,
+                    count,
+                ));
+                all_units.extend(cached_units.iter().cloned());
+                total_cached += count;
+            } else {
+                // Cache says unchanged but old metadata doesn't have the units.
+                // This can happen if metadata.json was deleted/corrupted.
+                // Fall through: we'll extract these files below.
+                // (They'll be missing from the changed list, so add them.)
+                let base_idx = all_units.len();
+                match extract_units_from_paths(&project, &[_abs_path.clone()], language) {
+                    Ok(fresh_units) => {
+                        let count = fresh_units.len();
+                        if count > 0 {
+                            file_unit_map.push((
+                                rel_key.clone(),
+                                _abs_path.clone(),
+                                base_idx,
+                                count,
+                            ));
+                            all_units.extend(fresh_units);
+                            total_changed += count;
+                        }
                     }
-                }
-                Err(e) => {
-                    tracing::debug!("Failed to extract {} units: {}", lang, e);
+                    Err(e) => {
+                        tracing::debug!(
+                            "Failed to extract units from {}: {}",
+                            _abs_path.display(),
+                            e
+                        );
+                    }
                 }
             }
         }
-        all_units
-    } else {
-        extract_units(&root_str, language_filter).context("Failed to extract semantic units")?
-    };
 
-    if units.is_empty() {
+        // Extract fresh units from changed files
+        if !classification.changed.is_empty() {
+            match extract_units_from_paths(&project, &classification.changed, language) {
+                Ok(fresh_units) => {
+                    if !fresh_units.is_empty() {
+                        // Group fresh units by file for cache tracking
+                        let mut file_groups: std::collections::HashMap<
+                            String,
+                            (std::path::PathBuf, usize, usize),
+                        > = std::collections::HashMap::new();
+
+                        for unit in &fresh_units {
+                            let rel = unit.file.clone();
+                            let entry = file_groups
+                                .entry(rel.clone())
+                                .or_insert_with(|| {
+                                    // Find the absolute path for this relative path
+                                    let abs = project.join(&rel);
+                                    (abs, all_units.len() + fresh_units.len(), 0)
+                                    // placeholder, will fix
+                                });
+                            entry.2 += 1;
+                        }
+
+                        // Now add units and track exact indices
+                        let mut current_file: Option<String> = None;
+                        let mut current_base = all_units.len();
+                        let mut current_count = 0usize;
+
+                        for unit in &fresh_units {
+                            if current_file.as_deref() != Some(&unit.file) {
+                                // Flush previous file
+                                if let Some(ref prev_file) = current_file {
+                                    if current_count > 0 {
+                                        let abs = project.join(prev_file);
+                                        file_unit_map.push((
+                                            prev_file.clone(),
+                                            abs,
+                                            current_base,
+                                            current_count,
+                                        ));
+                                    }
+                                }
+                                current_file = Some(unit.file.clone());
+                                current_base = all_units.len();
+                                current_count = 0;
+                            }
+                            all_units.push(unit.clone());
+                            current_count += 1;
+                            total_changed += 1;
+                        }
+                        // Flush last file
+                        if let Some(ref prev_file) = current_file {
+                            if current_count > 0 {
+                                let abs = project.join(prev_file);
+                                file_unit_map.push((
+                                    prev_file.clone(),
+                                    abs,
+                                    current_base,
+                                    current_count,
+                                ));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to extract {} units: {}", language, e);
+                }
+            }
+        }
+    }
+
+    if all_units.is_empty() {
         let result = serde_json::json!({
             "status": "complete",
             "root": root_str,
@@ -5914,18 +6072,26 @@ async fn cmd_semantic_index(
         return Ok(());
     }
 
-    eprintln!("Found {} total units to index", units.len());
+    let extract_elapsed = start_time.elapsed();
+    eprintln!(
+        "Found {} total units ({} fresh, {} cached) in {:.2}s",
+        all_units.len(),
+        total_changed,
+        total_cached,
+        extract_elapsed.as_secs_f64()
+    );
 
-    // Step 2: Build embedding texts for each unit
-    let texts: Vec<String> = units.iter().map(|u| build_embedding_text(u)).collect();
-
+    // =========================================================================
+    // Step 3: Build embedding texts
+    // =========================================================================
+    let texts: Vec<String> = all_units.iter().map(|u| build_embedding_text(u)).collect();
     eprintln!("Built embedding texts for {} units", texts.len());
 
-    // Step 3: Get embeddings based on backend
-    // Returns (embeddings, actual_model_name) - model name from TEI server
+    // =========================================================================
+    // Step 4: Get embeddings from backend
+    // =========================================================================
     let (embeddings, actual_model): (Vec<Vec<f32>>, String) = match backend {
         SemanticBackend::Tei | SemanticBackend::Auto => {
-            // Try to connect to TEI server
             let tei_config = TeiClientConfig::from_env();
             eprintln!("Connecting to TEI server at {}", tei_config.endpoint);
 
@@ -5933,13 +6099,12 @@ async fn cmd_semantic_index(
                 Ok(c) => c,
                 Err(e) => {
                     if matches!(backend, SemanticBackend::Auto) {
-                        // Auto mode: report that no backend is available
                         let result = serde_json::json!({
                             "status": "error",
                             "root": root_str,
                             "language": lang_str,
                             "model": model_name,
-                            "units_found": units.len(),
+                            "units_found": all_units.len(),
                             "error": format!(
                                 "No embedding backend available. TEI server connection failed: {}. \
                                  Local sentence-transformers backend is not yet implemented in Rust CLI. \
@@ -5965,7 +6130,6 @@ async fn cmd_semantic_index(
                 }
             };
 
-            // Get server info for dimension detection and actual model name
             let server_info = client
                 .info()
                 .await
@@ -5976,10 +6140,8 @@ async fn cmd_semantic_index(
                 server_model, server_info.max_input_length
             );
 
-            // Embed texts in batches
             let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
 
-            // Create spinner with elapsed time to show progress during embedding generation
             let spinner = ProgressBar::new_spinner();
             spinner.set_style(
                 ProgressStyle::default_spinner()
@@ -5996,10 +6158,7 @@ async fn cmd_semantic_index(
                 .await
                 .context("Failed to generate embeddings")?;
 
-            spinner.finish_with_message(format!(
-                "Generated {} embeddings",
-                emb.len()
-            ));
+            spinner.finish_with_message(format!("Generated {} embeddings", emb.len()));
             (emb, server_model)
         }
         SemanticBackend::SentenceTransformers => {
@@ -6008,7 +6167,7 @@ async fn cmd_semantic_index(
                 "root": root_str,
                 "language": lang_str,
                 "model": model_name,
-                "units_found": units.len(),
+                "units_found": all_units.len(),
                 "error": "Local sentence-transformers backend is not yet implemented in Rust CLI. \
                          Use --backend tei with a running TEI server, or --backend auto to auto-detect.",
             });
@@ -6031,23 +6190,18 @@ async fn cmd_semantic_index(
         embedding_dim
     );
 
-    // Step 4: Build and save vector index
-    let index_dir = root.join(".brrr_index");
-    std::fs::create_dir_all(&index_dir).context("Failed to create index directory")?;
-
+    // =========================================================================
+    // Step 5: Build and save vector index
+    // =========================================================================
     let index_path = index_dir.join("vectors.usearch");
-    let metadata_path = index_dir.join("metadata.json");
 
     let config = IndexConfig::new(embedding_dim).with_metric(Metric::InnerProduct);
-
     let index = VectorIndex::with_config(config).context("Failed to create vector index")?;
 
-    // Reserve capacity for all embeddings
     index
         .reserve(embeddings.len())
         .context("Failed to reserve index capacity")?;
 
-    // Add embeddings to index
     for (i, embedding) in embeddings.iter().enumerate() {
         index
             .add(i as u64, embedding)
@@ -6056,21 +6210,22 @@ async fn cmd_semantic_index(
 
     eprintln!("Built vector index with {} vectors", index.len());
 
-    // Save vector index
     index
         .save(&index_path)
         .context("Failed to save vector index")?;
 
     eprintln!("Saved vector index to: {}", index_path.display());
 
-    // Step 5: Save metadata (units) as JSON
+    // =========================================================================
+    // Step 6: Save metadata (units)
+    // =========================================================================
     let metadata = serde_json::json!({
         "version": "1.0",
         "model": actual_model,
         "language": lang_str,
         "dimension": embedding_dim,
-        "count": units.len(),
-        "units": units,
+        "count": all_units.len(),
+        "units": all_units,
     });
 
     let metadata_file =
@@ -6078,6 +6233,32 @@ async fn cmd_semantic_index(
     serde_json::to_writer_pretty(metadata_file, &metadata).context("Failed to write metadata")?;
 
     eprintln!("Saved metadata to: {}", metadata_path.display());
+
+    // =========================================================================
+    // Step 7: Save updated file-hash cache for next incremental run
+    // =========================================================================
+    let mut new_cache = HashCache::new(&actual_model);
+    for (rel_key, abs_path, base_idx, count) in &file_unit_map {
+        let unit_ids: Vec<usize> = (*base_idx..(*base_idx + *count)).collect();
+        match cache::build_entry(abs_path, *count, unit_ids) {
+            Ok(entry) => {
+                new_cache.entries.insert(rel_key.clone(), entry);
+            }
+            Err(e) => {
+                tracing::debug!("Failed to build cache entry for {}: {}", rel_key, e);
+            }
+        }
+    }
+
+    if let Err(e) = cache::save_cache(&index_dir, &new_cache) {
+        // Cache save failure is non-fatal; next run just does a full re-index
+        eprintln!("Warning: failed to save file hash cache: {}", e);
+    } else {
+        eprintln!(
+            "Saved file hash cache ({} entries)",
+            new_cache.entries.len()
+        );
+    }
 
     let elapsed = start_time.elapsed();
 
@@ -6087,7 +6268,9 @@ async fn cmd_semantic_index(
         "root": root_str,
         "language": lang_str,
         "model": actual_model,
-        "units_indexed": units.len(),
+        "units_indexed": all_units.len(),
+        "units_cached": total_cached,
+        "units_fresh": total_changed,
         "dimension": embedding_dim,
         "index_path": index_path.display().to_string(),
         "metadata_path": metadata_path.display().to_string(),
@@ -6100,6 +6283,35 @@ async fn cmd_semantic_index(
     );
 
     Ok(())
+}
+
+/// Load previous embedding units from metadata.json, grouped by file path.
+///
+/// Used by incremental indexing to reuse units from unchanged files without
+/// re-parsing. Returns an empty map on any error (missing file, parse error).
+fn load_old_units_by_file(
+    metadata_path: &std::path::Path,
+) -> Option<std::collections::HashMap<String, Vec<go_brrr::semantic::EmbeddingUnit>>> {
+    let data = std::fs::read_to_string(metadata_path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&data).ok()?;
+
+    let units_array = parsed.get("units")?.as_array()?;
+
+    let mut by_file: std::collections::HashMap<String, Vec<go_brrr::semantic::EmbeddingUnit>> =
+        std::collections::HashMap::new();
+
+    for val in units_array {
+        if let Ok(unit) =
+            serde_json::from_value::<go_brrr::semantic::EmbeddingUnit>(val.clone())
+        {
+            by_file
+                .entry(unit.file.clone())
+                .or_default()
+                .push(unit);
+        }
+    }
+
+    Some(by_file)
 }
 
 /// Search the semantic index for code matching a natural language query.
@@ -6127,10 +6339,10 @@ async fn cmd_semantic_search(
     backend: SemanticBackend,
     task: SearchTask,
 ) -> Result<()> {
-    use brrr::embedding::{
+    use go_brrr::embedding::{
         get_cached_query_embedding, query_in_cache, TeiClient, TeiClientConfig, VectorIndex,
     };
-    use brrr::semantic::EmbeddingUnit;
+    use go_brrr::semantic::EmbeddingUnit;
     use std::time::Instant;
 
     let start_time = Instant::now();
@@ -13046,7 +13258,7 @@ mod patterns;
 // Import quality from the library crate (brrr) rather than including it as a bin module.
 // This avoids duplicate compilation and ensures crate:: references in quality files
 // resolve correctly to the library crate's modules (embedding, semantic, etc.).
-use brrr::quality;
+use go_brrr::quality;
 
 fn cmd_quality(subcmd: QualityCommands) -> Result<()> {
     match subcmd {
@@ -13964,8 +14176,8 @@ fn cmd_similar_to(
     lang: Option<Language>,
     tei_url: &str,
 ) -> Result<()> {
-    use brrr::embedding::{IndexConfig, Metric, TeiClient, VectorIndex};
-    use brrr::semantic::{build_embedding_text, extract_units, EmbeddingUnit};
+    use go_brrr::embedding::{IndexConfig, Metric, TeiClient, VectorIndex};
+    use go_brrr::semantic::{build_embedding_text, extract_units, EmbeddingUnit};
     use indicatif::{ProgressBar, ProgressStyle};
 
     // Validate path exists

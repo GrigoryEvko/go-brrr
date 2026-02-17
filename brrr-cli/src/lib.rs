@@ -275,9 +275,9 @@ pub use lang::{BoxedLanguage, Language, LanguageRegistry};
 
 // Semantic types
 pub use semantic::{
-    ChunkInfo, CodeComplexity, CodeLocation, ContentHashedIndex, EmbeddingUnit, SearchResult,
-    SemanticPattern, UnitKind, CHUNK_OVERLAP_TOKENS, MAX_CODE_PREVIEW_TOKENS, MAX_EMBEDDING_TOKENS,
-    SEMANTIC_PATTERNS,
+    ChunkInfo, CodeComplexity, CodeLocation, ContentHashedIndex, EmbeddingUnit, FileHashEntry,
+    HashCache, SearchResult, SemanticPattern, UnitKind, CHUNK_OVERLAP_TOKENS,
+    MAX_CODE_PREVIEW_TOKENS, MAX_EMBEDDING_TOKENS, SEMANTIC_PATTERNS,
 };
 
 // Embedding types
