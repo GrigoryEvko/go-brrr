@@ -124,6 +124,7 @@
 
 pub mod analysis;
 pub mod ast;
+pub mod bindings;
 pub mod callgraph;
 pub mod cfg;
 pub mod coverage;

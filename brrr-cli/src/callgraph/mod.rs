@@ -99,7 +99,15 @@ pub fn build_with_config(path: &str, lang: Option<&str>, no_ignore: bool) -> Res
     let scan_result = scanner.scan_with_config(&config)?;
     let files = scan_result.files;
     let index = indexer::FunctionIndex::build(&files)?;
-    let graph = resolver::resolve_calls(&files, &index, project_root)?;
+    let mut graph = resolver::resolve_calls(&files, &index, project_root)?;
+
+    // Inject cross-language binding edges (additive, zero-cost when no bindings found)
+    if let Ok(binding_report) = crate::bindings::scan_bindings_from_files(&files, &index) {
+        if !binding_report.declarations.is_empty() {
+            crate::bindings::inject::inject_into_graph(&mut graph, &binding_report);
+        }
+    }
+
     Ok(graph)
 }
 
@@ -183,11 +191,56 @@ pub fn get_context_with_lang(
     // Include entry point itself if found
     let mut all_funcs: Vec<FunctionRef> = Vec::new();
 
-    // Find the entry point in the graph (uses cached all_functions)
-    let entry_found = graph
-        .all_functions()
-        .iter()
-        .find(|f| f.name == entry_point || f.qualified_name.as_deref() == Some(entry_point));
+    // Find the entry point in the graph (uses cached all_functions).
+    // Supports multiple name formats:
+    // - Simple name: "add_input"
+    // - Class::method (C++): "Graph::add_input"
+    // - Fully qualified (C++): "torch::conductor::Graph::add_input"
+    // - Module.method (Python): "Graph.add_input"
+    let entry_found = graph.all_functions().iter().find(|f| {
+        // Exact name match
+        if f.name == entry_point {
+            return true;
+        }
+        // Exact qualified_name match
+        if f.qualified_name.as_deref() == Some(entry_point) {
+            return true;
+        }
+        // C++ Class::method: entry_point contains :: and the function's
+        // qualified_name ends with the entry_point
+        if entry_point.contains("::") {
+            if let Some(ref qname) = f.qualified_name {
+                if qname.ends_with(entry_point) {
+                    return true;
+                }
+            }
+            // Also try matching as "Class::method" against name with class
+            let parts: Vec<&str> = entry_point.rsplitn(2, "::").collect();
+            if parts.len() == 2 {
+                let method = parts[0];
+                let class = parts[1];
+                // Check if this is Class::method where class is the last segment
+                let class_base = class.rsplit("::").next().unwrap_or(class);
+                if f.name == method {
+                    // Check if the function's qualified name contains the class
+                    if let Some(ref qname) = f.qualified_name {
+                        if qname.contains(class_base) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        // Python Class.method: entry_point contains . and we try matching
+        if entry_point.contains('.') {
+            if let Some(ref qname) = f.qualified_name {
+                if qname.ends_with(entry_point) {
+                    return true;
+                }
+            }
+        }
+        false
+    });
 
     if let Some(entry_func) = entry_found {
         all_funcs.push(entry_func.clone());
@@ -268,10 +321,12 @@ pub fn get_context_with_lang(
             .iter()
             .find(|f| f.name == func_ref.name)
             .or_else(|| {
-                // Check class methods
+                // Check class methods (supports both Python "Class.method" and C++ "Class::method")
                 module_info.classes.iter().find_map(|c| {
                     c.methods.iter().find(|m| {
-                        m.name == func_ref.name || func_ref.name == format!("{}.{}", c.name, m.name)
+                        m.name == func_ref.name
+                            || func_ref.name == format!("{}.{}", c.name, m.name)
+                            || func_ref.name == format!("{}::{}", c.name, m.name)
                     })
                 })
             });

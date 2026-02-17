@@ -25,6 +25,7 @@ use which::which;
 
 mod analysis;
 mod ast;
+mod bindings;
 mod callgraph;
 mod cfg;
 mod coverage;
@@ -347,8 +348,8 @@ enum Commands {
         #[arg(long, value_enum)]
         lang: Option<Language>,
 
-        /// Maximum files to analyze (use --limit or --max for Python CLI compatibility)
-        #[arg(long, visible_alias = "max", default_value = "50", value_name = "N")]
+        /// Maximum functions/classes to return (0 = unlimited)
+        #[arg(long, visible_alias = "max", default_value = "0", value_name = "N")]
         limit: usize,
     },
 
@@ -720,6 +721,10 @@ enum Commands {
     /// Security analysis subcommands
     #[command(subcommand, visible_alias = "sec")]
     Security(SecurityCommands),
+
+    /// Cross-language binding detection (pybind11, ctypes, FFI, CGo, JNI, napi, CUDA dispatch, TORCH_LIBRARY)
+    #[command(subcommand, visible_alias = "bind")]
+    Bindings(BindingsCommands),
 
     /// Code metrics analysis (use 'brrr metrics <path>' for full report)
     ///
@@ -2257,6 +2262,80 @@ enum SecurityCommands {
         #[arg(long, default_value = "low")]
         min_confidence: String,
     },
+
+    /// Scan for C/C++ memory safety vulnerabilities
+    #[command(
+        name = "memory-safety",
+        about = "Scan for C/C++ memory safety vulnerabilities",
+        long_about = "Detect C/C++ memory safety issues using AST analysis.\n\n\
+            Detects:\n\
+            - Buffer overflows: strcpy, sprintf, gets, strcat, scanf\n\
+            - Format string vulnerabilities: printf/fprintf with non-literal format\n\
+            - Integer overflows in allocation sizes: malloc(a * b)\n\
+            - Double-free: free() called twice on same pointer\n\
+            - Null dereference: missing null check after malloc/calloc/realloc\n\n\
+            Supports: .c, .h, .cpp, .cc, .cxx, .hpp, .cu, .cuh files\n\n\
+            Examples:\n\
+            - brrr security memory-safety src/          # Scan C/C++ source\n\
+            - brrr security memory-safety file.c        # Scan single file"
+    )]
+    MemorySafety {
+        /// Path to file or directory to scan
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Language filter (c, cpp)
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+    },
+}
+
+// =============================================================================
+// BINDINGS SUBCOMMANDS
+// =============================================================================
+
+#[derive(Subcommand)]
+enum BindingsCommands {
+    /// Scan for cross-language binding declarations
+    #[command(
+        name = "scan",
+        about = "Scan for cross-language bindings",
+        long_about = "Detect cross-language binding declarations and generate a report.\n\n\
+            Supported binding systems:\n\
+            - pybind11/nanobind: C++ -> Python bindings\n\
+            - ctypes: Python -> C/C++ FFI calls\n\
+            - Rust FFI: extern \"C\" / #[no_mangle] exports\n\
+            - CGo: Go -> C interop (import \"C\")\n\
+            - JNI: Java <-> C/C++ native methods\n\
+            - napi-rs: Rust -> Node.js/TypeScript bindings\n\
+            - CUDA dispatch: REGISTER_DISPATCH / DEFINE_DISPATCH macros\n\
+            - TORCH_LIBRARY: PyTorch operator registration\n\n\
+            Examples:\n\
+            - brrr bindings scan .                         # Scan current directory\n\
+            - brrr bindings scan ~/pytorch --system pybind11  # Only pybind11\n\
+            - brrr bind scan . --lang cpp                  # Only C++ files"
+    )]
+    Scan {
+        /// Path to project root
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Language filter
+        #[arg(long, value_enum)]
+        lang: Option<Language>,
+
+        /// Filter by binding system (pybind11, ctypes, rust_ffi, cgo, jni, napi_rs, cuda_dispatch, torch_library)
+        #[arg(long)]
+        system: Option<String>,
+
+        /// Don't respect .gitignore / .brrrignore
+        #[arg(long)]
+        no_ignore: bool,
+    },
 }
 
 // =============================================================================
@@ -3598,7 +3677,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Structure { path, lang, limit } => {
-            cmd_structure(&path, lang, limit, cli.no_ignore)?;
+            cmd_structure(&path, lang, limit, cli.no_ignore, cli.format, cli.compact)?;
         }
 
         Commands::Search {
@@ -3680,7 +3759,7 @@ async fn main() -> Result<()> {
             lang,
             extended,
         } => {
-            cmd_calls(&path, lang, extended, cli.no_ignore)?;
+            cmd_calls(&path, lang, extended, cli.no_ignore, cli.format, cli.compact)?;
         }
 
         Commands::Impact {
@@ -3694,7 +3773,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Dead { path, entry, lang } => {
-            cmd_dead(&path, &entry, lang, cli.no_ignore)?;
+            cmd_dead(&path, &entry, lang, cli.no_ignore, cli.format, cli.compact)?;
         }
 
         Commands::Arch { path, lang } => {
@@ -3764,6 +3843,10 @@ async fn main() -> Result<()> {
 
         Commands::Security(subcmd) => {
             cmd_security(subcmd)?;
+        }
+
+        Commands::Bindings(subcmd) => {
+            cmd_bindings(subcmd)?;
         }
 
         Commands::Metrics {
@@ -4212,6 +4295,8 @@ fn cmd_structure(
     lang: Option<Language>,
     limit: usize,
     no_ignore: bool,
+    format: OutputFormat,
+    compact: bool,
 ) -> Result<()> {
     // Validate path exists and is a directory
     require_directory(path)?;
@@ -4229,10 +4314,40 @@ fn cmd_structure(
     )
     .context("Failed to extract code structure")?;
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&result).context("Failed to serialize output")?
-    );
+    match format {
+        OutputFormat::Text => {
+            println!(
+                "Code Structure: {} ({} files processed, {} total)",
+                result.path, result.files_processed, result.total_files
+            );
+            println!();
+            if !result.functions.is_empty() {
+                println!("Functions ({}):", result.functions.len());
+                for f in &result.functions {
+                    println!("  {} - {}:{}", f.signature, f.file, f.line);
+                }
+                println!();
+            }
+            if !result.classes.is_empty() {
+                println!("Classes ({}):", result.classes.len());
+                for c in &result.classes {
+                    println!(
+                        "  {} ({} methods) - {}:{}",
+                        c.name, c.method_count, c.file, c.line
+                    );
+                }
+            }
+        }
+        _ => {
+            let json_str = if compact {
+                serde_json::to_string(&result)
+            } else {
+                serde_json::to_string_pretty(&result)
+            }
+            .context("Failed to serialize output")?;
+            println!("{}", json_str);
+        }
+    }
     Ok(())
 }
 
@@ -4647,6 +4762,8 @@ fn cmd_calls(
     lang: Option<Language>,
     extended: bool,
     no_ignore: bool,
+    format: OutputFormat,
+    compact: bool,
 ) -> Result<()> {
     // Validate path exists and is a directory
     require_directory(path)?;
@@ -4664,36 +4781,59 @@ fn cmd_calls(
         callgraph::get_or_build_graph_with_config(&project_root, Some(&detected_lang), no_ignore)
             .context("Failed to build call graph")?;
 
-    // Build edges with optional extended fields for Python compatibility
-    let edges: Vec<serde_json::Value> = graph
-        .edges
-        .iter()
-        .map(|e| {
-            let mut edge = serde_json::json!({
-                "from_file": e.caller.file,
-                "from_func": e.caller.name,
-                "to_file": e.callee.file,
-                "to_func": e.callee.name,
+    match format {
+        OutputFormat::Text => {
+            println!("Call Graph: {} edges", graph.edges.len());
+            println!();
+            for e in &graph.edges {
+                if extended {
+                    println!(
+                        "  {}:{} -> {}:{} (line {})",
+                        e.caller.file, e.caller.name, e.callee.file, e.callee.name, e.call_line
+                    );
+                } else {
+                    println!(
+                        "  {}:{} -> {}:{}",
+                        e.caller.file, e.caller.name, e.callee.file, e.callee.name
+                    );
+                }
+            }
+        }
+        _ => {
+            // Build edges with optional extended fields for Python compatibility
+            let edges: Vec<serde_json::Value> = graph
+                .edges
+                .iter()
+                .map(|e| {
+                    let mut edge = serde_json::json!({
+                        "from_file": e.caller.file,
+                        "from_func": e.caller.name,
+                        "to_file": e.callee.file,
+                        "to_func": e.callee.name,
+                    });
+
+                    if extended {
+                        edge["call_line"] = serde_json::json!(e.call_line);
+                    }
+
+                    edge
+                })
+                .collect();
+
+            let result = serde_json::json!({
+                "edges": edges,
+                "count": graph.edges.len(),
             });
 
-            // Only include call_line when extended flag is set
-            if extended {
-                edge["call_line"] = serde_json::json!(e.call_line);
+            let json_str = if compact {
+                serde_json::to_string(&result)
+            } else {
+                serde_json::to_string_pretty(&result)
             }
-
-            edge
-        })
-        .collect();
-
-    let result = serde_json::json!({
-        "edges": edges,
-        "count": graph.edges.len(),
-    });
-
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&result).context("Failed to serialize output")?
-    );
+            .context("Failed to serialize output")?;
+            println!("{}", json_str);
+        }
+    }
     Ok(())
 }
 
@@ -4770,6 +4910,8 @@ fn cmd_dead(
     entry_points: &[String],
     lang: Option<Language>,
     no_ignore: bool,
+    format: OutputFormat,
+    compact: bool,
 ) -> Result<()> {
     // Validate path exists and is a directory
     require_directory(path)?;
@@ -4801,37 +4943,67 @@ fn cmd_dead(
     // Analyze dead code with the configured options using the graph built with no_ignore
     let result = callgraph::analyze_dead_code_with_config(&graph, &config);
 
-    // Build comprehensive output with stats and entry points
-    let output = serde_json::json!({
-        "dead_functions": result.dead_functions.iter().map(|f| {
-            serde_json::json!({
-                "file": f.file,
-                "name": f.name,
-                "qualified_name": f.qualified_name,
-                "line": f.line,
-                "reason": format!("{:?}", f.reason),
-                "confidence": f.confidence,
-            })
-        }).collect::<Vec<_>>(),
-        "count": result.total_dead,
-        "entry_points_used": result.entry_points,
-        "custom_entry_patterns": entry_points,
-        "filtered_count": result.filtered_count,
-        "stats": {
-            "total_functions": result.stats.total_functions,
-            "entry_points": result.stats.entry_point_count,
-            "reachable": result.stats.reachable_count,
-            "filtered_as_callback": result.stats.filtered_as_callback,
-            "filtered_as_handler": result.stats.filtered_as_handler,
-            "filtered_as_decorator": result.stats.filtered_as_decorator,
-            "filtered_as_dynamic": result.stats.filtered_as_dynamic,
+    match format {
+        OutputFormat::Text => {
+            println!("Dead Code Analysis: {} unreachable functions", result.total_dead);
+            println!();
+            for f in &result.dead_functions {
+                let conf = format!("{:.0}%", f.confidence * 100.0);
+                let reason = format!("{:?}", f.reason);
+                println!(
+                    "  {} [{}] ({}) - {}:{}",
+                    f.name,
+                    reason,
+                    conf,
+                    f.file,
+                    f.line.unwrap_or(0)
+                );
+            }
+            println!();
+            println!(
+                "Stats: {} total, {} entry points, {} reachable, {} filtered",
+                result.stats.total_functions,
+                result.stats.entry_point_count,
+                result.stats.reachable_count,
+                result.filtered_count,
+            );
         }
-    });
+        _ => {
+            let output = serde_json::json!({
+                "dead_functions": result.dead_functions.iter().map(|f| {
+                    serde_json::json!({
+                        "file": f.file,
+                        "name": f.name,
+                        "qualified_name": f.qualified_name,
+                        "line": f.line,
+                        "reason": format!("{:?}", f.reason),
+                        "confidence": f.confidence,
+                    })
+                }).collect::<Vec<_>>(),
+                "count": result.total_dead,
+                "entry_points_used": result.entry_points,
+                "custom_entry_patterns": entry_points,
+                "filtered_count": result.filtered_count,
+                "stats": {
+                    "total_functions": result.stats.total_functions,
+                    "entry_points": result.stats.entry_point_count,
+                    "reachable": result.stats.reachable_count,
+                    "filtered_as_callback": result.stats.filtered_as_callback,
+                    "filtered_as_handler": result.stats.filtered_as_handler,
+                    "filtered_as_decorator": result.stats.filtered_as_decorator,
+                    "filtered_as_dynamic": result.stats.filtered_as_dynamic,
+                }
+            });
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&output).context("Failed to serialize output")?
-    );
+            let json_str = if compact {
+                serde_json::to_string(&output)
+            } else {
+                serde_json::to_string_pretty(&output)
+            }
+            .context("Failed to serialize output")?;
+            println!("{}", json_str);
+        }
+    }
     Ok(())
 }
 
@@ -7395,6 +7567,53 @@ fn cmd_doctor(install: Option<String>, json_output: bool) -> Result<()> {
 }
 
 // =============================================================================
+// BINDINGS COMMANDS
+// =============================================================================
+
+fn cmd_bindings(subcmd: BindingsCommands) -> Result<()> {
+    match subcmd {
+        BindingsCommands::Scan {
+            path,
+            lang,
+            system,
+            no_ignore,
+        } => {
+            require_exists(&path)?;
+
+            let lang_str = lang.map(|l| l.to_string());
+            let report = bindings::scan_bindings(
+                &path.display().to_string(),
+                lang_str.as_deref(),
+                no_ignore,
+            )?;
+
+            // Filter by system if requested
+            let report = if let Some(ref sys_filter) = system {
+                let filtered: Vec<_> = report
+                    .declarations
+                    .into_iter()
+                    .filter(|d| d.system.as_str() == sys_filter.as_str())
+                    .collect();
+                let files_scanned = report.files_scanned;
+                let files_with_bindings = report.files_with_bindings;
+                bindings::types::BindingReport::from_declarations(
+                    filtered,
+                    files_scanned,
+                    files_with_bindings,
+                )
+            } else {
+                report
+            };
+
+            let json = serde_json::to_string_pretty(&report)?;
+            println!("{}", json);
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
 // SECURITY COMMANDS
 // =============================================================================
 
@@ -7582,6 +7801,9 @@ fn cmd_security(subcmd: SecurityCommands) -> Result<()> {
             min_confidence,
         } => {
             cmd_prototype_pollution(&path, lang, format, &min_severity, &min_confidence)?;
+        }
+        SecurityCommands::MemorySafety { path, lang, format } => {
+            cmd_memory_safety(&path, lang, format)?;
         }
     }
     Ok(())
@@ -9776,6 +9998,67 @@ fn cmd_prototype_pollution(
                 println!("Summary by Severity:");
                 for (severity, count) in &severity_counts {
                     println!("  {}: {}", severity, count);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_memory_safety(
+    path: &PathBuf,
+    lang: Option<Language>,
+    format: OutputFormat,
+) -> Result<()> {
+    require_exists(path)?;
+
+    let lang_str = lang.map(|l| l.to_string());
+
+    let findings = security::memory_safety::scan_memory_safety(path, lang_str.as_deref())
+        .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
+
+    let output = serde_json::json!({
+        "findings": findings,
+        "total_findings": findings.len(),
+    });
+
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).context("Failed to serialize")?
+            );
+        }
+        OutputFormat::Text | OutputFormat::Mermaid | OutputFormat::Dot | OutputFormat::Csv => {
+            println!("C/C++ Memory Safety Scan Results");
+            println!("=================================");
+            println!("Total findings: {}", findings.len());
+            println!();
+
+            if findings.is_empty() {
+                println!("No memory safety issues detected.");
+            } else {
+                for (i, finding) in findings.iter().enumerate() {
+                    println!(
+                        "{}. [{}] {} - {}:{}",
+                        i + 1,
+                        finding.severity,
+                        finding.category,
+                        finding.location.file,
+                        finding.location.line
+                    );
+                    println!("   Pattern: {}", finding.pattern);
+                    println!("   CWE: CWE-{}", finding.cwe_id);
+                    println!("   Description: {}", finding.description);
+                    if !finding.code_snippet.is_empty() {
+                        println!("   Code:");
+                        for line in finding.code_snippet.lines() {
+                            println!("     | {}", line);
+                        }
+                    }
+                    println!("   Remediation: {}", finding.remediation);
+                    println!();
                 }
             }
         }
