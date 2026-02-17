@@ -46,6 +46,34 @@ static INVALID_CLASS_NAMES: phf::Set<&'static str> = phf_set! {
     "try", "catch", "new", "delete", "this", "nullptr",
 };
 
+/// CUDA/HIP function qualifiers that tree-sitter-cpp misparses as the return type.
+/// These appear as `type_identifier` nodes because the C++ grammar doesn't know them.
+/// When detected, the actual return type is recovered from the adjacent ERROR node.
+static CUDA_QUALIFIERS: phf::Set<&'static str> = phf_set! {
+    "__global__", "__device__", "__host__", "__forceinline__",
+    "__launch_bounds__", "__noinline__", "__shared__",
+    "__constant__", "__managed__", "__restrict__",
+};
+
+/// Check if an identifier looks like a function attribute macro rather than a type.
+///
+/// Heuristic: identifiers that are ALL_UPPER_CASE (with underscores) and at least
+/// 4 characters are likely preprocessor macros used as function decorators
+/// (e.g., C10_HOST_DEVICE, TORCH_API, C10_EXPORT). These get misidentified as
+/// the return type by tree-sitter-cpp when they precede the actual return type.
+fn is_likely_attribute_macro(name: &str) -> bool {
+    if name.len() < 4 {
+        return false;
+    }
+    // Must start with a letter or underscore
+    let first = name.as_bytes()[0];
+    if !first.is_ascii_alphabetic() && first != b'_' {
+        return false;
+    }
+    // Check for ALL_UPPER_WITH_UNDERSCORES pattern
+    name.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
 /// C++ language implementation.
 pub struct Cpp;
 
@@ -363,13 +391,28 @@ impl Cpp {
     }
 
     /// Extract return type from a function definition or declaration.
+    ///
+    /// Handles CUDA/HIP qualifiers (`__global__`, `__device__`, etc.) and
+    /// macro-style attributes (`C10_HOST_DEVICE`, `TORCH_API`, etc.) that
+    /// tree-sitter-cpp misparses as the return type. When detected, the
+    /// actual return type is recovered from the adjacent ERROR node.
     fn extract_return_type(&self, node: Node, source: &[u8]) -> Option<String> {
-        // For C++, return type can be in "type" field or as trailing return type
         if let Some(type_node) = self.child_by_field(node, "type") {
-            return Some(self.node_text(type_node, source));
+            let type_text = self.get_text(type_node, source);
+
+            // tree-sitter-cpp treats CUDA qualifiers and macro attributes as
+            // type_identifier (it thinks they're the return type). The real
+            // return type ends up in an ERROR sibling node.
+            if type_node.kind() == "type_identifier"
+                && (CUDA_QUALIFIERS.contains(type_text) || is_likely_attribute_macro(type_text))
+            {
+                return self.recover_return_type_from_error(node, source);
+            }
+
+            return Some(type_text.to_string());
         }
 
-        // Check for trailing return type (auto f() -> int)
+        // Trailing return type: auto f() -> int
         if let Some(trailing) = self.child_by_field(node, "trailing_return_type") {
             return Some(self.node_text(trailing, source));
         }
@@ -384,20 +427,31 @@ impl Cpp {
                 | "explicit"
                 | "inline"
                 | "constexpr"
-                | "consteval" => {
-                    // Skip these for return type
-                }
+                | "consteval" => {}
                 "type_qualifier" => {
                     type_parts.push(self.node_text(child, source));
                 }
                 "primitive_type" | "type_identifier" | "sized_type_specifier" | "auto" => {
-                    type_parts.push(self.node_text(child, source));
+                    let text = self.get_text(child, source);
+                    if child.kind() == "type_identifier"
+                        && (CUDA_QUALIFIERS.contains(text) || is_likely_attribute_macro(text))
+                    {
+                        continue;
+                    }
+                    type_parts.push(text.to_string());
                 }
                 "template_type" | "qualified_identifier" => {
                     type_parts.push(self.node_text(child, source));
                 }
                 "function_declarator" | "pointer_declarator" | "reference_declarator" => {
                     break;
+                }
+                "ERROR" => {
+                    if type_parts.is_empty() {
+                        if let Some(recovered) = self.extract_type_from_error_node(child, source) {
+                            type_parts.push(recovered);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -408,6 +462,51 @@ impl Cpp {
         } else {
             Some(type_parts.join(" "))
         }
+    }
+
+    /// Recover the actual return type when a CUDA qualifier was misidentified.
+    ///
+    /// Scans the function_definition's children for an ERROR node containing
+    /// the real return type.
+    fn recover_return_type_from_error(&self, node: Node, source: &[u8]) -> Option<String> {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "ERROR" {
+                return self.extract_type_from_error_node(child, source);
+            }
+        }
+        None
+    }
+
+    /// Extract a type name from an ERROR node's contents.
+    ///
+    /// Skips stacked CUDA qualifiers (e.g., `__device__ __forceinline__ float`)
+    /// and returns the last non-qualifier token as the return type.
+    fn extract_type_from_error_node(&self, error_node: Node, source: &[u8]) -> Option<String> {
+        let mut cursor = error_node.walk();
+        let mut last_type = None;
+
+        for child in error_node.children(&mut cursor) {
+            if child.kind() == "identifier" {
+                let text = self.get_text(child, source);
+                if !CUDA_QUALIFIERS.contains(text) && !is_likely_attribute_macro(text) {
+                    last_type = Some(text.to_string());
+                }
+            }
+        }
+
+        // Fallback: parse raw ERROR text for the last non-qualifier token.
+        // Handles primitives like "void" that may not appear as identifier nodes.
+        if last_type.is_none() {
+            let text = self.get_text(error_node, source).trim();
+            for token in text.split_whitespace().rev() {
+                if !CUDA_QUALIFIERS.contains(token) && !is_likely_attribute_macro(token) {
+                    return Some(token.to_string());
+                }
+            }
+        }
+
+        last_type
     }
 
     /// Extract function name from a function_declarator.
@@ -432,7 +531,6 @@ impl Cpp {
                     return Some(self.node_text(child, source));
                 }
                 "template_function" => {
-                    // Handle template instantiation in function name
                     return Some(self.node_text(child, source));
                 }
                 "pointer_declarator" => {
@@ -440,6 +538,10 @@ impl Cpp {
                     if !name.is_empty() {
                         return Some(name);
                     }
+                }
+                // reference_declarator wrapping a function_declarator (e.g., T& operator=())
+                "function_declarator" => {
+                    return self.extract_function_name(child, source);
                 }
                 _ => {}
             }
@@ -465,6 +567,14 @@ impl Cpp {
                 }
             }
             "reference_declarator" => {
+                // Reference-returning functions: reference_declarator -> & -> function_declarator
+                // Look for function_declarator child first, then fall back to identifier.
+                let mut ref_cursor = node.walk();
+                for child in node.children(&mut ref_cursor) {
+                    if child.kind() == "function_declarator" {
+                        return self.extract_function_name(child, source);
+                    }
+                }
                 let (name, _) = self.extract_reference_declarator(node, source);
                 if name.is_empty() {
                     None
@@ -519,6 +629,93 @@ impl Cpp {
             current = parent;
         }
         false
+    }
+
+    /// Check if a type identifier is a CUDA execution space or attribute qualifier.
+    ///
+    /// tree-sitter-cpp does not understand CUDA qualifiers, so it misparses them as
+    /// the return type. For example, `__global__ void kernel(...)` becomes:
+    ///   type: type_identifier "__global__"
+    ///   ERROR: identifier "void"
+    ///   declarator: function_declarator ...
+    ///
+    /// This detects the CUDA qualifier so we can extract the real return type from
+    /// the ERROR node and report the qualifier as a decorator.
+    fn is_cuda_qualifier(text: &str) -> bool {
+        CUDA_QUALIFIERS.contains(text)
+    }
+
+    /// Extract CUDA qualifiers and actual return type from a misparsed function_definition.
+    ///
+    /// When CUDA qualifiers are present, tree-sitter-cpp produces:
+    ///   function_definition
+    ///     type: type_identifier ("__global__")
+    ///     ERROR (contains the actual return type and any extra qualifiers)
+    ///     declarator: function_declarator
+    ///
+    /// Returns (cuda_decorators, actual_return_type) if CUDA qualifiers are detected,
+    /// None otherwise.
+    fn extract_cuda_info(&self, node: Node, source: &[u8]) -> Option<(Vec<String>, Option<String>)> {
+        let type_node = self.child_by_field(node, "type")?;
+        let type_text = self.get_text(type_node, source);
+
+        // Detect both CUDA dunder qualifiers (__global__, __device__) and
+        // macro-style attributes (C10_HOST_DEVICE, TORCH_API) that
+        // tree-sitter-cpp misidentifies as the return type.
+        if type_node.kind() != "type_identifier"
+            || (!Self::is_cuda_qualifier(type_text) && !is_likely_attribute_macro(type_text))
+        {
+            return None;
+        }
+
+        let mut qualifiers = vec![type_text.to_string()];
+        let mut actual_return_type = None;
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "ERROR" {
+                let mut err_cursor = child.walk();
+                for err_child in child.children(&mut err_cursor) {
+                    match err_child.kind() {
+                        "identifier" | "primitive_type" | "type_identifier"
+                        | "sized_type_specifier" => {
+                            let text = self.get_text(err_child, source);
+                            if Self::is_cuda_qualifier(text) || is_likely_attribute_macro(text) {
+                                qualifiers.push(text.to_string());
+                            } else {
+                                actual_return_type = Some(text.to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if matches!(
+                child.kind(),
+                "function_declarator" | "pointer_declarator" | "reference_declarator"
+            ) {
+                break;
+            }
+        }
+
+        // Fallback: if no return type found in ERROR child nodes, try raw text
+        if actual_return_type.is_none() {
+            let mut cursor2 = node.walk();
+            for child in node.children(&mut cursor2) {
+                if child.kind() == "ERROR" {
+                    let text = self.get_text(child, source).trim();
+                    for token in text.split_whitespace().rev() {
+                        if !Self::is_cuda_qualifier(token) && !is_likely_attribute_macro(token) {
+                            actual_return_type = Some(token.to_string());
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        Some((qualifiers, actual_return_type))
     }
 
     /// Check if a string looks like a C/C++ macro name (ALL_CAPS with underscores).
@@ -1081,10 +1278,20 @@ impl Cpp {
                     .map(|p| self.extract_params(p, source))
                     .unwrap_or_default();
 
-                let return_type = self.extract_return_type(node, source);
                 let docstring = self.get_doc_comment(node, source);
 
                 let mut decorators = Vec::new();
+
+                // CUDA qualifier detection: tree-sitter-cpp misparses __global__,
+                // __device__, etc. as the return type. Detect and fix this.
+                let return_type = if let Some((cuda_quals, real_ret)) =
+                    self.extract_cuda_info(node, source)
+                {
+                    decorators.extend(cuda_quals);
+                    real_ret
+                } else {
+                    self.extract_return_type(node, source)
+                };
 
                 // Storage class specifiers
                 if self.has_storage_class(node, source, "static") {
@@ -1111,7 +1318,7 @@ impl Cpp {
                     decorators.push("explicit".to_string());
                 }
 
-                // Check for override/final in declarator
+                // Check for override/final/noexcept in declarator text
                 let decl_text = self.node_text(declarator, source);
                 if decl_text.contains("override") {
                     decorators.push("override".to_string());
@@ -1122,14 +1329,19 @@ impl Cpp {
                 if decl_text.contains("noexcept") {
                     decorators.push("noexcept".to_string());
                 }
-                if decl_text.contains("= 0") {
-                    decorators.push("pure_virtual".to_string());
-                }
-                if decl_text.contains("= default") {
+
+                // = default, = delete, = 0 are sibling nodes of the declarator,
+                // not children of it. Check tree-sitter child node kinds directly.
+                if self.has_specifier(node, "default_method_clause") {
                     decorators.push("default".to_string());
                 }
-                if decl_text.contains("= delete") {
+                if self.has_specifier(node, "delete_method_clause") {
                     decorators.push("deleted".to_string());
+                }
+                // Pure virtual = 0 (in declarations, not definitions typically)
+                let func_text = self.node_text(node, source);
+                if func_text.contains("= 0") {
+                    decorators.push("pure_virtual".to_string());
                 }
 
                 // Detect operator overloading
@@ -1209,6 +1421,55 @@ impl Cpp {
                 None
             }
             "lambda_expression" => self.extract_lambda(node, source),
+            "preproc_function_def" => {
+                let name = self
+                    .child_by_field(node, "name")
+                    .map(|n| self.node_text(n, source))?;
+                let docstring = self.get_doc_comment(node, source);
+                let params = self
+                    .child_by_field(node, "parameters")
+                    .map(|p| {
+                        let mut params = Vec::new();
+                        let mut cursor = p.walk();
+                        for child in p.children(&mut cursor) {
+                            if child.kind() == "identifier" {
+                                params.push(self.node_text(child, source));
+                            }
+                        }
+                        params
+                    })
+                    .unwrap_or_default();
+                Some(FunctionInfo {
+                    name,
+                    params,
+                    return_type: None,
+                    docstring,
+                    is_method: false,
+                    is_async: false,
+                    decorators: vec!["macro".to_string()],
+                    line_number: node.start_position().row + 1,
+                    end_line_number: Some(node.end_position().row + 1),
+                    language: "cpp".to_string(),
+                })
+            }
+            "preproc_def" => {
+                let name = self
+                    .child_by_field(node, "name")
+                    .map(|n| self.node_text(n, source))?;
+                let docstring = self.get_doc_comment(node, source);
+                Some(FunctionInfo {
+                    name,
+                    params: Vec::new(),
+                    return_type: None,
+                    docstring,
+                    is_method: false,
+                    is_async: false,
+                    decorators: vec!["macro".to_string()],
+                    line_number: node.start_position().row + 1,
+                    end_line_number: Some(node.end_position().row + 1),
+                    language: "cpp".to_string(),
+                })
+            }
             _ => None,
         }
     }
@@ -2328,7 +2589,7 @@ impl Language for Cpp {
     }
 
     fn extensions(&self) -> &[&'static str] {
-        &[".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h++", ".c++", ".cu", ".cuh"]
+        &[".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h++", ".c++", ".cu", ".cuh", ".h"]
     }
 
     fn parser(&self) -> Result<Parser> {
@@ -2373,6 +2634,7 @@ impl Language for Cpp {
 
     fn function_query(&self) -> &'static str {
         r#"[
+            ; --- Direct function definitions ---
             (function_definition
                 declarator: (function_declarator
                     declarator: (identifier) @name)) @function
@@ -2385,13 +2647,91 @@ impl Language for Cpp {
             (function_definition
                 declarator: (function_declarator
                     declarator: (operator_name) @name)) @function
+            (function_definition
+                declarator: (function_declarator
+                    declarator: (field_identifier) @name)) @function
+
+            ; --- Pointer-returning functions: T* foo() ---
+            (function_definition
+                declarator: (pointer_declarator
+                    declarator: (function_declarator
+                        declarator: (identifier) @name))) @function
+            (function_definition
+                declarator: (pointer_declarator
+                    declarator: (function_declarator
+                        declarator: (qualified_identifier) @name))) @function
+            (function_definition
+                declarator: (pointer_declarator
+                    declarator: (function_declarator
+                        declarator: (field_identifier) @name))) @function
+
+            ; --- Reference-returning functions: T& foo() ---
+            (function_definition
+                declarator: (reference_declarator
+                    (function_declarator
+                        declarator: (identifier) @name))) @function
+            (function_definition
+                declarator: (reference_declarator
+                    (function_declarator
+                        declarator: (qualified_identifier) @name))) @function
+            (function_definition
+                declarator: (reference_declarator
+                    (function_declarator
+                        declarator: (operator_name) @name))) @function
+
+            ; --- Forward declarations ---
             (declaration
                 declarator: (function_declarator
                     declarator: (identifier) @name)) @function
+            (declaration
+                declarator: (function_declarator
+                    declarator: (qualified_identifier) @name)) @function
+
+            ; --- Template functions ---
             (template_declaration
                 (function_definition
                     declarator: (function_declarator
                         declarator: (identifier) @name))) @function
+            (template_declaration
+                (function_definition
+                    declarator: (function_declarator
+                        declarator: (qualified_identifier) @name))) @function
+            (template_declaration
+                (function_definition
+                    declarator: (function_declarator
+                        declarator: (destructor_name) @name))) @function
+            (template_declaration
+                (function_definition
+                    declarator: (function_declarator
+                        declarator: (operator_name) @name))) @function
+            (template_declaration
+                (function_definition
+                    declarator: (pointer_declarator
+                        declarator: (function_declarator
+                            declarator: (identifier) @name)))) @function
+            (template_declaration
+                (function_definition
+                    declarator: (pointer_declarator
+                        declarator: (function_declarator
+                            declarator: (qualified_identifier) @name)))) @function
+            (template_declaration
+                (function_definition
+                    declarator: (reference_declarator
+                        (function_declarator
+                            declarator: (identifier) @name)))) @function
+            (template_declaration
+                (function_definition
+                    declarator: (reference_declarator
+                        (function_declarator
+                            declarator: (qualified_identifier) @name)))) @function
+
+            ; --- Preprocessor macros ---
+            (preproc_def
+                name: (identifier) @name) @function
+            (preproc_function_def
+                name: (identifier) @name) @function
+
+            ; --- Lambdas ---
             (lambda_expression) @function
         ]"#
     }
@@ -2402,6 +2742,7 @@ impl Language for Cpp {
             (struct_specifier name: (type_identifier) @name) @struct
             (enum_specifier name: (type_identifier) @name) @enum
             (namespace_definition name: (namespace_identifier) @name) @namespace
+            (namespace_definition name: (nested_namespace_specifier) @name) @namespace
             (template_declaration
                 (class_specifier name: (type_identifier) @name)) @class
             (template_declaration
@@ -2760,5 +3101,541 @@ private:
         assert!(!cpp.is_macro_identifier("MyClass")); // Has lowercase
         assert!(!cpp.is_macro_identifier("std::vector")); // Has special chars
         assert!(!cpp.is_macro_identifier("")); // Empty
+    }
+
+    #[test]
+    fn test_cuda_global_kernel() {
+        let source = r#"
+__global__ void my_kernel(float* data, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) data[idx] *= 2.0f;
+}
+"#;
+        let tree = parse_cpp(source);
+        let cpp = Cpp;
+        let root = tree.root_node();
+
+        let mut found = false;
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if child.kind() == "function_definition" {
+                if let Some(func) = cpp.extract_function(child, source.as_bytes()) {
+                    assert_eq!(func.name, "my_kernel");
+                    assert!(
+                        func.decorators.contains(&"__global__".to_string()),
+                        "Should have __global__ decorator, got: {:?}",
+                        func.decorators
+                    );
+                    assert_eq!(
+                        func.return_type.as_deref(),
+                        Some("void"),
+                        "Return type should be 'void', got: {:?}",
+                        func.return_type
+                    );
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "CUDA kernel not found");
+    }
+
+    #[test]
+    fn test_cuda_device_function() {
+        let source = r#"
+__device__ __forceinline__ float fast_sqrt(float x) {
+    return __fsqrt_rn(x);
+}
+"#;
+        let tree = parse_cpp(source);
+        let cpp = Cpp;
+        let root = tree.root_node();
+
+        let mut found = false;
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if child.kind() == "function_definition" {
+                if let Some(func) = cpp.extract_function(child, source.as_bytes()) {
+                    assert_eq!(func.name, "fast_sqrt");
+                    assert!(
+                        func.decorators.contains(&"__device__".to_string()),
+                        "Should have __device__, got: {:?}",
+                        func.decorators
+                    );
+                    assert!(
+                        func.decorators.contains(&"__forceinline__".to_string()),
+                        "Should have __forceinline__, got: {:?}",
+                        func.decorators
+                    );
+                    assert_eq!(
+                        func.return_type.as_deref(),
+                        Some("float"),
+                        "Return type should be 'float', got: {:?}",
+                        func.return_type
+                    );
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "CUDA device function not found");
+    }
+
+    #[test]
+    fn test_cuda_host_device() {
+        let source = r#"
+__host__ __device__ int helper(int x) {
+    return x + 1;
+}
+"#;
+        let tree = parse_cpp(source);
+        let cpp = Cpp;
+        let root = tree.root_node();
+
+        let mut found = false;
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if child.kind() == "function_definition" {
+                if let Some(func) = cpp.extract_function(child, source.as_bytes()) {
+                    assert_eq!(func.name, "helper");
+                    assert!(
+                        func.decorators.contains(&"__host__".to_string()),
+                        "Should have __host__, got: {:?}",
+                        func.decorators
+                    );
+                    assert!(
+                        func.decorators.contains(&"__device__".to_string()),
+                        "Should have __device__, got: {:?}",
+                        func.decorators
+                    );
+                    assert_eq!(
+                        func.return_type.as_deref(),
+                        Some("int"),
+                        "Return type should be 'int', got: {:?}",
+                        func.return_type
+                    );
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "CUDA host/device function not found");
+    }
+
+    #[test]
+    fn test_pointer_returning_function() {
+        let source = r#"
+ComputeBody* compute_body() const {
+    return static_cast<ComputeBody*>(body);
+}
+"#;
+        let tree = parse_cpp(source);
+        let cpp = Cpp;
+        let root = tree.root_node();
+
+        let mut found = false;
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if child.kind() == "function_definition" {
+                if let Some(func) = cpp.extract_function(child, source.as_bytes()) {
+                    assert_eq!(func.name, "compute_body");
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "Pointer-returning function not found");
+    }
+
+    #[test]
+    fn test_out_of_class_method() {
+        let source = r#"
+void Graph::eliminate_dead_nodes() {
+    for (int i = 0; i < num_nodes_; ++i) {}
+}
+"#;
+        let tree = parse_cpp(source);
+        let cpp = Cpp;
+        let root = tree.root_node();
+
+        let mut found = false;
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if child.kind() == "function_definition" {
+                if let Some(func) = cpp.extract_function(child, source.as_bytes()) {
+                    assert_eq!(func.name, "Graph::eliminate_dead_nodes");
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "Out-of-class method not found");
+    }
+
+    #[test]
+    fn test_preproc_function_def() {
+        let source = r#"
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+"#;
+        let tree = parse_cpp(source);
+        let cpp = Cpp;
+        let root = tree.root_node();
+
+        let mut found = false;
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if child.kind() == "preproc_function_def" {
+                if let Some(func) = cpp.extract_function(child, source.as_bytes()) {
+                    assert_eq!(func.name, "MAX");
+                    assert!(
+                        func.decorators.contains(&"macro".to_string()),
+                        "Should have macro decorator, got: {:?}",
+                        func.decorators
+                    );
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "Preprocessor function macro not found");
+    }
+
+    #[test]
+    fn test_preproc_object_macro() {
+        let source = r#"
+#define VERSION 42
+"#;
+        let tree = parse_cpp(source);
+        let cpp = Cpp;
+        let root = tree.root_node();
+
+        let mut found = false;
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if child.kind() == "preproc_def" {
+                if let Some(func) = cpp.extract_function(child, source.as_bytes()) {
+                    assert_eq!(func.name, "VERSION");
+                    assert!(
+                        func.decorators.contains(&"macro".to_string()),
+                        "Should have macro decorator, got: {:?}",
+                        func.decorators
+                    );
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "Preprocessor object macro not found");
+    }
+
+    #[test]
+    fn test_nested_namespace() {
+        let source = r#"
+namespace torch::conductor {
+    void foo() {}
+}
+"#;
+        let tree = parse_cpp(source);
+        let cpp = Cpp;
+        let root = tree.root_node();
+
+        let mut found = false;
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if child.kind() == "namespace_definition" {
+                if let Some(ns) = cpp.extract_class(child, source.as_bytes()) {
+                    assert!(
+                        ns.name.contains("torch") && ns.name.contains("conductor"),
+                        "Should contain torch::conductor, got: {}",
+                        ns.name
+                    );
+                    assert!(ns.decorators.contains(&"namespace".to_string()));
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "Nested namespace not found");
+    }
+
+    #[test]
+    fn test_deleted_function() {
+        let source = r#"
+class Graph {
+public:
+    Graph(const Graph&) = delete;
+};
+"#;
+        let tree = parse_cpp(source);
+        let cpp = Cpp;
+        let root = tree.root_node();
+
+        let mut found_deleted = false;
+        fn walk(node: Node, cpp: &Cpp, source: &[u8], found: &mut bool) {
+            if node.kind() == "function_definition" {
+                if let Some(func) = cpp.extract_function(node, source) {
+                    if func.decorators.contains(&"deleted".to_string()) {
+                        *found = true;
+                    }
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                walk(child, cpp, source, found);
+            }
+        }
+        walk(root, &cpp, source.as_bytes(), &mut found_deleted);
+        assert!(found_deleted, "Deleted function not detected");
+    }
+
+    #[test]
+    fn test_template_out_of_class_method() {
+        let source = r#"
+template<typename T>
+void Container<T>::insert(const T& value) {
+    data_.push_back(value);
+}
+"#;
+        let tree = parse_cpp(source);
+        let cpp = Cpp;
+        let root = tree.root_node();
+
+        let mut found = false;
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if child.kind() == "template_declaration" {
+                if let Some(func) = cpp.extract_function(child, source.as_bytes()) {
+                    assert!(
+                        func.name.contains("Container") && func.name.contains("insert"),
+                        "Expected Container<T>::insert, got: {}",
+                        func.name
+                    );
+                    assert!(
+                        func.decorators.iter().any(|d| d.contains("template")),
+                        "Should have template decorator, got: {:?}",
+                        func.decorators
+                    );
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "Template out-of-class method not found");
+    }
+
+    #[test]
+    fn test_reference_returning_method_in_class() {
+        let source = r#"
+class Graph {
+public:
+    Graph& operator=(const Graph&) = delete;
+};
+"#;
+        let tree = parse_cpp(source);
+        let cpp = Cpp;
+        let root = tree.root_node();
+
+        let mut found = false;
+        fn walk(node: Node, cpp: &Cpp, source: &[u8], found: &mut bool) {
+            if node.kind() == "function_definition" {
+                if let Some(func) = cpp.extract_function(node, source) {
+                    if func.name.contains("operator") {
+                        *found = true;
+                    }
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                walk(child, cpp, source, found);
+            }
+        }
+        walk(root, &cpp, source.as_bytes(), &mut found);
+        assert!(found, "Reference-returning operator= not found in class");
+    }
+
+    #[test]
+    fn test_enum_class_scoped() {
+        let source = r#"
+enum class NodeKind : uint8_t {
+  INPUT,
+  CONSTANT,
+  POINTWISE,
+};
+"#;
+        let tree = parse_cpp(source);
+        let cpp = Cpp;
+        let root = tree.root_node();
+
+        let mut found = false;
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if child.kind() == "enum_specifier" {
+                if let Some(class) = cpp.extract_class(child, source.as_bytes()) {
+                    assert_eq!(class.name, "NodeKind");
+                    assert!(
+                        class.decorators.contains(&"scoped".to_string()),
+                        "Should have scoped decorator, got: {:?}",
+                        class.decorators
+                    );
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "Scoped enum not found");
+    }
+
+    /// End-to-end test: verify the query patterns match real C++ code and the
+    /// full extraction pipeline produces correct results.
+    #[test]
+    fn test_e2e_query_pipeline() {
+        use crate::ast::extractor::AstExtractor;
+
+        let source = r#"
+#pragma once
+#include <cstdint>
+
+#define GRAPH_VERSION 3
+#define MAX_NODES(n) ((n) * 2)
+
+namespace torch::conductor {
+
+enum class NodeKind : uint8_t { INPUT, CONSTANT };
+
+struct GraphNode {
+  uint32_t id;
+  NodeKind kind;
+  bool is_dead() const { return false; }
+  ComputeBody* compute_body() const { return nullptr; }
+};
+
+class Graph {
+ public:
+  explicit Graph(ExprPool* pool) : pool_(pool) {}
+  Graph(const Graph&) = delete;
+  Graph& operator=(const Graph&) = delete;
+
+  GraphNode* add_input(int8_t dtype) { return nullptr; }
+
+ private:
+  void grow_(size_t cap) {}
+  ExprPool* pool_;
+};
+
+template<typename T>
+void Container<T>::insert(const T& value) {}
+
+}
+"#;
+        let module = AstExtractor::extract_from_source(source, "cpp")
+            .expect("Failed to extract C++ source");
+
+        let func_names: Vec<&str> = module.functions.iter().map(|f| f.name.as_str()).collect();
+        let class_names: Vec<&str> = module.classes.iter().map(|c| c.name.as_str()).collect();
+
+        // Functions extracted via query patterns
+        assert!(
+            func_names.contains(&"GRAPH_VERSION"),
+            "Should find object macro, got: {:?}",
+            func_names
+        );
+        assert!(
+            func_names.contains(&"MAX_NODES"),
+            "Should find function macro, got: {:?}",
+            func_names
+        );
+
+        // Classes extracted via query patterns
+        assert!(
+            class_names.iter().any(|n| n.contains("torch") || n.contains("conductor")),
+            "Should find nested namespace, got: {:?}",
+            class_names
+        );
+        assert!(
+            class_names.contains(&"NodeKind"),
+            "Should find enum class, got: {:?}",
+            class_names
+        );
+        assert!(
+            class_names.contains(&"GraphNode"),
+            "Should find struct, got: {:?}",
+            class_names
+        );
+        assert!(
+            class_names.contains(&"Graph"),
+            "Should find class, got: {:?}",
+            class_names
+        );
+    }
+
+    /// End-to-end test for CUDA kernels via the full extraction pipeline.
+    #[test]
+    fn test_e2e_cuda_kernels() {
+        use crate::ast::extractor::AstExtractor;
+
+        let source = r#"
+__global__ void matmul_kernel(float* C, const float* A, const float* B, int N) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < N && col < N) {
+        float sum = 0.0f;
+        for (int k = 0; k < N; ++k)
+            sum += A[row * N + k] * B[k * N + col];
+        C[row * N + col] = sum;
+    }
+}
+
+__device__ float fast_exp(float x) { return __expf(x); }
+
+__host__ __device__ int clamp(int x, int lo, int hi) {
+    return x < lo ? lo : (x > hi ? hi : x);
+}
+
+template<typename T>
+__global__ void fill_kernel(T* data, T value, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) data[idx] = value;
+}
+"#;
+        let module = AstExtractor::extract_from_source(source, "cpp")
+            .expect("Failed to extract CUDA source");
+
+        let func_names: Vec<&str> = module.functions.iter().map(|f| f.name.as_str()).collect();
+
+        assert!(
+            func_names.contains(&"matmul_kernel"),
+            "Should find __global__ kernel, got: {:?}",
+            func_names
+        );
+        assert!(
+            func_names.contains(&"fast_exp"),
+            "Should find __device__ function, got: {:?}",
+            func_names
+        );
+        assert!(
+            func_names.contains(&"clamp"),
+            "Should find __host__ __device__ function, got: {:?}",
+            func_names
+        );
+        assert!(
+            func_names.contains(&"fill_kernel"),
+            "Should find template CUDA kernel, got: {:?}",
+            func_names
+        );
+
+        // Verify CUDA qualifiers are extracted as decorators
+        let matmul = module.functions.iter().find(|f| f.name == "matmul_kernel").unwrap();
+        assert!(
+            matmul.decorators.contains(&"__global__".to_string()),
+            "matmul_kernel should have __global__ decorator, got: {:?}",
+            matmul.decorators
+        );
+        assert_eq!(
+            matmul.return_type.as_deref(),
+            Some("void"),
+            "matmul_kernel return type should be void"
+        );
+
+        let clamp_fn = module.functions.iter().find(|f| f.name == "clamp").unwrap();
+        assert!(
+            clamp_fn.decorators.contains(&"__host__".to_string()),
+            "clamp should have __host__, got: {:?}",
+            clamp_fn.decorators
+        );
+        assert!(
+            clamp_fn.decorators.contains(&"__device__".to_string()),
+            "clamp should have __device__, got: {:?}",
+            clamp_fn.decorators
+        );
     }
 }

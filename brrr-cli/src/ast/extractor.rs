@@ -347,6 +347,7 @@ const FUNCTION_NODE_KINDS: &[&str] = &[
     "preproc_def",
     "preproc_function_def",
     "type_definition",
+    "lambda_expression",
     // Java
     "method_declaration",
     "constructor_declaration",
@@ -391,6 +392,7 @@ const CLASS_NODE_KINDS: &[&str] = &[
     "class_specifier",
     "namespace_definition",
     "type_definition",
+    "alias_declaration",
     "preproc_ifdef",
     "preproc_if",
     // Java
@@ -522,6 +524,45 @@ impl AstExtractor {
         // Use cached parser for performance - avoids recreating parser for each file.
         // The CachedParser RAII wrapper ensures the parser is returned to the
         // thread-local cache on drop, even if an error occurs during parsing.
+        let mut cached_parser = CachedParser::take(lang)?;
+        let tree = cached_parser
+            .get_mut()
+            .parse(&source, None)
+            .ok_or_else(|| BrrrError::Parse {
+                file: path.display().to_string(),
+                message: "Failed to parse file".to_string(),
+            })?;
+
+        Self::extract_module(&tree, &source, lang, path)
+    }
+
+    /// Extract full module info from a file using a specified language.
+    ///
+    /// Unlike `extract_file` which auto-detects the language from the file
+    /// extension, this method uses the explicitly provided language name.
+    /// This is needed for `.h` files in mixed C/C++ projects: the caller
+    /// (semantic extractor) knows whether it is doing a C or C++ pass and
+    /// should pick the right parser, rather than relying on extension-based
+    /// detection which can only map `.h` to one language.
+    pub fn extract_file_as(path: &Path, language: &str) -> Result<ModuleInfo> {
+        let registry = LanguageRegistry::global();
+        let lang = registry.get_by_name(language).ok_or_else(|| {
+            BrrrError::UnsupportedLanguage(language.to_string())
+        })?;
+
+        let source = std::fs::read(path).map_err(|e| BrrrError::io_with_path(e, path))?;
+
+        // Respect should_skip_file: the C handler uses this to reject .h files
+        // containing C++ code, and this check is still valid even when the caller
+        // explicitly requested a language.
+        if lang.should_skip_file(path, &source) {
+            return Err(BrrrError::UnsupportedLanguage(format!(
+                "File content incompatible with {} parser: {}",
+                lang.name(),
+                path.display()
+            )));
+        }
+
         let mut cached_parser = CachedParser::take(lang)?;
         let tree = cached_parser
             .get_mut()
