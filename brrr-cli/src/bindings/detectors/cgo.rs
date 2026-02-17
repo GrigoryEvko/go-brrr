@@ -111,7 +111,7 @@ fn collect_c_calls(
                 let field = func_node.child_by_field_name("field");
                 if let (Some(op), Some(f)) = (operand, field) {
                     if let (Ok(op_text), Ok(f_text)) = (op.utf8_text(source), f.utf8_text(source)) {
-                        if op_text == "C" {
+                        if op_text == "C" && !is_cgo_builtin(f_text) {
                             declarations.push(BindingDeclaration {
                                 system: BindingSystem::CGo,
                                 direction: BindingDirection::Import,
@@ -141,4 +141,18 @@ fn collect_c_calls(
     for child in node.children(&mut cursor) {
         collect_c_calls(&child, source, file_path, declarations);
     }
+}
+
+/// Check if a `C.xxx` call is a CGo runtime helper (not an actual C function).
+///
+/// CGo provides several built-in type conversion functions in the `C` pseudo-package.
+/// These are runtime utilities, not C library function imports.
+fn is_cgo_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        // String/bytes conversions
+        "CString" | "GoString" | "GoStringN" | "CBytes" | "GoBytes"
+        // sizeof helpers
+        | "sizeof_struct_stat" | "sizeof_struct_passwd"
+    )
 }

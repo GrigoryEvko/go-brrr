@@ -219,6 +219,32 @@ fn match_ctypes_preloaded_lib<'a>(
     }
 }
 
+/// Check if an attribute chain matches `ctypes.pythonapi`.
+///
+/// `ctypes.pythonapi` is a pre-loaded library handle for the Python C API.
+/// Pattern: `ctypes.pythonapi.func(...)` -- the object is `ctypes.pythonapi`
+/// and the attribute is the C function name.
+///
+/// Returns `true` if the node is `ctypes.pythonapi`.
+fn is_ctypes_pythonapi(node: &tree_sitter::Node, source: &[u8]) -> bool {
+    if node.kind() != "attribute" {
+        return false;
+    }
+    let obj = match node.child_by_field_name("object") {
+        Some(o) => o,
+        None => return false,
+    };
+    let attr = match node.child_by_field_name("attribute") {
+        Some(a) => a,
+        None => return false,
+    };
+
+    let obj_text = obj.utf8_text(source).ok().unwrap_or("");
+    let attr_text = attr.utf8_text(source).ok().unwrap_or("");
+
+    obj_text == "ctypes" && attr_text == "pythonapi"
+}
+
 /// Collect C function calls through ctypes library handles.
 ///
 /// Handles three patterns:
@@ -285,6 +311,27 @@ fn collect_ctypes_calls(
                                 }
                             }
                         }
+
+                        // Pattern 3: ctypes.pythonapi.func(...)
+                        if is_ctypes_pythonapi(&obj, source) {
+                            if !is_ctypes_builtin(attr_text) {
+                                let key = (attr_text.to_string(), line);
+                                if seen.insert(key) {
+                                    let raw = node
+                                        .utf8_text(source)
+                                        .ok()
+                                        .map(|s| truncate_raw(s));
+                                    declarations.push(make_declaration(
+                                        attr_text,
+                                        "pythonapi",
+                                        file_path,
+                                        line,
+                                        raw,
+                                        0.85,
+                                    ));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -327,15 +374,23 @@ fn collect_type_annotations(
                                         if let (Ok(lib_text), Ok(func_text)) =
                                             (lib_obj.utf8_text(source), func_node.utf8_text(source))
                                         {
-                                            if lib_vars
+                                            // Check tracked lib vars
+                                            let matched_lib = lib_vars
                                                 .iter()
-                                                .any(|v| v.access_text == lib_text)
-                                            {
-                                                let lib_name = lib_vars
-                                                    .iter()
-                                                    .find(|v| v.access_text == lib_text)
-                                                    .map(|v| v.library_name.as_str())
-                                                    .unwrap_or("");
+                                                .find(|v| v.access_text == lib_text)
+                                                .map(|v| v.library_name.as_str());
+
+                                            // Also check ctypes.pythonapi and ctypes.windll/cdll preloaded
+                                            let lib_name = matched_lib
+                                                .or_else(|| {
+                                                    if is_ctypes_pythonapi(&lib_obj, source) {
+                                                        Some("pythonapi")
+                                                    } else {
+                                                        match_ctypes_preloaded_lib(&lib_obj, source)
+                                                    }
+                                                });
+
+                                            if let Some(lib_name) = lib_name {
                                                 let line = node.start_position().row + 1;
                                                 let key = (func_text.to_string(), line);
                                                 if seen.insert(key) {

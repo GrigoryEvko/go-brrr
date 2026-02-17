@@ -12,6 +12,8 @@
 //! 5. Same-file lookup (prefer functions defined in the same file)
 //! 6. Same-directory preference for ambiguous simple-name matches
 //! 7. Simple name lookup (accept unique match or best proximity match)
+//! 8. Suffix-based qualified name matching (fallback for namespace mismatch)
+//! 9. Metadata-based synthesis (class_name + exposed_name when host_function is absent)
 
 use std::path::Path;
 
@@ -22,7 +24,11 @@ use crate::callgraph::types::FunctionRef;
 /// Resolve cross-file binding references using the function index.
 pub fn resolve_bindings(declarations: &mut [BindingDeclaration], index: &FunctionIndex) {
     for decl in declarations.iter_mut() {
+        // Phase 1: resolve existing partial references (name -> full FunctionRef)
         resolve_host_function(decl, index);
+        // Phase 2: synthesize host_function from metadata when detector didn't provide one
+        resolve_host_from_metadata(decl, index);
+        // Phase 3: resolve target function references
         resolve_target_function(decl, index);
     }
 }
@@ -33,9 +39,14 @@ pub fn resolve_bindings(declarations: &mut [BindingDeclaration], index: &Functio
 
 /// Normalize a C++ function reference name for lookup.
 ///
-/// Strips leading `&`, template parameters `<...>`, and surrounding whitespace.
+/// Strips leading `&`, leading `::` (global scope qualifier), template
+/// parameters `<...>`, and surrounding whitespace.
 fn normalize_cpp_name(name: &str) -> String {
-    let s = name.trim().trim_start_matches('&').trim();
+    let s = name
+        .trim()
+        .trim_start_matches('&')
+        .trim()
+        .trim_start_matches("::");
     strip_template_params(s)
 }
 
@@ -82,16 +93,39 @@ fn parent_dir(path: &str) -> Option<&str> {
     Path::new(path).parent().and_then(|p| p.to_str())
 }
 
+/// Check if a file path refers to a C/C++/CUDA source or header file.
+fn is_cpp_file(path: &str) -> bool {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    matches!(
+        ext,
+        "c" | "cc" | "cpp" | "cxx" | "h" | "hh" | "hpp" | "hxx" | "cu" | "cuh"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Disambiguation: pick the best match from multiple candidates
 // ---------------------------------------------------------------------------
+
+/// Count the number of shared path components between two file paths.
+///
+/// Compares from the start of each path, counting common directory components.
+/// Returns 0 if paths share no common prefix.
+fn shared_path_depth(a: &str, b: &str) -> usize {
+    let a_parts: Vec<&str> = Path::new(a).components().map(|c| c.as_os_str().to_str().unwrap_or("")).collect();
+    let b_parts: Vec<&str> = Path::new(b).components().map(|c| c.as_os_str().to_str().unwrap_or("")).collect();
+    a_parts.iter().zip(b_parts.iter()).take_while(|(x, y)| x == y).count()
+}
 
 /// Pick the best candidate from multiple matches, using file proximity.
 ///
 /// Preference order:
 /// 1. Same file as declaration_file
 /// 2. Same directory as declaration_file
-/// 3. Shortest file path (heuristic: closer to project root = more likely)
+/// 3. Deepest shared path prefix (most path components in common)
+/// 4. Shortest file path as final tiebreaker
 fn pick_best_candidate<'a>(
     candidates: &[&'a FunctionRef],
     declaration_file: &str,
@@ -126,8 +160,17 @@ fn pick_best_candidate<'a>(
         }
     }
 
-    // 3. Shortest file path as tiebreaker
-    candidates.iter().min_by_key(|c| c.file.len()).copied()
+    // 3. Deepest shared path prefix -- prefer candidates in nearby directories
+    //    over candidates closer to root but in unrelated directories
+    candidates
+        .iter()
+        .max_by(|a, b| {
+            let depth_a = shared_path_depth(&a.file, declaration_file);
+            let depth_b = shared_path_depth(&b.file, declaration_file);
+            depth_a.cmp(&depth_b)
+                .then_with(|| b.file.len().cmp(&a.file.len())) // shorter path wins on tie
+        })
+        .copied()
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +217,17 @@ fn try_qualified_lookup<'a>(
         let last_two = format!("{}::{}", parts[parts.len() - 1], leaf);
         if let Some(fref) = index.lookup_qualified(&last_two) {
             return Some(fref);
+        }
+    }
+
+    // Strategy 5: Suffix-based lookup -- find any qualified name that ends with
+    // our normalized name at a separator boundary. This handles cases where the
+    // index has a longer prefix we don't know about (e.g., file stem or extra
+    // namespace layers).
+    if normalized.contains("::") {
+        let suffix_matches = index.lookup_by_suffix(&normalized);
+        if let Some(best) = pick_best_candidate(&suffix_matches, declaration_file) {
+            return Some(best);
         }
     }
 
@@ -334,6 +388,210 @@ fn resolve_host_function(decl: &mut BindingDeclaration, index: &FunctionIndex) {
         let with_stem = format!("{}::{}", stem, normalized_name);
         if let Some(fref) = index.lookup_qualified(&with_stem) {
             decl.host_function = Some(fref.clone());
+            return;
+        }
+    }
+
+    // Strategy 9: Suffix-based lookup for the simple name -- if the name is a
+    // bare function name (no ::), try matching it as a suffix of qualified names
+    // in the index, preferring candidates near the declaration file.
+    {
+        let suffix_matches = index.lookup_by_suffix(&normalized_name);
+        if !suffix_matches.is_empty() {
+            // Filter to same-file or same-directory first
+            if let Some(fref) = try_same_file_lookup(&normalized_name, declaration_file, index) {
+                decl.host_function = Some(fref.clone());
+                return;
+            }
+            if suffix_matches.len() == 1 {
+                decl.host_function = Some(suffix_matches[0].clone());
+                return;
+            }
+            // For multiple matches, only pick if there's a clear same-dir winner
+            let decl_dir = parent_dir(declaration_file);
+            if let Some(dd) = decl_dir {
+                let same_dir: Vec<_> = suffix_matches
+                    .iter()
+                    .filter(|c| parent_dir(&c.file) == Some(dd))
+                    .collect();
+                if same_dir.len() == 1 {
+                    decl.host_function = Some((*same_dir[0]).clone());
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Metadata-based host function synthesis
+// ---------------------------------------------------------------------------
+
+/// Check if a Python-style name is a dunder method (e.g., `__init__`, `__repr__`).
+///
+/// Dunder methods in pybind11 are almost always implemented as lambdas or
+/// special wrappers, not direct C++ function references. Trying to resolve
+/// them would produce false positives.
+fn is_dunder(name: &str) -> bool {
+    name.len() > 4 && name.starts_with("__") && name.ends_with("__")
+}
+
+/// Check if a name looks like a plausible C++ function name for metadata synthesis.
+///
+/// Rejects names that are clearly NOT function references:
+/// - Empty or single-char names
+/// - All-uppercase names (enum constants: "CUDA", "CPU", "MPS")
+/// - Single-word capitalized names without camelCase or underscores (type names: "Metal", "Lazy")
+/// - Operator overloads ("operator+")
+///
+/// Accepts:
+/// - snake_case: "get_value", "forward"
+/// - camelCase: "getValue", "ProcessGroup" (lowercase-to-uppercase transition)
+/// - Qualified: "MyClass::method"
+/// - With underscore: "SomeFunc_v2"
+fn looks_like_cpp_function_name(name: &str) -> bool {
+    if name.is_empty() || name.len() <= 1 {
+        return false;
+    }
+    if name.starts_with("operator") {
+        return false;
+    }
+    // All-uppercase with possible digits/underscores = enum constant
+    if name
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    {
+        return false;
+    }
+    // Single-word starting with uppercase, no underscore, no camelCase transition,
+    // no "::" = likely a type or enum value name (e.g., "Metal", "Lazy", "Stream")
+    if name.starts_with(|c: char| c.is_ascii_uppercase()) {
+        let has_underscore = name.contains('_');
+        let has_colons = name.contains("::");
+        let has_camel_transition = name
+            .as_bytes()
+            .windows(2)
+            .any(|w| w[0].is_ascii_lowercase() && w[1].is_ascii_uppercase());
+        if !has_underscore && !has_colons && !has_camel_transition {
+            return false;
+        }
+    }
+    true
+}
+
+/// Try to synthesize and resolve host_function from binding metadata when no
+/// host_function reference was provided by the detector.
+///
+/// This handles common pybind11 patterns where the detector captures the Python
+/// exposed name and class name but not the C++ implementation function. For
+/// example, `.def("get_value", &MyClass::get_value)` might only capture
+/// `exposed_name="get_value"` and `class_name="MyClass"`, without extracting
+/// the `&MyClass::get_value` part as host_function.
+///
+/// Called AFTER resolve_host_function, so it only runs for declarations where
+/// host_function is still None or has an empty file.
+fn resolve_host_from_metadata(decl: &mut BindingDeclaration, index: &FunctionIndex) {
+    // Only run when host_function is completely absent.
+    if decl.host_function.is_some() {
+        return;
+    }
+
+    // Only meaningful for Export-direction bindings (host exposes to target).
+    if decl.direction != BindingDirection::Export {
+        return;
+    }
+
+    let exposed = &decl.exposed_name;
+
+    // Skip dunder methods -- they're almost always lambdas or wrappers.
+    if is_dunder(exposed) {
+        return;
+    }
+
+    // Skip names that don't look like C++ function identifiers.
+    // This avoids false positives from enum values ("PrivateUse1"),
+    // device names ("CUDA", "MPS"), and other string constants.
+    if !looks_like_cpp_function_name(exposed) {
+        return;
+    }
+
+    let declaration_file = decl.declaration_file.clone();
+
+    // Determine if we should restrict to C/C++ files.
+    // For pybind11 and cuda_dispatch bindings, the host language is C++, so we
+    // only want to match C/C++ files to avoid cross-language false positives.
+    let require_cpp = matches!(
+        decl.system,
+        BindingSystem::Pybind11 | BindingSystem::CudaDispatch | BindingSystem::TorchLibrary
+    );
+
+    // Strategy A: class_name + exposed_name -> class::method lookup
+    if let Some(ref class_name) = decl.class_name {
+        if let Some(fref) =
+            try_class_method_lookup(class_name, exposed, &declaration_file, index)
+        {
+            if !require_cpp || is_cpp_file(&fref.file) {
+                decl.host_function = Some(fref.clone());
+                return;
+            }
+        }
+
+        // Try qualified lookup: class_name::exposed_name
+        let qualified = format!("{}::{}", class_name, exposed);
+        if let Some(fref) = try_qualified_lookup(&qualified, &declaration_file, index) {
+            if !require_cpp || is_cpp_file(&fref.file) {
+                decl.host_function = Some(fref.clone());
+                return;
+            }
+        }
+
+        // Try suffix lookup: maybe the index has a longer prefix.
+        // Filter to C/C++ files to avoid cross-language false positives.
+        let suffix_matches = index.lookup_by_suffix(&qualified);
+        let filtered: Vec<_> = if require_cpp {
+            suffix_matches.iter().filter(|c| is_cpp_file(&c.file)).copied().collect()
+        } else {
+            suffix_matches
+        };
+        if let Some(best) = pick_best_candidate(&filtered, &declaration_file) {
+            decl.host_function = Some(best.clone());
+            return;
+        }
+    }
+
+    // Strategy B: same-file lookup for exposed_name as a standalone function.
+    // The declaration file for pybind11 is always a C++ file, so same-file
+    // lookup inherently returns C++ functions.
+    if let Some(fref) = try_same_file_lookup(exposed, &declaration_file, index) {
+        decl.host_function = Some(fref.clone());
+        return;
+    }
+
+    // Strategy C: simple name lookup with proximity (conservative for synthesized lookups).
+    // Filter to host language files to avoid cross-language false positives.
+    let candidates = index.lookup(exposed);
+    let cpp_candidates: Vec<&FunctionRef> = if require_cpp {
+        candidates.iter().filter(|c| is_cpp_file(&c.file)).copied().collect()
+    } else {
+        candidates.iter().copied().collect()
+    };
+
+    if cpp_candidates.len() == 1 {
+        decl.host_function = Some((*cpp_candidates[0]).clone());
+        return;
+    }
+    if cpp_candidates.len() > 1 {
+        // For synthesized lookups, only accept same-directory matches to avoid
+        // false positives from unrelated functions with the same name.
+        let decl_dir = parent_dir(&declaration_file);
+        if let Some(dd) = decl_dir {
+            let same_dir: Vec<_> = cpp_candidates
+                .iter()
+                .filter(|c| parent_dir(&c.file) == Some(dd))
+                .copied()
+                .collect();
+            if same_dir.len() == 1 {
+                decl.host_function = Some((*same_dir[0]).clone());
+            }
         }
     }
 }
@@ -453,6 +711,29 @@ mod tests {
         assert_eq!(normalize_cpp_name("&Cls<int>::method"), "Cls::method");
         assert_eq!(normalize_cpp_name("func<T, U>"), "func");
         assert_eq!(normalize_cpp_name("ns::Cls<A<B>>::m"), "ns::Cls::m");
+        // Leading :: (global scope qualifier) should be stripped
+        assert_eq!(normalize_cpp_name("::c10d::ReduceOp::op_"), "c10d::ReduceOp::op_");
+        assert_eq!(normalize_cpp_name("::foo"), "foo");
+    }
+
+    #[test]
+    fn test_is_dunder() {
+        assert!(is_dunder("__init__"));
+        assert!(is_dunder("__repr__"));
+        assert!(is_dunder("__getitem__"));
+        assert!(!is_dunder("__"));     // too short
+        assert!(!is_dunder("___"));    // too short
+        assert!(!is_dunder("____"));   // exactly 4 chars, need > 4
+        assert!(!is_dunder("_init_")); // doesn't start with __
+        assert!(!is_dunder("normal_name"));
+    }
+
+    #[test]
+    fn test_shared_path_depth() {
+        assert_eq!(shared_path_depth("/a/b/c/d.cpp", "/a/b/c/e.cpp"), 4); // /, a, b, c
+        assert_eq!(shared_path_depth("/a/b/c.cpp", "/x/y/z.cpp"), 1);     // just /
+        assert_eq!(shared_path_depth("/a/b/c.cpp", "/a/b/d.cpp"), 3);     // /, a, b
+        assert_eq!(shared_path_depth("a/b/c.cpp", "a/b/d.cpp"), 2);       // a, b
     }
 
     #[test]
@@ -544,5 +825,34 @@ mod tests {
         };
         let candidates = vec![&a];
         assert!(pick_best_candidate(&candidates, "/other.cpp").is_some());
+    }
+
+    #[test]
+    fn test_looks_like_cpp_function_name() {
+        // Valid function names
+        assert!(looks_like_cpp_function_name("get_value"));
+        assert!(looks_like_cpp_function_name("prepare_for_backward"));
+        assert!(looks_like_cpp_function_name("torchVitalEnabled")); // camelCase
+        assert!(looks_like_cpp_function_name("MyClass::method")); // qualified
+        assert!(looks_like_cpp_function_name("SomeFunc_v2")); // uppercase start but has underscore
+
+        // Rejected: enum-like uppercase constants
+        assert!(!looks_like_cpp_function_name("CUDA"));
+        assert!(!looks_like_cpp_function_name("MPS"));
+        assert!(!looks_like_cpp_function_name("IPU"));
+        assert!(!looks_like_cpp_function_name("CPU"));
+
+        // Rejected: type-like names (uppercase start, no underscore, no camelCase)
+        assert!(!looks_like_cpp_function_name("Metal"));
+        assert!(!looks_like_cpp_function_name("Lazy"));
+
+        // Rejected: operators and empty
+        assert!(!looks_like_cpp_function_name(""));
+        assert!(!looks_like_cpp_function_name("x"));
+        assert!(!looks_like_cpp_function_name("operator+"));
+
+        // Edge: CamelCase with lowercase transition should pass
+        assert!(looks_like_cpp_function_name("getValue"));
+        assert!(looks_like_cpp_function_name("ProcessGroup"));
     }
 }
