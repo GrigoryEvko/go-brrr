@@ -1632,6 +1632,11 @@ impl Cpp {
         let mut edges = Vec::new();
         let mut block_id = 0;
         let mut exits = Vec::new();
+        let mut decision_points: usize = 0;
+        // label_name -> BlockId for goto targets
+        let mut label_blocks: FxHashMap<String, BlockId> = FxHashMap::default();
+        // (from_block, label_name) for unresolved gotos
+        let mut pending_gotos: Vec<(BlockId, String)> = Vec::new();
 
         let entry = BlockId(block_id);
         blocks.insert(
@@ -1659,7 +1664,22 @@ impl Cpp {
                 &mut exits,
                 &mut Vec::new(),
                 &mut Vec::new(),
+                &mut decision_points,
+                &mut label_blocks,
+                &mut pending_gotos,
             );
+        }
+
+        // Resolve pending goto edges
+        for (from_block, label_name) in &pending_gotos {
+            if let Some(&target) = label_blocks.get(label_name) {
+                edges.push(CFGEdge::with_condition(
+                    *from_block,
+                    target,
+                    EdgeType::Goto,
+                    format!("goto {}", label_name),
+                ));
+            }
         }
 
         if exits.is_empty() {
@@ -1672,12 +1692,12 @@ impl Cpp {
             edges,
             entry,
             exits,
-            decision_points: 0, // TODO: Calculate actual decision points for C++
-            comprehension_decision_points: 0, // C++ doesn't have Python-style comprehensions
+            decision_points,
+            comprehension_decision_points: 0,
             nested_cfgs: FxHashMap::default(),
-            is_async: false,    // TODO: Track C++20 coroutines
-            await_points: 0,    // TODO: Track co_await points
-            blocking_calls: Vec::new(), // TODO: Track blocking calls in coroutines
+            is_async: false,
+            await_points: 0,
+            blocking_calls: Vec::new(),
             ..Default::default()
         }
     }
@@ -1695,6 +1715,9 @@ impl Cpp {
         exits: &mut Vec<BlockId>,
         loop_headers: &mut Vec<BlockId>,
         loop_exits: &mut Vec<BlockId>,
+        decision_points: &mut usize,
+        label_blocks: &mut FxHashMap<String, BlockId>,
+        pending_gotos: &mut Vec<(BlockId, String)>,
     ) -> BlockId {
         let mut last_block = current_block;
         let mut cursor = node.walk();
@@ -1749,54 +1772,26 @@ impl Cpp {
                 }
                 "if_statement" => {
                     last_block = self.process_if_cfg(
-                        child,
-                        source,
-                        blocks,
-                        edges,
-                        block_id,
-                        last_block,
-                        exits,
-                        loop_headers,
-                        loop_exits,
+                        child, source, blocks, edges, block_id, last_block, exits,
+                        loop_headers, loop_exits, decision_points, label_blocks, pending_gotos,
                     );
                 }
                 "while_statement" | "for_statement" | "do_statement" | "for_range_loop" => {
                     last_block = self.process_loop_cfg(
-                        child,
-                        source,
-                        blocks,
-                        edges,
-                        block_id,
-                        last_block,
-                        exits,
-                        loop_headers,
-                        loop_exits,
+                        child, source, blocks, edges, block_id, last_block, exits,
+                        loop_headers, loop_exits, decision_points, label_blocks, pending_gotos,
                     );
                 }
                 "switch_statement" => {
                     last_block = self.process_switch_cfg(
-                        child,
-                        source,
-                        blocks,
-                        edges,
-                        block_id,
-                        last_block,
-                        exits,
-                        loop_headers,
-                        loop_exits,
+                        child, source, blocks, edges, block_id, last_block, exits,
+                        loop_headers, loop_exits, decision_points, label_blocks, pending_gotos,
                     );
                 }
                 "try_statement" => {
                     last_block = self.process_try_cfg(
-                        child,
-                        source,
-                        blocks,
-                        edges,
-                        block_id,
-                        last_block,
-                        exits,
-                        loop_headers,
-                        loop_exits,
+                        child, source, blocks, edges, block_id, last_block, exits,
+                        loop_headers, loop_exits, decision_points, label_blocks, pending_gotos,
                     );
                 }
                 "break_statement" => {
@@ -1809,20 +1804,67 @@ impl Cpp {
                         edges.push(CFGEdge::new(last_block, header, EdgeType::Continue));
                     }
                 }
+                "goto_statement" => {
+                    // Extract the label name from the goto statement
+                    let mut gc = child.walk();
+                    for gchild in child.children(&mut gc) {
+                        if gchild.kind() == "statement_identifier" || gchild.kind() == "identifier" {
+                            let label_name = self.node_text(gchild, source);
+                            pending_gotos.push((last_block, label_name));
+                            break;
+                        }
+                    }
+                }
+                "labeled_statement" => {
+                    // Create a new block for the label target
+                    let mut label_name = None;
+                    let mut inner_cursor = child.walk();
+                    for lchild in child.children(&mut inner_cursor) {
+                        if lchild.kind() == "statement_identifier" || lchild.kind() == "identifier" {
+                            label_name = Some(self.node_text(lchild, source));
+                            break;
+                        }
+                    }
+
+                    if let Some(name) = label_name {
+                        *block_id += 1;
+                        let label_block = BlockId(*block_id);
+                        blocks.insert(
+                            label_block,
+                            CFGBlock {
+                                id: label_block,
+                                label: format!("label: {}", name),
+                                block_type: BlockType::Body,
+                                statements: Vec::new(),
+                                func_calls: Vec::new(),
+                                start_line: child.start_position().row + 1,
+                                end_line: child.end_position().row + 1,
+                            },
+                        );
+                        edges.push(CFGEdge::unconditional(last_block, label_block));
+                        label_blocks.insert(name, label_block);
+
+                        // Process the labeled statement's body (child statements)
+                        last_block = self.process_cfg_block(
+                            child, source, blocks, edges, block_id, label_block, exits,
+                            loop_headers, loop_exits, decision_points, label_blocks, pending_gotos,
+                        );
+                    } else {
+                        // No label found, treat as regular statement
+                        if let Some(block) = blocks.get_mut(&last_block) {
+                            let stmt = self.node_text(child, source);
+                            block.statements.push(stmt);
+                            block.end_line = child.end_position().row + 1;
+                        }
+                    }
+                }
                 "compound_statement" => {
                     last_block = self.process_cfg_block(
-                        child,
-                        source,
-                        blocks,
-                        edges,
-                        block_id,
-                        last_block,
-                        exits,
-                        loop_headers,
-                        loop_exits,
+                        child, source, blocks, edges, block_id, last_block, exits,
+                        loop_headers, loop_exits, decision_points, label_blocks, pending_gotos,
                     );
                 }
-                "declaration" | "expression_statement" | "labeled_statement" => {
+                "declaration" | "expression_statement" => {
                     if let Some(block) = blocks.get_mut(&last_block) {
                         let stmt = self.node_text(child, source);
                         block.statements.push(stmt);
@@ -1849,7 +1891,11 @@ impl Cpp {
         exits: &mut Vec<BlockId>,
         loop_headers: &mut Vec<BlockId>,
         loop_exits: &mut Vec<BlockId>,
+        decision_points: &mut usize,
+        label_blocks: &mut FxHashMap<String, BlockId>,
+        pending_gotos: &mut Vec<(BlockId, String)>,
     ) -> BlockId {
+        *decision_points += 1;
         *block_id += 1;
         let cond_block = BlockId(*block_id);
         let condition = self
@@ -1862,7 +1908,7 @@ impl Cpp {
             CFGBlock {
                 id: cond_block,
                 label: format!("if ({})", condition),
-                block_type: BlockType::Body,
+                block_type: BlockType::Branch,
                 statements: Vec::new(),
                 func_calls: Vec::new(),
                 start_line: node.start_position().row + 1,
@@ -1870,7 +1916,7 @@ impl Cpp {
             },
         );
 
-        edges.push(CFGEdge::from_label(current_block, cond_block, None));
+        edges.push(CFGEdge::unconditional(current_block, cond_block));
 
         // Process then branch
         *block_id += 1;
@@ -1888,23 +1934,12 @@ impl Cpp {
             },
         );
 
-        edges.push(CFGEdge::from_label(
-            cond_block,
-            then_block,
-            Some("true".to_string()),
-        ));
+        edges.push(CFGEdge::new(cond_block, then_block, EdgeType::True));
 
         let then_end = if let Some(consequence) = self.child_by_field(node, "consequence") {
             self.process_cfg_block(
-                consequence,
-                source,
-                blocks,
-                edges,
-                block_id,
-                then_block,
-                exits,
-                loop_headers,
-                loop_exits,
+                consequence, source, blocks, edges, block_id, then_block, exits,
+                loop_headers, loop_exits, decision_points, label_blocks, pending_gotos,
             )
         } else {
             then_block
@@ -1926,50 +1961,45 @@ impl Cpp {
             },
         );
 
-        edges.push(CFGEdge::from_label(then_end, merge_block, None));
+        edges.push(CFGEdge::unconditional(then_end, merge_block));
 
         // Process else branch if present
         if let Some(alternative) = self.child_by_field(node, "alternative") {
-            *block_id += 1;
-            let else_block = BlockId(*block_id);
-            blocks.insert(
-                else_block,
-                CFGBlock {
-                    id: else_block,
-                    label: "else".to_string(),
-                    block_type: BlockType::Body,
-                    statements: Vec::new(),
-                    func_calls: Vec::new(),
-                    start_line: alternative.start_position().row + 1,
-                    end_line: alternative.start_position().row + 1,
-                },
-            );
+            // Check if this is an "else if" (the alternative is itself an if_statement)
+            if alternative.kind() == "if_statement" {
+                // "else if" is another decision point; recurse
+                let elif_end = self.process_if_cfg(
+                    alternative, source, blocks, edges, block_id, cond_block, exits,
+                    loop_headers, loop_exits, decision_points, label_blocks, pending_gotos,
+                );
+                edges.push(CFGEdge::unconditional(elif_end, merge_block));
+            } else {
+                *block_id += 1;
+                let else_block = BlockId(*block_id);
+                blocks.insert(
+                    else_block,
+                    CFGBlock {
+                        id: else_block,
+                        label: "else".to_string(),
+                        block_type: BlockType::Body,
+                        statements: Vec::new(),
+                        func_calls: Vec::new(),
+                        start_line: alternative.start_position().row + 1,
+                        end_line: alternative.start_position().row + 1,
+                    },
+                );
 
-            edges.push(CFGEdge::from_label(
-                cond_block,
-                else_block,
-                Some("false".to_string()),
-            ));
+                edges.push(CFGEdge::new(cond_block, else_block, EdgeType::False));
 
-            let else_end = self.process_cfg_block(
-                alternative,
-                source,
-                blocks,
-                edges,
-                block_id,
-                else_block,
-                exits,
-                loop_headers,
-                loop_exits,
-            );
+                let else_end = self.process_cfg_block(
+                    alternative, source, blocks, edges, block_id, else_block, exits,
+                    loop_headers, loop_exits, decision_points, label_blocks, pending_gotos,
+                );
 
-            edges.push(CFGEdge::from_label(else_end, merge_block, None));
+                edges.push(CFGEdge::unconditional(else_end, merge_block));
+            }
         } else {
-            edges.push(CFGEdge::from_label(
-                cond_block,
-                merge_block,
-                Some("false".to_string()),
-            ));
+            edges.push(CFGEdge::new(cond_block, merge_block, EdgeType::False));
         }
 
         merge_block
@@ -1988,7 +2018,11 @@ impl Cpp {
         exits: &mut Vec<BlockId>,
         loop_headers: &mut Vec<BlockId>,
         loop_exits: &mut Vec<BlockId>,
+        decision_points: &mut usize,
+        label_blocks: &mut FxHashMap<String, BlockId>,
+        pending_gotos: &mut Vec<(BlockId, String)>,
     ) -> BlockId {
+        *decision_points += 1;
         *block_id += 1;
         let header_block = BlockId(*block_id);
         let label = match node.kind() {
@@ -2018,7 +2052,7 @@ impl Cpp {
             },
         );
 
-        edges.push(CFGEdge::from_label(current_block, header_block, None));
+        edges.push(CFGEdge::unconditional(current_block, header_block));
 
         // Exit block
         *block_id += 1;
@@ -2042,29 +2076,14 @@ impl Cpp {
         // Process body
         if let Some(body) = self.child_by_field(node, "body") {
             let body_end = self.process_cfg_block(
-                body,
-                source,
-                blocks,
-                edges,
-                block_id,
-                header_block,
-                exits,
-                loop_headers,
-                loop_exits,
+                body, source, blocks, edges, block_id, header_block, exits,
+                loop_headers, loop_exits, decision_points, label_blocks, pending_gotos,
             );
 
-            edges.push(CFGEdge::from_label(
-                body_end,
-                header_block,
-                Some("loop".to_string()),
-            ));
+            edges.push(CFGEdge::new(body_end, header_block, EdgeType::Loop));
         }
 
-        edges.push(CFGEdge::from_label(
-            header_block,
-            exit_block,
-            Some("exit".to_string()),
-        ));
+        edges.push(CFGEdge::new(header_block, exit_block, EdgeType::Exit));
 
         loop_headers.pop();
         loop_exits.pop();
@@ -2085,6 +2104,9 @@ impl Cpp {
         exits: &mut Vec<BlockId>,
         loop_headers: &mut Vec<BlockId>,
         loop_exits: &mut Vec<BlockId>,
+        decision_points: &mut usize,
+        label_blocks: &mut FxHashMap<String, BlockId>,
+        pending_gotos: &mut Vec<(BlockId, String)>,
     ) -> BlockId {
         *block_id += 1;
         let switch_block = BlockId(*block_id);
@@ -2098,7 +2120,7 @@ impl Cpp {
             CFGBlock {
                 id: switch_block,
                 label: format!("switch ({})", condition),
-                block_type: BlockType::Body,
+                block_type: BlockType::Branch,
                 statements: Vec::new(),
                 func_calls: Vec::new(),
                 start_line: node.start_position().row + 1,
@@ -2106,7 +2128,7 @@ impl Cpp {
             },
         );
 
-        edges.push(CFGEdge::from_label(current_block, switch_block, None));
+        edges.push(CFGEdge::unconditional(current_block, switch_block));
 
         // Exit block
         *block_id += 1;
@@ -2131,6 +2153,7 @@ impl Cpp {
             let mut cursor = body.walk();
             for child in body.children(&mut cursor) {
                 if child.kind() == "case_statement" {
+                    *decision_points += 1;
                     *block_id += 1;
                     let case_block = BlockId(*block_id);
 
@@ -2147,25 +2170,14 @@ impl Cpp {
                         },
                     );
 
-                    edges.push(CFGEdge::from_label(
-                        switch_block,
-                        case_block,
-                        Some("case".to_string()),
-                    ));
+                    edges.push(CFGEdge::new(switch_block, case_block, EdgeType::Case));
 
                     let case_end = self.process_cfg_block(
-                        child,
-                        source,
-                        blocks,
-                        edges,
-                        block_id,
-                        case_block,
-                        exits,
-                        loop_headers,
-                        loop_exits,
+                        child, source, blocks, edges, block_id, case_block, exits,
+                        loop_headers, loop_exits, decision_points, label_blocks, pending_gotos,
                     );
 
-                    edges.push(CFGEdge::from_label(case_end, exit_block, None));
+                    edges.push(CFGEdge::unconditional(case_end, exit_block));
                 }
             }
         }
@@ -2187,6 +2199,9 @@ impl Cpp {
         exits: &mut Vec<BlockId>,
         loop_headers: &mut Vec<BlockId>,
         loop_exits: &mut Vec<BlockId>,
+        decision_points: &mut usize,
+        label_blocks: &mut FxHashMap<String, BlockId>,
+        pending_gotos: &mut Vec<(BlockId, String)>,
     ) -> BlockId {
         *block_id += 1;
         let try_block = BlockId(*block_id);
@@ -2204,7 +2219,7 @@ impl Cpp {
             },
         );
 
-        edges.push(CFGEdge::from_label(current_block, try_block, None));
+        edges.push(CFGEdge::unconditional(current_block, try_block));
 
         // Exit block
         *block_id += 1;
@@ -2225,23 +2240,17 @@ impl Cpp {
         // Process try body
         if let Some(body) = self.child_by_field(node, "body") {
             let try_end = self.process_cfg_block(
-                body,
-                source,
-                blocks,
-                edges,
-                block_id,
-                try_block,
-                exits,
-                loop_headers,
-                loop_exits,
+                body, source, blocks, edges, block_id, try_block, exits,
+                loop_headers, loop_exits, decision_points, label_blocks, pending_gotos,
             );
-            edges.push(CFGEdge::from_label(try_end, exit_block, None));
+            edges.push(CFGEdge::unconditional(try_end, exit_block));
         }
 
         // Process catch clauses
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.kind() == "catch_clause" {
+                *decision_points += 1;
                 *block_id += 1;
                 let catch_block = BlockId(*block_id);
 
@@ -2250,7 +2259,7 @@ impl Cpp {
                     CFGBlock {
                         id: catch_block,
                         label: "catch".to_string(),
-                        block_type: BlockType::Body,
+                        block_type: BlockType::Exception,
                         statements: Vec::new(),
                         func_calls: Vec::new(),
                         start_line: child.start_position().row + 1,
@@ -2258,25 +2267,14 @@ impl Cpp {
                     },
                 );
 
-                edges.push(CFGEdge::from_label(
-                    try_block,
-                    catch_block,
-                    Some("exception".to_string()),
-                ));
+                edges.push(CFGEdge::new(try_block, catch_block, EdgeType::Exception));
 
                 if let Some(body) = self.child_by_field(child, "body") {
                     let catch_end = self.process_cfg_block(
-                        body,
-                        source,
-                        blocks,
-                        edges,
-                        block_id,
-                        catch_block,
-                        exits,
-                        loop_headers,
-                        loop_exits,
+                        body, source, blocks, edges, block_id, catch_block, exits,
+                        loop_headers, loop_exits, decision_points, label_blocks, pending_gotos,
                     );
-                    edges.push(CFGEdge::from_label(catch_end, exit_block, None));
+                    edges.push(CFGEdge::unconditional(catch_end, exit_block));
                 }
             }
         }
@@ -2285,42 +2283,37 @@ impl Cpp {
     }
 
     /// Build DFG for a C++ function.
+    // =========================================================================
+    // DFG (Data Flow Graph) construction for C++
+    //
+    // Extends C DFG with: references (T&), this->, range-for, templates,
+    // pointer/struct/array tracking, compound assignments, conditions.
+    // =========================================================================
+
     fn build_cpp_dfg(&self, node: Node, source: &[u8], func_name: &str) -> DFGInfo {
         let mut definitions: FxHashMap<String, Vec<usize>> = FxHashMap::default();
         let mut uses: FxHashMap<String, Vec<usize>> = FxHashMap::default();
         let mut edges = Vec::new();
 
-        // Extract parameters as variable definitions
+        // Extract parameters (handle pointer_declarator, reference_declarator)
         if let Some(declarator) = self.child_by_field(node, "declarator") {
             if let Some(params) = self.child_by_field(declarator, "parameters") {
                 let mut cursor = params.walk();
                 for child in params.children(&mut cursor) {
-                    if child.kind() == "parameter_declaration" {
-                        if let Some(name_node) = child
-                            .children(&mut child.walk())
-                            .find(|c| c.kind() == "identifier")
-                        {
-                            let name = self.node_text(name_node, source);
-                            let line = child.start_position().row + 1;
-                            definitions.entry(name.clone()).or_default().push(line);
-                            edges.push(DataflowEdge {
-                                variable: name,
-                                from_line: line,
-                                to_line: line,
-                                kind: DataflowKind::Param,
-                            });
-                        }
+                    if child.kind() == "parameter_declaration"
+                        || child.kind() == "optional_parameter_declaration"
+                    {
+                        let line = child.start_position().row + 1;
+                        self.cpp_dfg_extract_param(child, source, line, &mut edges, &mut definitions);
                     }
                 }
             }
         }
 
-        // Process function body
         if let Some(body) = self.child_by_field(node, "body") {
-            self.process_dfg_block(body, source, &mut definitions, &mut uses, &mut edges);
+            self.cpp_dfg_process_block(body, source, &mut edges, &mut definitions, &mut uses);
         }
 
-        // Convert FxHashMap to HashMap for DFGInfo API compatibility
         DFGInfo::new(
             func_name.to_string(),
             edges,
@@ -2329,140 +2322,387 @@ impl Cpp {
         )
     }
 
-    /// Process a block for DFG construction.
-    fn process_dfg_block(
+    /// Extract parameter name from declaration, handling pointer/reference declarators.
+    fn cpp_dfg_extract_param(
         &self,
         node: Node,
         source: &[u8],
-        definitions: &mut FxHashMap<String, Vec<usize>>,
-        uses: &mut FxHashMap<String, Vec<usize>>,
+        line: usize,
         edges: &mut Vec<DataflowEdge>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
     ) {
+        // Walk children to find the declarator name
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             match child.kind() {
-                "declaration" => {
-                    self.process_dfg_declaration(child, source, definitions, uses, edges);
-                }
-                "expression_statement" => {
-                    if let Some(expr) = child.children(&mut child.walk()).nth(0) {
-                        self.process_dfg_expression(
-                            expr,
-                            source,
-                            definitions,
-                            uses,
-                            edges,
-                            child.start_position().row + 1,
-                        );
+                "identifier" => {
+                    let name = self.node_text(child, source);
+                    if !name.is_empty() {
+                        definitions.entry(name.clone()).or_default().push(line);
+                        edges.push(DataflowEdge {
+                            variable: name,
+                            from_line: line,
+                            to_line: line,
+                            kind: DataflowKind::Param,
+                        });
                     }
                 }
-                "return_statement" => {
-                    let line = child.start_position().row + 1;
-                    // Collect uses from return expression
-                    if let Some(expr) = child
-                        .children(&mut child.walk())
-                        .find(|c| c.kind() != "return")
-                    {
-                        self.collect_dfg_uses(expr, source, line, definitions, uses, edges);
+                "pointer_declarator" => {
+                    if let Some(name) = self.cpp_dfg_declarator_name(child, source) {
+                        definitions.entry(name.clone()).or_default().push(line);
+                        edges.push(DataflowEdge {
+                            variable: name,
+                            from_line: line,
+                            to_line: line,
+                            kind: DataflowKind::Param,
+                        });
                     }
                 }
-                "if_statement" | "while_statement" | "for_statement" | "for_range_loop" => {
-                    if let Some(body) = self.child_by_field(child, "body") {
-                        self.process_dfg_block(body, source, definitions, uses, edges);
+                "reference_declarator" => {
+                    if let Some(name) = self.cpp_dfg_declarator_name(child, source) {
+                        definitions.entry(name.clone()).or_default().push(line);
+                        edges.push(DataflowEdge {
+                            variable: name,
+                            from_line: line,
+                            to_line: line,
+                            kind: DataflowKind::Param,
+                        });
                     }
-                    if let Some(alt) = self.child_by_field(child, "alternative") {
-                        self.process_dfg_block(alt, source, definitions, uses, edges);
-                    }
-                }
-                "compound_statement" => {
-                    self.process_dfg_block(child, source, definitions, uses, edges);
                 }
                 _ => {}
             }
         }
     }
 
-    /// Process a declaration for DFG.
-    fn process_dfg_declaration(
+    /// Extract the identifier name from a declarator node (recursive unwrap).
+    fn cpp_dfg_declarator_name(&self, node: Node, source: &[u8]) -> Option<String> {
+        match node.kind() {
+            "identifier" => {
+                let name = self.node_text(node, source);
+                if name.is_empty() { None } else { Some(name) }
+            }
+            "pointer_declarator" | "reference_declarator" => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "identifier" {
+                        let name = self.node_text(child, source);
+                        if !name.is_empty() {
+                            return Some(name);
+                        }
+                    }
+                    if let Some(name) = self.cpp_dfg_declarator_name(child, source) {
+                        return Some(name);
+                    }
+                }
+                None
+            }
+            "array_declarator" => {
+                self.child_by_field(node, "declarator")
+                    .and_then(|d| self.cpp_dfg_declarator_name(d, source))
+            }
+            _ => None,
+        }
+    }
+
+    /// Recursively process a block for C++ DFG.
+    fn cpp_dfg_process_block(
         &self,
         node: Node,
         source: &[u8],
+        edges: &mut Vec<DataflowEdge>,
         definitions: &mut FxHashMap<String, Vec<usize>>,
         uses: &mut FxHashMap<String, Vec<usize>>,
-        edges: &mut Vec<DataflowEdge>,
     ) {
-        let line = node.start_position().row + 1;
         let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            let line = child.start_position().row + 1;
+            match child.kind() {
+                "declaration" => {
+                    self.cpp_dfg_process_declaration(child, source, line, edges, definitions, uses);
+                }
+                "expression_statement" => {
+                    self.cpp_dfg_process_expr_stmt(child, source, line, edges, definitions, uses);
+                }
+                "return_statement" => {
+                    self.cpp_dfg_process_return(child, source, line, edges, definitions, uses);
+                }
+                "if_statement" => {
+                    if let Some(cond) = self.child_by_field(child, "condition") {
+                        self.cpp_dfg_collect_uses(cond, source, line, edges, definitions, uses);
+                    }
+                    if let Some(consequence) = self.child_by_field(child, "consequence") {
+                        self.cpp_dfg_process_block(consequence, source, edges, definitions, uses);
+                    }
+                    if let Some(alt) = self.child_by_field(child, "alternative") {
+                        self.cpp_dfg_process_block(alt, source, edges, definitions, uses);
+                    }
+                }
+                "while_statement" | "do_statement" => {
+                    if let Some(cond) = self.child_by_field(child, "condition") {
+                        let cl = cond.start_position().row + 1;
+                        self.cpp_dfg_collect_uses(cond, source, cl, edges, definitions, uses);
+                    }
+                    if let Some(body) = self.child_by_field(child, "body") {
+                        self.cpp_dfg_process_block(body, source, edges, definitions, uses);
+                    }
+                }
+                "for_statement" => {
+                    if let Some(init) = self.child_by_field(child, "initializer") {
+                        let il = init.start_position().row + 1;
+                        if init.kind() == "declaration" {
+                            self.cpp_dfg_process_declaration(init, source, il, edges, definitions, uses);
+                        } else {
+                            self.cpp_dfg_process_top_expr(init, source, il, edges, definitions, uses);
+                        }
+                    }
+                    if let Some(cond) = self.child_by_field(child, "condition") {
+                        let cl = cond.start_position().row + 1;
+                        self.cpp_dfg_collect_uses(cond, source, cl, edges, definitions, uses);
+                    }
+                    if let Some(update) = self.child_by_field(child, "update") {
+                        let ul = update.start_position().row + 1;
+                        self.cpp_dfg_process_top_expr(update, source, ul, edges, definitions, uses);
+                    }
+                    if let Some(body) = self.child_by_field(child, "body") {
+                        self.cpp_dfg_process_block(body, source, edges, definitions, uses);
+                    }
+                }
+                "for_range_loop" => {
+                    // for (auto& x : container)
+                    if let Some(decl) = self.child_by_field(child, "declarator") {
+                        if let Some(name) = self.cpp_dfg_declarator_name(decl, source) {
+                            definitions.entry(name.clone()).or_default().push(line);
+                            edges.push(DataflowEdge {
+                                variable: name,
+                                from_line: line,
+                                to_line: line,
+                                kind: DataflowKind::Definition,
+                            });
+                        }
+                    }
+                    if let Some(right) = self.child_by_field(child, "right") {
+                        self.cpp_dfg_collect_uses(right, source, line, edges, definitions, uses);
+                    }
+                    if let Some(body) = self.child_by_field(child, "body") {
+                        self.cpp_dfg_process_block(body, source, edges, definitions, uses);
+                    }
+                }
+                "switch_statement" => {
+                    if let Some(cond) = self.child_by_field(child, "condition") {
+                        self.cpp_dfg_collect_uses(cond, source, line, edges, definitions, uses);
+                    }
+                    if let Some(body) = self.child_by_field(child, "body") {
+                        self.cpp_dfg_process_block(body, source, edges, definitions, uses);
+                    }
+                }
+                "try_statement" => {
+                    if let Some(body) = self.child_by_field(child, "body") {
+                        self.cpp_dfg_process_block(body, source, edges, definitions, uses);
+                    }
+                    // Process catch clauses
+                    let mut inner = child.walk();
+                    for inner_child in child.children(&mut inner) {
+                        if inner_child.kind() == "catch_clause" {
+                            if let Some(body) = self.child_by_field(inner_child, "body") {
+                                self.cpp_dfg_process_block(body, source, edges, definitions, uses);
+                            }
+                        }
+                    }
+                }
+                "compound_statement" | "case_statement" | "labeled_statement" => {
+                    self.cpp_dfg_process_block(child, source, edges, definitions, uses);
+                }
+                _ => {}
+            }
+        }
+    }
 
+    fn cpp_dfg_process_declaration(
+        &self,
+        node: Node,
+        source: &[u8],
+        line: usize,
+        edges: &mut Vec<DataflowEdge>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
+    ) {
+        let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             match child.kind() {
                 "init_declarator" => {
                     if let Some(decl) = self.child_by_field(child, "declarator") {
-                        let name = self.node_text(decl, source);
+                        if let Some(name) = self.cpp_dfg_lvalue_name(decl, source) {
+                            definitions.entry(name.clone()).or_default().push(line);
+                            edges.push(DataflowEdge {
+                                variable: name,
+                                from_line: line,
+                                to_line: line,
+                                kind: DataflowKind::Definition,
+                            });
+                        }
+                    }
+                    if let Some(value) = self.child_by_field(child, "value") {
+                        self.cpp_dfg_collect_uses(value, source, line, edges, definitions, uses);
+                    }
+                }
+                "identifier" | "pointer_declarator" | "reference_declarator" | "array_declarator" => {
+                    if let Some(name) = self.cpp_dfg_lvalue_name(child, source) {
                         definitions.entry(name.clone()).or_default().push(line);
                         edges.push(DataflowEdge {
-                            variable: name.clone(),
+                            variable: name,
                             from_line: line,
                             to_line: line,
                             kind: DataflowKind::Definition,
                         });
-
-                        // Check for initializer
-                        if let Some(value) = self.child_by_field(child, "value") {
-                            self.collect_dfg_uses(value, source, line, definitions, uses, edges);
-                        }
                     }
-                }
-                "identifier" => {
-                    let name = self.node_text(child, source);
-                    definitions.entry(name.clone()).or_default().push(line);
-                    edges.push(DataflowEdge {
-                        variable: name,
-                        from_line: line,
-                        to_line: line,
-                        kind: DataflowKind::Definition,
-                    });
                 }
                 _ => {}
             }
         }
     }
 
-    /// Process an expression for DFG.
-    fn process_dfg_expression(
+    fn cpp_dfg_process_expr_stmt(
         &self,
         node: Node,
         source: &[u8],
+        line: usize,
+        edges: &mut Vec<DataflowEdge>,
         definitions: &mut FxHashMap<String, Vec<usize>>,
         uses: &mut FxHashMap<String, Vec<usize>>,
-        edges: &mut Vec<DataflowEdge>,
+    ) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.is_named() {
+                self.cpp_dfg_process_top_expr(child, source, line, edges, definitions, uses);
+            }
+        }
+    }
+
+    fn cpp_dfg_process_top_expr(
+        &self,
+        node: Node,
+        source: &[u8],
         line: usize,
+        edges: &mut Vec<DataflowEdge>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         match node.kind() {
-            "assignment_expression" | "compound_assignment_expr" => {
+            "assignment_expression" | "compound_assignment_expr" | "augmented_assignment_expression" => {
+                // Check if this is a compound assignment (+=, -=, etc.)
+                // tree-sitter-cpp parses compound assignments as assignment_expression
+                // with an operator field like "+=", "-=", "*=", etc.
+                let is_compound = node.child_by_field_name("operator")
+                    .map(|op| {
+                        let op_text = self.get_text(op, source);
+                        op_text != "="
+                    })
+                    .unwrap_or(node.kind() != "assignment_expression");
+
+                if let Some(right) = self.child_by_field(node, "right") {
+                    self.cpp_dfg_collect_uses(right, source, line, edges, definitions, uses);
+                }
                 if let Some(left) = self.child_by_field(node, "left") {
-                    let target = self.node_text(left, source);
-
-                    if let Some(right) = self.child_by_field(node, "right") {
-                        self.collect_dfg_uses(right, source, line, definitions, uses, edges);
+                    if is_compound {
+                        self.cpp_dfg_collect_uses(left, source, line, edges, definitions, uses);
                     }
+                    self.cpp_dfg_process_lvalue_mutation(left, source, line, edges, definitions, uses);
+                }
+            }
+            "update_expression" => {
+                if let Some(arg) = self.child_by_field(node, "argument") {
+                    self.cpp_dfg_collect_uses(arg, source, line, edges, definitions, uses);
+                    self.cpp_dfg_process_lvalue_mutation(arg, source, line, edges, definitions, uses);
+                }
+            }
+            "comma_expression" => {
+                if let Some(left) = self.child_by_field(node, "left") {
+                    self.cpp_dfg_process_top_expr(left, source, line, edges, definitions, uses);
+                }
+                if let Some(right) = self.child_by_field(node, "right") {
+                    self.cpp_dfg_process_top_expr(right, source, line, edges, definitions, uses);
+                }
+            }
+            _ => {
+                self.cpp_dfg_collect_uses(node, source, line, edges, definitions, uses);
+            }
+        }
+    }
 
-                    // Record mutation
-                    definitions.entry(target.clone()).or_default().push(line);
+    fn cpp_dfg_process_lvalue_mutation(
+        &self,
+        node: Node,
+        source: &[u8],
+        line: usize,
+        edges: &mut Vec<DataflowEdge>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
+    ) {
+        match node.kind() {
+            "pointer_expression" => {
+                if let Some(arg) = self.child_by_field(node, "argument") {
+                    self.cpp_dfg_collect_uses(arg, source, line, edges, definitions, uses);
+                    if let Some(base) = self.cpp_dfg_lvalue_name(arg, source) {
+                        let deref_name = format!("(*{})", base);
+                        definitions.entry(deref_name.clone()).or_default().push(line);
+                        edges.push(DataflowEdge {
+                            variable: deref_name,
+                            from_line: line,
+                            to_line: line,
+                            kind: DataflowKind::Mutation,
+                        });
+                    }
+                }
+            }
+            "field_expression" => {
+                if let Some(name) = self.cpp_dfg_field_expr_name(node, source) {
+                    definitions.entry(name.clone()).or_default().push(line);
                     edges.push(DataflowEdge {
-                        variable: target,
+                        variable: name,
                         from_line: line,
                         to_line: line,
                         kind: DataflowKind::Mutation,
                     });
                 }
-            }
-            "update_expression" => {
                 if let Some(arg) = self.child_by_field(node, "argument") {
-                    let name = self.node_text(arg, source);
-
-                    // Record use and mutation
-                    uses.entry(name.clone()).or_default().push(line);
+                    if let Some(base) = self.cpp_dfg_lvalue_name(arg, source) {
+                        definitions.entry(base.clone()).or_default().push(line);
+                        edges.push(DataflowEdge {
+                            variable: base,
+                            from_line: line,
+                            to_line: line,
+                            kind: DataflowKind::Mutation,
+                        });
+                    }
+                }
+            }
+            "subscript_expression" => {
+                if let Some(arg) = self.child_by_field(node, "argument") {
+                    if let Some(base) = self.cpp_dfg_lvalue_name(arg, source) {
+                        definitions.entry(base.clone()).or_default().push(line);
+                        edges.push(DataflowEdge {
+                            variable: base,
+                            from_line: line,
+                            to_line: line,
+                            kind: DataflowKind::Mutation,
+                        });
+                    }
+                }
+                if let Some(idx) = self.child_by_field(node, "index") {
+                    self.cpp_dfg_collect_uses(idx, source, line, edges, definitions, uses);
+                }
+            }
+            "parenthesized_expression" => {
+                let mut inner_cursor = node.walk();
+                for child in node.children(&mut inner_cursor) {
+                    if child.is_named() {
+                        self.cpp_dfg_process_lvalue_mutation(child, source, line, edges, definitions, uses);
+                        return;
+                    }
+                }
+            }
+            _ => {
+                if let Some(name) = self.cpp_dfg_lvalue_name(node, source) {
                     definitions.entry(name.clone()).or_default().push(line);
                     edges.push(DataflowEdge {
                         variable: name,
@@ -2472,26 +2712,156 @@ impl Cpp {
                     });
                 }
             }
-            _ => {}
         }
     }
 
-    /// Collect variable uses from an expression for DFG.
-    fn collect_dfg_uses(
+    fn cpp_dfg_lvalue_name(&self, node: Node, source: &[u8]) -> Option<String> {
+        match node.kind() {
+            "identifier" | "this" => {
+                let name = self.node_text(node, source);
+                if name.is_empty() { None } else { Some(name) }
+            }
+            "pointer_declarator" | "reference_declarator" => {
+                self.cpp_dfg_declarator_name(node, source)
+            }
+            "array_declarator" => {
+                self.child_by_field(node, "declarator")
+                    .and_then(|d| self.cpp_dfg_lvalue_name(d, source))
+            }
+            "field_expression" => self.cpp_dfg_field_expr_name(node, source),
+            "subscript_expression" => {
+                self.child_by_field(node, "argument")
+                    .and_then(|arg| self.cpp_dfg_lvalue_name(arg, source))
+            }
+            "pointer_expression" => {
+                self.child_by_field(node, "argument")
+                    .and_then(|arg| self.cpp_dfg_lvalue_name(arg, source))
+            }
+            "parenthesized_expression" => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.is_named() {
+                        return self.cpp_dfg_lvalue_name(child, source);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn cpp_dfg_field_expr_name(&self, node: Node, source: &[u8]) -> Option<String> {
+        let arg = self.child_by_field(node, "argument")?;
+        let field = self.child_by_field(node, "field")?;
+        let base = self.cpp_dfg_lvalue_name(arg, source)?;
+        let field_name = self.node_text(field, source);
+        let op = self.cpp_dfg_field_operator(node, source);
+        Some(format!("{}{}{}", base, op, field_name))
+    }
+
+    fn cpp_dfg_field_operator(&self, node: Node, source: &[u8]) -> &'static str {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if !child.is_named() {
+                let text = self.get_text(child, source);
+                if text == "->" {
+                    return "->";
+                }
+                if text == "." {
+                    return ".";
+                }
+            }
+        }
+        "."
+    }
+
+    fn cpp_dfg_process_return(
         &self,
         node: Node,
         source: &[u8],
         line: usize,
+        edges: &mut Vec<DataflowEdge>,
         definitions: &FxHashMap<String, Vec<usize>>,
         uses: &mut FxHashMap<String, Vec<usize>>,
+    ) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.is_named() && child.kind() != "return" {
+                self.cpp_dfg_collect_return_uses(child, source, line, edges, definitions, uses);
+            }
+        }
+    }
+
+    fn cpp_dfg_collect_return_uses(
+        &self,
+        node: Node,
+        source: &[u8],
+        line: usize,
         edges: &mut Vec<DataflowEdge>,
+        definitions: &FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         match node.kind() {
-            "identifier" => {
+            "identifier" | "this" => {
                 let name = self.node_text(node, source);
                 uses.entry(name.clone()).or_default().push(line);
+                if let Some(def_lines) = definitions.get(&name) {
+                    if let Some(&def_line) = def_lines.last() {
+                        edges.push(DataflowEdge {
+                            variable: name,
+                            from_line: def_line,
+                            to_line: line,
+                            kind: DataflowKind::Return,
+                        });
+                    }
+                }
+            }
+            "field_expression" => {
+                if let Some(name) = self.cpp_dfg_field_expr_name(node, source) {
+                    uses.entry(name.clone()).or_default().push(line);
+                    if let Some(def_lines) = definitions.get(&name) {
+                        if let Some(&def_line) = def_lines.last() {
+                            edges.push(DataflowEdge {
+                                variable: name,
+                                from_line: def_line,
+                                to_line: line,
+                                kind: DataflowKind::Return,
+                            });
+                        }
+                    }
+                }
+                if let Some(arg) = self.child_by_field(node, "argument") {
+                    self.cpp_dfg_collect_return_uses(arg, source, line, edges, definitions, uses);
+                }
+            }
+            _ => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.is_named() {
+                        self.cpp_dfg_collect_return_uses(child, source, line, edges, definitions, uses);
+                    }
+                }
+            }
+        }
+    }
 
-                // Find most recent definition for this variable
+    /// Recursively collect variable uses from a C++ expression.
+    fn cpp_dfg_collect_uses(
+        &self,
+        node: Node,
+        source: &[u8],
+        line: usize,
+        edges: &mut Vec<DataflowEdge>,
+        definitions: &FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
+    ) {
+        match node.kind() {
+            "identifier" | "this" => {
+                let name = self.node_text(node, source);
+                if name.is_empty() {
+                    return;
+                }
+                uses.entry(name.clone()).or_default().push(line);
                 if let Some(def_lines) = definitions.get(&name) {
                     if let Some(&def_line) = def_lines.last() {
                         edges.push(DataflowEdge {
@@ -2503,10 +2873,145 @@ impl Cpp {
                     }
                 }
             }
+            "field_expression" => {
+                if let Some(name) = self.cpp_dfg_field_expr_name(node, source) {
+                    uses.entry(name.clone()).or_default().push(line);
+                    if let Some(def_lines) = definitions.get(&name) {
+                        if let Some(&def_line) = def_lines.last() {
+                            edges.push(DataflowEdge {
+                                variable: name,
+                                from_line: def_line,
+                                to_line: line,
+                                kind: DataflowKind::Use,
+                            });
+                        }
+                    }
+                }
+                if let Some(arg) = self.child_by_field(node, "argument") {
+                    self.cpp_dfg_collect_uses(arg, source, line, edges, definitions, uses);
+                }
+            }
+            "pointer_expression" => {
+                if let Some(arg) = self.child_by_field(node, "argument") {
+                    self.cpp_dfg_collect_uses(arg, source, line, edges, definitions, uses);
+                    if let Some(base) = self.cpp_dfg_lvalue_name(arg, source) {
+                        let deref_name = format!("(*{})", base);
+                        if definitions.contains_key(&deref_name) {
+                            uses.entry(deref_name.clone()).or_default().push(line);
+                            if let Some(def_lines) = definitions.get(&deref_name) {
+                                if let Some(&def_line) = def_lines.last() {
+                                    edges.push(DataflowEdge {
+                                        variable: deref_name,
+                                        from_line: def_line,
+                                        to_line: line,
+                                        kind: DataflowKind::Use,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "subscript_expression" => {
+                if let Some(arg) = self.child_by_field(node, "argument") {
+                    self.cpp_dfg_collect_uses(arg, source, line, edges, definitions, uses);
+                }
+                if let Some(idx) = self.child_by_field(node, "index") {
+                    self.cpp_dfg_collect_uses(idx, source, line, edges, definitions, uses);
+                }
+            }
+            "sizeof_expression" | "alignof_expression" => {}
+            "cast_expression" => {
+                if let Some(value) = self.child_by_field(node, "value") {
+                    self.cpp_dfg_collect_uses(value, source, line, edges, definitions, uses);
+                }
+            }
+            "template_function" | "template_method" | "qualified_identifier" => {
+                // For qualified names like std::move(x), recurse into arguments
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.is_named() {
+                        self.cpp_dfg_collect_uses(child, source, line, edges, definitions, uses);
+                    }
+                }
+            }
+            "lambda_expression" => {
+                // Track captured variables
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "lambda_capture_specifier" {
+                        let mut cap_cursor = child.walk();
+                        for cap in child.children(&mut cap_cursor) {
+                            if cap.kind() == "identifier" {
+                                let name = self.node_text(cap, source);
+                                uses.entry(name.clone()).or_default().push(line);
+                                if let Some(def_lines) = definitions.get(&name) {
+                                    if let Some(&def_line) = def_lines.last() {
+                                        edges.push(DataflowEdge {
+                                            variable: name,
+                                            from_line: def_line,
+                                            to_line: line,
+                                            kind: DataflowKind::Use,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             _ => {
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
-                    self.collect_dfg_uses(child, source, line, definitions, uses, edges);
+                    if child.is_named() {
+                        self.cpp_dfg_collect_uses(child, source, line, edges, definitions, uses);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Recursively collect all import-like constructs from C++ source.
+    ///
+    /// Walks into preprocessor conditional blocks (`#ifdef`, `#ifndef`, `#if`, `#elif`, `#else`),
+    /// namespace definitions, and linkage specifications (`extern "C"`) to find:
+    /// - `#include` directives (both `<>` and `""`)
+    /// - `using` declarations (`using std::vector;`)
+    /// - `using namespace` directives (`using namespace std;`)
+    fn collect_cpp_imports_recursive(
+        &self,
+        node: Node,
+        source: &[u8],
+        imports: &mut Vec<ImportInfo>,
+        depth: usize,
+    ) {
+        if depth > 100 {
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                "preproc_include" => {
+                    if let Some(import) = self.extract_include(child, source) {
+                        imports.push(import);
+                    }
+                }
+                "using_declaration" => {
+                    if let Some(import) = self.extract_using(child, source) {
+                        imports.push(import);
+                    }
+                }
+                // Recurse into containers that can hold includes/using decls
+                "preproc_ifdef" | "preproc_ifndef" | "preproc_if" | "preproc_else"
+                | "preproc_elif" | "namespace_definition" | "declaration_list"
+                | "linkage_specification" | "translation_unit" => {
+                    self.collect_cpp_imports_recursive(child, source, imports, depth + 1);
+                }
+                _ => {
+                    // Also recurse into nodes that have children and might contain includes
+                    if child.child_count() > 0 && child.is_named() {
+                        self.collect_cpp_imports_recursive(child, source, imports, depth + 1);
+                    }
                 }
             }
         }
@@ -2610,25 +3115,7 @@ impl Language for Cpp {
 
     fn extract_imports(&self, tree: &Tree, source: &[u8]) -> Vec<ImportInfo> {
         let mut imports = Vec::new();
-        let root = tree.root_node();
-        let mut cursor = root.walk();
-
-        for child in root.children(&mut cursor) {
-            match child.kind() {
-                "preproc_include" => {
-                    if let Some(import) = self.extract_include(child, source) {
-                        imports.push(import);
-                    }
-                }
-                "using_declaration" => {
-                    if let Some(import) = self.extract_using(child, source) {
-                        imports.push(import);
-                    }
-                }
-                _ => {}
-            }
-        }
-
+        self.collect_cpp_imports_recursive(tree.root_node(), source, &mut imports, 0);
         imports
     }
 
@@ -3637,5 +4124,403 @@ __global__ void fill_kernel(T* data, T value, int n) {
             "clamp should have __device__, got: {:?}",
             clamp_fn.decorators
         );
+    }
+
+    #[test]
+    fn test_extract_imports_includes() {
+        let source = r#"
+#include <iostream>
+#include <vector>
+#include "myheader.h"
+#include "utils/helper.h"
+"#;
+        let tree = parse_cpp(source);
+        let cpp = Cpp;
+        let imports = cpp.extract_imports(&tree, source.as_bytes());
+
+        assert_eq!(imports.len(), 4, "Should find 4 includes");
+
+        // System includes
+        assert_eq!(imports[0].module, "iostream");
+        assert!(!imports[0].is_from, "System include: is_from should be false");
+
+        assert_eq!(imports[1].module, "vector");
+
+        // Local includes
+        assert_eq!(imports[2].module, "myheader.h");
+        assert!(imports[2].is_from, "Local include: is_from should be true");
+
+        assert_eq!(imports[3].module, "utils/helper.h");
+    }
+
+    #[test]
+    fn test_extract_imports_using_declarations() {
+        let source = r#"
+#include <vector>
+using std::vector;
+"#;
+        let tree = parse_cpp(source);
+        let cpp = Cpp;
+        let imports = cpp.extract_imports(&tree, source.as_bytes());
+
+        // Should find both the include and the using declaration
+        assert!(imports.len() >= 2, "Should find at least 2 imports, got {}", imports.len());
+
+        let has_vector_include = imports.iter().any(|i| i.module == "vector");
+        assert!(has_vector_include, "Should find vector include");
+
+        let has_using = imports.iter().any(|i| i.module.contains("std") && i.module.contains("vector"));
+        assert!(has_using, "Should find using std::vector");
+    }
+
+    #[test]
+    fn test_extract_imports_inside_ifdef() {
+        let source = r#"
+#include <cstdlib>
+#ifdef __cplusplus
+#include <string>
+#include <memory>
+#endif
+"#;
+        let tree = parse_cpp(source);
+        let cpp = Cpp;
+        let imports = cpp.extract_imports(&tree, source.as_bytes());
+
+        // Should find all 3 includes (cstdlib, string, memory) even those inside #ifdef
+        let modules: Vec<&str> = imports.iter().map(|i| i.module.as_str()).collect();
+        assert!(
+            modules.contains(&"cstdlib"),
+            "Should find cstdlib. Found: {:?}",
+            modules
+        );
+        assert!(
+            modules.contains(&"string"),
+            "Should find string inside #ifdef. Found: {:?}",
+            modules
+        );
+        assert!(
+            modules.contains(&"memory"),
+            "Should find memory inside #ifdef. Found: {:?}",
+            modules
+        );
+    }
+
+    #[test]
+    fn test_extract_imports_inside_namespace() {
+        // Note: includes inside namespace blocks are unusual but legal
+        // More commonly, using declarations appear inside namespaces
+        let source = r#"
+#include <vector>
+namespace mylib {
+    #include "internal.h"
+}
+"#;
+        let tree = parse_cpp(source);
+        let cpp = Cpp;
+        let imports = cpp.extract_imports(&tree, source.as_bytes());
+
+        let modules: Vec<&str> = imports.iter().map(|i| i.module.as_str()).collect();
+        assert!(
+            modules.contains(&"vector"),
+            "Should find top-level include"
+        );
+        assert!(
+            modules.contains(&"internal.h"),
+            "Should find include inside namespace. Found: {:?}",
+            modules
+        );
+    }
+
+    // =========================================================================
+    // C++ CFG tests: decision_points, block types, control flow
+    // =========================================================================
+
+    #[test]
+    fn test_cpp_cfg_if_decision_point() {
+        let source = r#"
+int f(int x) {
+    if (x > 0) {
+        return 1;
+    }
+    return 0;
+}
+"#;
+        let cpp = Cpp;
+        let cfg = crate::cfg::CfgBuilder::extract_from_source(source, "cpp", "f").unwrap();
+        assert_eq!(cfg.decision_points, 1, "if should count as 1 decision point");
+        assert_eq!(cfg.cyclomatic_complexity(), 2);
+        let branch_blocks: Vec<_> = cfg.blocks.values()
+            .filter(|b| b.block_type == BlockType::Branch)
+            .collect();
+        assert_eq!(branch_blocks.len(), 1, "Should have 1 branch block for if");
+    }
+
+    #[test]
+    fn test_cpp_cfg_while_decision_point() {
+        let source = r#"
+void f(int n) {
+    while (n > 0) {
+        n--;
+    }
+}
+"#;
+        let cfg = crate::cfg::CfgBuilder::extract_from_source(source, "cpp", "f").unwrap();
+        assert_eq!(cfg.decision_points, 1, "while should count as 1 decision point");
+        let loop_headers: Vec<_> = cfg.blocks.values()
+            .filter(|b| b.block_type == BlockType::LoopHeader)
+            .collect();
+        assert_eq!(loop_headers.len(), 1, "Should have 1 loop header for while");
+    }
+
+    #[test]
+    fn test_cpp_cfg_for_decision_point() {
+        let source = r#"
+int f(int n) {
+    int s = 0;
+    for (int i = 0; i < n; i++) {
+        s += i;
+    }
+    return s;
+}
+"#;
+        let cfg = crate::cfg::CfgBuilder::extract_from_source(source, "cpp", "f").unwrap();
+        assert_eq!(cfg.decision_points, 1, "for should count as 1 decision point");
+    }
+
+    #[test]
+    fn test_cpp_cfg_switch_case_decision_points() {
+        let source = r#"
+int f(int x) {
+    switch (x) {
+        case 0: return 0;
+        case 1: return 1;
+        default: return -1;
+    }
+}
+"#;
+        let cfg = crate::cfg::CfgBuilder::extract_from_source(source, "cpp", "f").unwrap();
+        assert_eq!(cfg.decision_points, 3, "3 case statements = 3 decision points");
+        let branch_blocks: Vec<_> = cfg.blocks.values()
+            .filter(|b| b.block_type == BlockType::Branch)
+            .collect();
+        assert_eq!(branch_blocks.len(), 1, "Should have 1 branch block for switch");
+    }
+
+    #[test]
+    fn test_cpp_cfg_try_catch_decision_points() {
+        let source = r#"
+int f(int x) {
+    try {
+        return x / 2;
+    } catch (const std::exception& e) {
+        return -1;
+    } catch (...) {
+        return -2;
+    }
+}
+"#;
+        let cfg = crate::cfg::CfgBuilder::extract_from_source(source, "cpp", "f").unwrap();
+        assert_eq!(cfg.decision_points, 2, "2 catch clauses = 2 decision points");
+        let exception_blocks: Vec<_> = cfg.blocks.values()
+            .filter(|b| b.block_type == BlockType::Exception)
+            .collect();
+        assert_eq!(exception_blocks.len(), 2, "Should have 2 exception blocks for catch");
+    }
+
+    #[test]
+    fn test_cpp_cfg_goto_label() {
+        let source = r#"
+void f(int* data, int n) {
+    for (int i = 0; i < n; i++) {
+        if (data[i] < 0) {
+            goto error;
+        }
+    }
+    return;
+error:
+    data[0] = 0;
+}
+"#;
+        let cfg = crate::cfg::CfgBuilder::extract_from_source(source, "cpp", "f").unwrap();
+
+        // Check goto edge exists
+        use crate::cfg::types::EdgeType;
+        let goto_edges: Vec<_> = cfg.edges.iter()
+            .filter(|e| e.edge_type == EdgeType::Goto)
+            .collect();
+        assert_eq!(goto_edges.len(), 1, "Should have 1 goto edge");
+
+        // Check label block exists
+        let label_blocks: Vec<_> = cfg.blocks.values()
+            .filter(|b| b.label.contains("label:"))
+            .collect();
+        assert_eq!(label_blocks.len(), 1, "Should have 1 label block");
+    }
+
+    #[test]
+    fn test_cpp_cfg_do_while() {
+        let source = r#"
+void f(int x) {
+    do {
+        x--;
+    } while (x > 0);
+}
+"#;
+        let cfg = crate::cfg::CfgBuilder::extract_from_source(source, "cpp", "f").unwrap();
+        assert_eq!(cfg.decision_points, 1, "do-while counts as 1 decision point");
+        let loop_headers: Vec<_> = cfg.blocks.values()
+            .filter(|b| b.block_type == BlockType::LoopHeader)
+            .collect();
+        assert_eq!(loop_headers.len(), 1, "Should have 1 loop header for do-while");
+    }
+
+    #[test]
+    fn test_cpp_cfg_complex_function() {
+        let source = r#"
+int f(int x) {
+    if (x < 0) return -1;
+    while (x > 10) {
+        if (x % 2 == 0) {
+            x /= 2;
+        } else {
+            x = x * 3 + 1;
+        }
+    }
+    for (int i = 0; i < x; i++) {
+        x++;
+    }
+    return x;
+}
+"#;
+        let cfg = crate::cfg::CfgBuilder::extract_from_source(source, "cpp", "f").unwrap();
+        // 1 if + 1 while + 1 if + 1 for = 4
+        assert_eq!(cfg.decision_points, 4, "Complex function: 4 decision points");
+        assert_eq!(cfg.cyclomatic_complexity(), 5);
+    }
+
+    // =========================================================================
+    // C++ DFG tests: compound assignment, pointer, struct member
+    // =========================================================================
+
+    #[test]
+    fn test_cpp_dfg_compound_assignment() {
+        let source = r#"
+int f(int a) {
+    int x = 0;
+    x += a;
+    return x;
+}
+"#;
+        let cfg = crate::cfg::CfgBuilder::extract_from_source(source, "cpp", "f").unwrap();
+        let dfg = crate::dfg::extract_with_language(
+            &"/dev/null", "f", Some("cpp"),
+        );
+        // Use extract_from_source via CfgBuilder approach
+        let cpp = Cpp;
+        let mut parser = cpp.parser().unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        // Find the function node
+        let root = tree.root_node();
+        let mut func_node = None;
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if child.kind() == "function_definition" {
+                func_node = Some(child);
+            }
+        }
+        let dfg = cpp.build_dfg(func_node.unwrap(), source.as_bytes()).unwrap();
+
+        // Check that x has both Use and Mutation for +=
+        let x_uses: Vec<_> = dfg.edges.iter()
+            .filter(|e| e.variable == "x" && e.kind == DataflowKind::Use)
+            .collect();
+        assert!(!x_uses.is_empty(), "x should have Use edge from compound assignment");
+
+        let x_mutations: Vec<_> = dfg.edges.iter()
+            .filter(|e| e.variable == "x" && e.kind == DataflowKind::Mutation)
+            .collect();
+        assert!(!x_mutations.is_empty(), "x should have Mutation edge from compound assignment");
+    }
+
+    #[test]
+    fn test_cpp_dfg_struct_member() {
+        let source = r#"
+struct Point { int x; int y; };
+void f(Point p) {
+    p.x = 10;
+    p.y = p.x + 1;
+}
+"#;
+        let cpp = Cpp;
+        let mut parser = cpp.parser().unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+        let mut func_node = None;
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if child.kind() == "function_definition" {
+                func_node = Some(child);
+            }
+        }
+        let dfg = cpp.build_dfg(func_node.unwrap(), source.as_bytes()).unwrap();
+
+        // Check p.x is tracked
+        let px_defs: Vec<_> = dfg.edges.iter()
+            .filter(|e| e.variable == "p.x" && (e.kind == DataflowKind::Mutation || e.kind == DataflowKind::Definition))
+            .collect();
+        assert!(!px_defs.is_empty(), "p.x should have definition/mutation edges");
+    }
+
+    #[test]
+    fn test_cpp_dfg_pointer_param() {
+        let source = r#"
+void f(int* arr, int n) {
+    arr[0] = n;
+}
+"#;
+        let cpp = Cpp;
+        let mut parser = cpp.parser().unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+        let mut func_node = None;
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if child.kind() == "function_definition" {
+                func_node = Some(child);
+            }
+        }
+        let dfg = cpp.build_dfg(func_node.unwrap(), source.as_bytes()).unwrap();
+
+        // Check arr parameter is tracked
+        let arr_defs: Vec<_> = dfg.edges.iter()
+            .filter(|e| e.variable == "arr")
+            .collect();
+        assert!(!arr_defs.is_empty(), "arr pointer param should be tracked in DFG");
+    }
+
+    #[test]
+    fn test_cpp_dfg_for_loop_variable() {
+        let source = r#"
+void f() {
+    for (int i = 0; i < 10; i++) {
+        int x = i;
+    }
+}
+"#;
+        let cpp = Cpp;
+        let mut parser = cpp.parser().unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+        let mut func_node = None;
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if child.kind() == "function_definition" {
+                func_node = Some(child);
+            }
+        }
+        let dfg = cpp.build_dfg(func_node.unwrap(), source.as_bytes()).unwrap();
+
+        // Check i is defined
+        assert!(dfg.definitions.contains_key("i"), "for loop variable i should be defined");
     }
 }

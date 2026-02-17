@@ -33,7 +33,7 @@ use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::ast::types::{ClassInfo, FunctionInfo, ImportInfo};
-use crate::cfg::types::{BlockId, BlockType, CFGBlock, CFGEdge, CFGInfo};
+use crate::cfg::types::{BlockId, BlockType, CFGBlock, CFGEdge, CFGInfo, EdgeType};
 use crate::dfg::types::{DFGInfo, DataflowEdge, DataflowKind};
 use crate::error::{BrrrError, Result};
 use crate::lang::traits::Language;
@@ -1585,7 +1585,7 @@ impl C {
             CFGBlock {
                 id: entry,
                 label: "entry".to_string(),
-                block_type: BlockType::Body,
+                block_type: BlockType::Entry,
                 statements: Vec::new(),
                 func_calls: Vec::new(),
                 start_line: node.start_position().row + 1,
@@ -1595,6 +1595,7 @@ impl C {
         block_id += 1;
 
         // Find body (compound_statement)
+        let mut decision_points: usize = 0;
         if let Some(body) = self.child_by_field(node, "body") {
             self.process_cfg_block(
                 body,
@@ -1608,6 +1609,7 @@ impl C {
                 &mut Vec::new(),
                 &mut label_blocks,
                 &mut pending_gotos,
+                &mut decision_points,
             );
         }
 
@@ -1633,7 +1635,7 @@ impl C {
             edges,
             entry,
             exits,
-            decision_points: 0, // TODO: Count decision points for accurate cyclomatic complexity
+            decision_points,
             comprehension_decision_points: 0, // C doesn't have comprehensions
             nested_cfgs: FxHashMap::default(), // C doesn't have closures but may have nested functions via GCC extension
             is_async: false,             // C doesn't have async/await
@@ -1663,6 +1665,7 @@ impl C {
         loop_exits: &mut Vec<BlockId>,
         label_blocks: &mut FxHashMap<String, BlockId>,
         pending_gotos: &mut Vec<(BlockId, String)>,
+        decision_points: &mut usize,
     ) -> BlockId {
         // Handle the case where a single statement is passed directly (not a block-like construct)
         // This happens when if/while/for consequences are single statements without braces
@@ -1690,6 +1693,7 @@ impl C {
                 label_blocks,
                 pending_gotos,
                 &mut unreachable,
+                decision_points,
             );
         }
 
@@ -1783,6 +1787,7 @@ impl C {
                                 label_blocks,
                                 pending_gotos,
                                 &mut unreachable,
+                                decision_points,
                             );
                         }
                     }
@@ -1837,6 +1842,7 @@ impl C {
                         loop_exits,
                         label_blocks,
                         pending_gotos,
+                        decision_points,
                     );
                 }
                 "while_statement" => {
@@ -1855,6 +1861,7 @@ impl C {
                         loop_exits,
                         label_blocks,
                         pending_gotos,
+                        decision_points,
                     );
                 }
                 "for_statement" => {
@@ -1873,6 +1880,7 @@ impl C {
                         loop_exits,
                         label_blocks,
                         pending_gotos,
+                        decision_points,
                     );
                 }
                 "do_statement" => {
@@ -1891,6 +1899,7 @@ impl C {
                         loop_exits,
                         label_blocks,
                         pending_gotos,
+                        decision_points,
                     );
                 }
                 "switch_statement" => {
@@ -1909,6 +1918,7 @@ impl C {
                         loop_exits,
                         label_blocks,
                         pending_gotos,
+                        decision_points,
                     );
                 }
                 "break_statement" => {
@@ -1951,6 +1961,7 @@ impl C {
                         loop_exits,
                         label_blocks,
                         pending_gotos,
+                        decision_points,
                     );
                 }
                 // Regular statements
@@ -1990,6 +2001,7 @@ impl C {
         label_blocks: &mut FxHashMap<String, BlockId>,
         pending_gotos: &mut Vec<(BlockId, String)>,
         unreachable: &mut bool,
+        decision_points: &mut usize,
     ) -> BlockId {
         match node.kind() {
             "compound_statement" => self.process_cfg_block(
@@ -2004,6 +2016,7 @@ impl C {
                 loop_exits,
                 label_blocks,
                 pending_gotos,
+                decision_points,
             ),
             "if_statement" => self.process_if_cfg(
                 node,
@@ -2017,6 +2030,7 @@ impl C {
                 loop_exits,
                 label_blocks,
                 pending_gotos,
+                decision_points,
             ),
             "while_statement" => self.process_while_cfg(
                 node,
@@ -2030,6 +2044,7 @@ impl C {
                 loop_exits,
                 label_blocks,
                 pending_gotos,
+                decision_points,
             ),
             "for_statement" => self.process_for_cfg(
                 node,
@@ -2043,6 +2058,7 @@ impl C {
                 loop_exits,
                 label_blocks,
                 pending_gotos,
+                decision_points,
             ),
             "do_statement" => self.process_do_while_cfg(
                 node,
@@ -2056,6 +2072,7 @@ impl C {
                 loop_exits,
                 label_blocks,
                 pending_gotos,
+                decision_points,
             ),
             "switch_statement" => self.process_switch_cfg(
                 node,
@@ -2069,6 +2086,7 @@ impl C {
                 loop_exits,
                 label_blocks,
                 pending_gotos,
+                decision_points,
             ),
             "goto_statement" => {
                 let target_label = self
@@ -2168,6 +2186,7 @@ impl C {
         loop_exits: &mut Vec<BlockId>,
         label_blocks: &mut FxHashMap<String, BlockId>,
         pending_gotos: &mut Vec<(BlockId, String)>,
+        decision_points: &mut usize,
     ) -> BlockId {
         *block_id += 1;
         let cond_block = BlockId(*block_id);
@@ -2242,6 +2261,7 @@ impl C {
                 loop_exits,
                 label_blocks,
                 pending_gotos,
+                decision_points,
             );
 
             if !exits.contains(&true_end) {
@@ -2284,6 +2304,7 @@ impl C {
                 loop_exits,
                 label_blocks,
                 pending_gotos,
+                decision_points,
             );
 
             if !exits.contains(&false_end) {
@@ -2316,6 +2337,7 @@ impl C {
         loop_exits: &mut Vec<BlockId>,
         label_blocks: &mut FxHashMap<String, BlockId>,
         pending_gotos: &mut Vec<(BlockId, String)>,
+        decision_points: &mut usize,
     ) -> BlockId {
         *block_id += 1;
         let header_block = BlockId(*block_id);
@@ -2393,6 +2415,7 @@ impl C {
                 loop_exits,
                 label_blocks,
                 pending_gotos,
+                decision_points,
             );
 
             if !exits.contains(&body_end) {
@@ -2431,6 +2454,7 @@ impl C {
         loop_exits: &mut Vec<BlockId>,
         label_blocks: &mut FxHashMap<String, BlockId>,
         pending_gotos: &mut Vec<(BlockId, String)>,
+        decision_points: &mut usize,
     ) -> BlockId {
         // For loop: for (init; cond; update) body
         *block_id += 1;
@@ -2511,6 +2535,7 @@ impl C {
                 loop_exits,
                 label_blocks,
                 pending_gotos,
+                decision_points,
             );
 
             if !exits.contains(&body_end) {
@@ -2549,6 +2574,7 @@ impl C {
         loop_exits: &mut Vec<BlockId>,
         label_blocks: &mut FxHashMap<String, BlockId>,
         pending_gotos: &mut Vec<(BlockId, String)>,
+        decision_points: &mut usize,
     ) -> BlockId {
         // Body block (executes at least once)
         *block_id += 1;
@@ -2622,6 +2648,7 @@ impl C {
                 loop_exits,
                 label_blocks,
                 pending_gotos,
+                decision_points,
             );
 
             if !exits.contains(&body_end) {
@@ -2662,6 +2689,7 @@ impl C {
         loop_exits: &mut Vec<BlockId>,
         label_blocks: &mut FxHashMap<String, BlockId>,
         pending_gotos: &mut Vec<(BlockId, String)>,
+        decision_points: &mut usize,
     ) -> BlockId {
         *block_id += 1;
         let switch_block = BlockId(*block_id);
@@ -2745,6 +2773,7 @@ impl C {
                         loop_exits,
                         label_blocks,
                         pending_gotos,
+                        decision_points,
                     );
 
                     if !exits.contains(&case_end) {
@@ -2759,38 +2788,34 @@ impl C {
         exit_block
     }
 
+    // =========================================================================
+    // DFG (Data Flow Graph) construction
+    // =========================================================================
+
     /// Build DFG for a C function.
     fn build_c_dfg(&self, node: Node, source: &[u8], func_name: &str) -> DFGInfo {
         let mut edges = Vec::new();
         let mut definitions: FxHashMap<String, Vec<usize>> = FxHashMap::default();
         let mut uses: FxHashMap<String, Vec<usize>> = FxHashMap::default();
 
-        // Extract parameters as initial definitions
         if let Some(declarator) = self.child_by_field(node, "declarator") {
             if let Some(params) = self.child_by_field(declarator, "parameters") {
-                let line = params.start_position().row + 1;
                 let mut cursor = params.walk();
-
                 for child in params.children(&mut cursor) {
                     if child.kind() == "parameter_declaration" {
-                        self.extract_param_definition(
-                            child,
-                            source,
-                            line,
-                            &mut edges,
-                            &mut definitions,
+                        let line = child.start_position().row + 1;
+                        self.dfg_extract_param(
+                            child, source, line, &mut edges, &mut definitions,
                         );
                     }
                 }
             }
         }
 
-        // Process body
         if let Some(body) = self.child_by_field(node, "body") {
-            self.extract_dfg_from_block(body, source, &mut edges, &mut definitions, &mut uses);
+            self.dfg_process_block(body, source, &mut edges, &mut definitions, &mut uses);
         }
 
-        // Convert FxHashMap to HashMap for DFGInfo API compatibility
         DFGInfo::new(
             func_name.to_string(),
             edges,
@@ -2799,8 +2824,7 @@ impl C {
         )
     }
 
-    /// Extract parameter definitions for DFG.
-    fn extract_param_definition(
+    fn dfg_extract_param(
         &self,
         node: Node,
         source: &[u8],
@@ -2835,13 +2859,25 @@ impl C {
                         });
                     }
                 }
+                "array_declarator" => {
+                    let (name, _) = self.extract_array_declarator(child, source);
+                    if !name.is_empty() {
+                        definitions.entry(name.clone()).or_default().push(line);
+                        edges.push(DataflowEdge {
+                            variable: name,
+                            from_line: line,
+                            to_line: line,
+                            kind: DataflowKind::Param,
+                        });
+                    }
+                }
                 _ => {}
             }
         }
     }
 
-    /// Extract data flow from a compound statement.
-    fn extract_dfg_from_block(
+    /// Recursively process a block for DFG, including control flow conditions.
+    fn dfg_process_block(
         &self,
         node: Node,
         source: &[u8],
@@ -2850,34 +2886,76 @@ impl C {
         uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
         let mut cursor = node.walk();
-
         for child in node.children(&mut cursor) {
             let line = child.start_position().row + 1;
-
             match child.kind() {
                 "declaration" => {
-                    self.extract_declaration_dfg(child, source, line, edges, definitions, uses);
+                    self.dfg_process_declaration(child, source, line, edges, definitions, uses);
                 }
                 "expression_statement" => {
-                    self.extract_expression_dfg(child, source, line, edges, definitions, uses);
+                    self.dfg_process_expr_stmt(child, source, line, edges, definitions, uses);
                 }
                 "return_statement" => {
-                    self.extract_return_dfg(child, source, line, edges, definitions, uses);
+                    self.dfg_process_return(child, source, line, edges, definitions, uses);
                 }
-                "if_statement" | "while_statement" | "for_statement" | "do_statement"
-                | "switch_statement" => {
-                    self.extract_dfg_from_block(child, source, edges, definitions, uses);
+                "if_statement" => {
+                    if let Some(cond) = self.child_by_field(child, "condition") {
+                        self.dfg_collect_uses(cond, source, line, edges, definitions, uses);
+                    }
+                    if let Some(consequence) = self.child_by_field(child, "consequence") {
+                        self.dfg_process_block(consequence, source, edges, definitions, uses);
+                    }
+                    if let Some(alternative) = self.child_by_field(child, "alternative") {
+                        self.dfg_process_block(alternative, source, edges, definitions, uses);
+                    }
                 }
-                "compound_statement" => {
-                    self.extract_dfg_from_block(child, source, edges, definitions, uses);
+                "while_statement" | "do_statement" => {
+                    if let Some(cond) = self.child_by_field(child, "condition") {
+                        let cond_line = cond.start_position().row + 1;
+                        self.dfg_collect_uses(cond, source, cond_line, edges, definitions, uses);
+                    }
+                    if let Some(body) = self.child_by_field(child, "body") {
+                        self.dfg_process_block(body, source, edges, definitions, uses);
+                    }
+                }
+                "for_statement" => {
+                    if let Some(init) = self.child_by_field(child, "initializer") {
+                        let il = init.start_position().row + 1;
+                        if init.kind() == "declaration" {
+                            self.dfg_process_declaration(init, source, il, edges, definitions, uses);
+                        } else {
+                            self.dfg_process_top_expr(init, source, il, edges, definitions, uses);
+                        }
+                    }
+                    if let Some(cond) = self.child_by_field(child, "condition") {
+                        let cl = cond.start_position().row + 1;
+                        self.dfg_collect_uses(cond, source, cl, edges, definitions, uses);
+                    }
+                    if let Some(update) = self.child_by_field(child, "update") {
+                        let ul = update.start_position().row + 1;
+                        self.dfg_process_top_expr(update, source, ul, edges, definitions, uses);
+                    }
+                    if let Some(body) = self.child_by_field(child, "body") {
+                        self.dfg_process_block(body, source, edges, definitions, uses);
+                    }
+                }
+                "switch_statement" => {
+                    if let Some(cond) = self.child_by_field(child, "condition") {
+                        self.dfg_collect_uses(cond, source, line, edges, definitions, uses);
+                    }
+                    if let Some(body) = self.child_by_field(child, "body") {
+                        self.dfg_process_block(body, source, edges, definitions, uses);
+                    }
+                }
+                "compound_statement" | "case_statement" | "labeled_statement" => {
+                    self.dfg_process_block(child, source, edges, definitions, uses);
                 }
                 _ => {}
             }
         }
     }
 
-    /// Extract DFG from a declaration.
-    fn extract_declaration_dfg(
+    fn dfg_process_declaration(
         &self,
         node: Node,
         source: &[u8],
@@ -2888,11 +2966,25 @@ impl C {
     ) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            if child.kind() == "init_declarator" {
-                // Variable with initialization
-                if let Some(declarator) = self.child_by_field(child, "declarator") {
-                    let name = self.extract_name_from_declarator(declarator, source);
-                    if let Some(name) = name {
+            match child.kind() {
+                "init_declarator" => {
+                    if let Some(declarator) = self.child_by_field(child, "declarator") {
+                        if let Some(name) = self.dfg_lvalue_name(declarator, source) {
+                            definitions.entry(name.clone()).or_default().push(line);
+                            edges.push(DataflowEdge {
+                                variable: name,
+                                from_line: line,
+                                to_line: line,
+                                kind: DataflowKind::Definition,
+                            });
+                        }
+                    }
+                    if let Some(value) = self.child_by_field(child, "value") {
+                        self.dfg_collect_uses(value, source, line, edges, definitions, uses);
+                    }
+                }
+                "identifier" | "pointer_declarator" | "array_declarator" => {
+                    if let Some(name) = self.dfg_lvalue_name(child, source) {
                         definitions.entry(name.clone()).or_default().push(line);
                         edges.push(DataflowEdge {
                             variable: name,
@@ -2902,28 +2994,12 @@ impl C {
                         });
                     }
                 }
-                // Extract uses from value
-                if let Some(value) = self.child_by_field(child, "value") {
-                    self.extract_uses_from_expr(value, source, line, edges, definitions, uses);
-                }
-            } else if child.kind() == "identifier" || child.kind() == "pointer_declarator" {
-                // Declaration without initialization
-                let name = self.extract_name_from_declarator(child, source);
-                if let Some(name) = name {
-                    definitions.entry(name.clone()).or_default().push(line);
-                    edges.push(DataflowEdge {
-                        variable: name,
-                        from_line: line,
-                        to_line: line,
-                        kind: DataflowKind::Definition,
-                    });
-                }
+                _ => {}
             }
         }
     }
 
-    /// Extract DFG from an expression statement.
-    fn extract_expression_dfg(
+    fn dfg_process_expr_stmt(
         &self,
         node: Node,
         source: &[u8],
@@ -2934,35 +3010,212 @@ impl C {
     ) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            if child.kind() == "assignment_expression" {
-                // Left side is definition/mutation
-                if let Some(left) = self.child_by_field(child, "left") {
-                    let name = self.extract_name_from_declarator(left, source);
-                    if let Some(name) = name {
-                        definitions.entry(name.clone()).or_default().push(line);
+            if child.is_named() {
+                self.dfg_process_top_expr(child, source, line, edges, definitions, uses);
+            }
+        }
+    }
+
+    /// Process a top-level expression: assignments, compound assignments,
+    /// updates, calls, and comma expressions.
+    fn dfg_process_top_expr(
+        &self,
+        node: Node,
+        source: &[u8],
+        line: usize,
+        edges: &mut Vec<DataflowEdge>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
+    ) {
+        match node.kind() {
+            "assignment_expression" => {
+                if let Some(right) = self.child_by_field(node, "right") {
+                    self.dfg_collect_uses(right, source, line, edges, definitions, uses);
+                }
+                if let Some(left) = self.child_by_field(node, "left") {
+                    self.dfg_process_lvalue_mutation(left, source, line, edges, definitions, uses);
+                }
+            }
+            "compound_assignment_expr" => {
+                // x += expr: x is both used and mutated
+                if let Some(right) = self.child_by_field(node, "right") {
+                    self.dfg_collect_uses(right, source, line, edges, definitions, uses);
+                }
+                if let Some(left) = self.child_by_field(node, "left") {
+                    self.dfg_collect_uses(left, source, line, edges, definitions, uses);
+                    self.dfg_process_lvalue_mutation(left, source, line, edges, definitions, uses);
+                }
+            }
+            "update_expression" => {
+                // x++ / ++x: use + mutation
+                if let Some(arg) = self.child_by_field(node, "argument") {
+                    self.dfg_collect_uses(arg, source, line, edges, definitions, uses);
+                    self.dfg_process_lvalue_mutation(arg, source, line, edges, definitions, uses);
+                }
+            }
+            "comma_expression" => {
+                if let Some(left) = self.child_by_field(node, "left") {
+                    self.dfg_process_top_expr(left, source, line, edges, definitions, uses);
+                }
+                if let Some(right) = self.child_by_field(node, "right") {
+                    self.dfg_process_top_expr(right, source, line, edges, definitions, uses);
+                }
+            }
+            _ => {
+                self.dfg_collect_uses(node, source, line, edges, definitions, uses);
+            }
+        }
+    }
+
+    /// Process an lvalue mutation target.
+    fn dfg_process_lvalue_mutation(
+        &self,
+        node: Node,
+        source: &[u8],
+        line: usize,
+        edges: &mut Vec<DataflowEdge>,
+        definitions: &mut FxHashMap<String, Vec<usize>>,
+        uses: &mut FxHashMap<String, Vec<usize>>,
+    ) {
+        match node.kind() {
+            "pointer_expression" => {
+                // *p = x: p is used, (*p) is mutated
+                if let Some(arg) = self.child_by_field(node, "argument") {
+                    self.dfg_collect_uses(arg, source, line, edges, definitions, uses);
+                    if let Some(base) = self.dfg_lvalue_name(arg, source) {
+                        let deref_name = format!("(*{})", base);
+                        definitions.entry(deref_name.clone()).or_default().push(line);
                         edges.push(DataflowEdge {
-                            variable: name,
+                            variable: deref_name,
                             from_line: line,
                             to_line: line,
                             kind: DataflowKind::Mutation,
                         });
                     }
                 }
-                // Right side has uses
-                if let Some(right) = self.child_by_field(child, "right") {
-                    self.extract_uses_from_expr(right, source, line, edges, definitions, uses);
+            }
+            "field_expression" => {
+                if let Some(name) = self.dfg_field_expr_name(node, source) {
+                    definitions.entry(name.clone()).or_default().push(line);
+                    edges.push(DataflowEdge {
+                        variable: name,
+                        from_line: line,
+                        to_line: line,
+                        kind: DataflowKind::Mutation,
+                    });
                 }
-            } else if child.kind() == "update_expression" {
-                // x++ or ++x is both use and mutation
-                self.extract_uses_from_expr(child, source, line, edges, definitions, uses);
-            } else if child.kind() == "call_expression" {
-                self.extract_uses_from_expr(child, source, line, edges, definitions, uses);
+                if let Some(arg) = self.child_by_field(node, "argument") {
+                    if let Some(base) = self.dfg_lvalue_name(arg, source) {
+                        definitions.entry(base.clone()).or_default().push(line);
+                        edges.push(DataflowEdge {
+                            variable: base,
+                            from_line: line,
+                            to_line: line,
+                            kind: DataflowKind::Mutation,
+                        });
+                    }
+                }
+            }
+            "subscript_expression" => {
+                if let Some(arg) = self.child_by_field(node, "argument") {
+                    if let Some(base) = self.dfg_lvalue_name(arg, source) {
+                        definitions.entry(base.clone()).or_default().push(line);
+                        edges.push(DataflowEdge {
+                            variable: base,
+                            from_line: line,
+                            to_line: line,
+                            kind: DataflowKind::Mutation,
+                        });
+                    }
+                }
+                if let Some(idx) = self.child_by_field(node, "index") {
+                    self.dfg_collect_uses(idx, source, line, edges, definitions, uses);
+                }
+            }
+            "parenthesized_expression" => {
+                let mut inner_cursor = node.walk();
+                for child in node.children(&mut inner_cursor) {
+                    if child.is_named() {
+                        self.dfg_process_lvalue_mutation(child, source, line, edges, definitions, uses);
+                        return;
+                    }
+                }
+            }
+            _ => {
+                if let Some(name) = self.dfg_lvalue_name(node, source) {
+                    definitions.entry(name.clone()).or_default().push(line);
+                    edges.push(DataflowEdge {
+                        variable: name,
+                        from_line: line,
+                        to_line: line,
+                        kind: DataflowKind::Mutation,
+                    });
+                }
             }
         }
     }
 
-    /// Extract DFG from a return statement.
-    fn extract_return_dfg(
+    /// Extract the name of an lvalue target for DFG tracking.
+    fn dfg_lvalue_name(&self, node: Node, source: &[u8]) -> Option<String> {
+        match node.kind() {
+            "identifier" => {
+                let name = self.node_text(node, source);
+                if name.is_empty() { None } else { Some(name) }
+            }
+            "pointer_declarator" => {
+                let (name, _) = self.extract_pointer_declarator(node, source);
+                if name.is_empty() { None } else { Some(name) }
+            }
+            "array_declarator" => {
+                let (name, _) = self.extract_array_declarator(node, source);
+                if name.is_empty() { None } else { Some(name) }
+            }
+            "field_expression" => self.dfg_field_expr_name(node, source),
+            "subscript_expression" => {
+                self.child_by_field(node, "argument")
+                    .and_then(|arg| self.dfg_lvalue_name(arg, source))
+            }
+            "pointer_expression" => {
+                self.child_by_field(node, "argument")
+                    .and_then(|arg| self.dfg_lvalue_name(arg, source))
+            }
+            "parenthesized_expression" => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.is_named() {
+                        return self.dfg_lvalue_name(child, source);
+                    }
+                }
+                None
+            }
+            _ => self.extract_name_from_declarator(node, source),
+        }
+    }
+
+    /// Build a dotted name for a field expression: `s.field` or `p->field`.
+    fn dfg_field_expr_name(&self, node: Node, source: &[u8]) -> Option<String> {
+        let arg = self.child_by_field(node, "argument")?;
+        let field = self.child_by_field(node, "field")?;
+        let base = self.dfg_lvalue_name(arg, source)?;
+        let field_name = self.node_text(field, source);
+        let op = self.dfg_field_operator(node, source);
+        Some(format!("{}{}{}", base, op, field_name))
+    }
+
+    fn dfg_field_operator(&self, node: Node, source: &[u8]) -> &'static str {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if !child.is_named() {
+                let text = self.get_text(child, source);
+                if text == "->" {
+                    return "->";
+                }
+            }
+        }
+        "."
+    }
+
+    fn dfg_process_return(
         &self,
         node: Node,
         source: &[u8],
@@ -2974,13 +3227,12 @@ impl C {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.is_named() && child.kind() != "return" {
-                self.extract_return_uses(child, source, line, edges, definitions, uses);
+                self.dfg_collect_return_uses(child, source, line, edges, definitions, uses);
             }
         }
     }
 
-    /// Extract uses from a return expression.
-    fn extract_return_uses(
+    fn dfg_collect_return_uses(
         &self,
         node: Node,
         source: &[u8],
@@ -2989,33 +3241,52 @@ impl C {
         definitions: &FxHashMap<String, Vec<usize>>,
         uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
-        if node.kind() == "identifier" {
-            let name = self.node_text(node, source);
-            uses.entry(name.clone()).or_default().push(line);
-
-            // Create return edge
-            if let Some(def_lines) = definitions.get(&name) {
-                if let Some(&def_line) = def_lines.last() {
-                    edges.push(DataflowEdge {
-                        variable: name,
-                        from_line: def_line,
-                        to_line: line,
-                        kind: DataflowKind::Return,
-                    });
+        match node.kind() {
+            "identifier" => {
+                let name = self.node_text(node, source);
+                uses.entry(name.clone()).or_default().push(line);
+                if let Some(def_lines) = definitions.get(&name) {
+                    if let Some(&def_line) = def_lines.last() {
+                        edges.push(DataflowEdge {
+                            variable: name,
+                            from_line: def_line,
+                            to_line: line,
+                            kind: DataflowKind::Return,
+                        });
+                    }
                 }
             }
-        } else {
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.is_named() {
-                    self.extract_return_uses(child, source, line, edges, definitions, uses);
+            "field_expression" => {
+                if let Some(name) = self.dfg_field_expr_name(node, source) {
+                    uses.entry(name.clone()).or_default().push(line);
+                    if let Some(def_lines) = definitions.get(&name) {
+                        if let Some(&def_line) = def_lines.last() {
+                            edges.push(DataflowEdge {
+                                variable: name,
+                                from_line: def_line,
+                                to_line: line,
+                                kind: DataflowKind::Return,
+                            });
+                        }
+                    }
+                }
+                if let Some(arg) = self.child_by_field(node, "argument") {
+                    self.dfg_collect_return_uses(arg, source, line, edges, definitions, uses);
+                }
+            }
+            _ => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.is_named() {
+                        self.dfg_collect_return_uses(child, source, line, edges, definitions, uses);
+                    }
                 }
             }
         }
     }
 
-    /// Extract variable uses from an expression.
-    fn extract_uses_from_expr(
+    /// Recursively collect variable uses from an expression for DFG.
+    fn dfg_collect_uses(
         &self,
         node: Node,
         source: &[u8],
@@ -3024,26 +3295,83 @@ impl C {
         definitions: &FxHashMap<String, Vec<usize>>,
         uses: &mut FxHashMap<String, Vec<usize>>,
     ) {
-        if node.kind() == "identifier" {
-            let name = self.node_text(node, source);
-            uses.entry(name.clone()).or_default().push(line);
-
-            // Create use edge from most recent definition
-            if let Some(def_lines) = definitions.get(&name) {
-                if let Some(&def_line) = def_lines.last() {
-                    edges.push(DataflowEdge {
-                        variable: name,
-                        from_line: def_line,
-                        to_line: line,
-                        kind: DataflowKind::Use,
-                    });
+        match node.kind() {
+            "identifier" => {
+                let name = self.node_text(node, source);
+                if name.is_empty() {
+                    return;
+                }
+                uses.entry(name.clone()).or_default().push(line);
+                if let Some(def_lines) = definitions.get(&name) {
+                    if let Some(&def_line) = def_lines.last() {
+                        edges.push(DataflowEdge {
+                            variable: name,
+                            from_line: def_line,
+                            to_line: line,
+                            kind: DataflowKind::Use,
+                        });
+                    }
                 }
             }
-        } else {
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.is_named() {
-                    self.extract_uses_from_expr(child, source, line, edges, definitions, uses);
+            "field_expression" => {
+                if let Some(name) = self.dfg_field_expr_name(node, source) {
+                    uses.entry(name.clone()).or_default().push(line);
+                    if let Some(def_lines) = definitions.get(&name) {
+                        if let Some(&def_line) = def_lines.last() {
+                            edges.push(DataflowEdge {
+                                variable: name,
+                                from_line: def_line,
+                                to_line: line,
+                                kind: DataflowKind::Use,
+                            });
+                        }
+                    }
+                }
+                if let Some(arg) = self.child_by_field(node, "argument") {
+                    self.dfg_collect_uses(arg, source, line, edges, definitions, uses);
+                }
+            }
+            "pointer_expression" => {
+                if let Some(arg) = self.child_by_field(node, "argument") {
+                    self.dfg_collect_uses(arg, source, line, edges, definitions, uses);
+                    if let Some(base) = self.dfg_lvalue_name(arg, source) {
+                        let deref_name = format!("(*{})", base);
+                        if definitions.contains_key(&deref_name) {
+                            uses.entry(deref_name.clone()).or_default().push(line);
+                            if let Some(def_lines) = definitions.get(&deref_name) {
+                                if let Some(&def_line) = def_lines.last() {
+                                    edges.push(DataflowEdge {
+                                        variable: deref_name,
+                                        from_line: def_line,
+                                        to_line: line,
+                                        kind: DataflowKind::Use,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "subscript_expression" => {
+                if let Some(arg) = self.child_by_field(node, "argument") {
+                    self.dfg_collect_uses(arg, source, line, edges, definitions, uses);
+                }
+                if let Some(idx) = self.child_by_field(node, "index") {
+                    self.dfg_collect_uses(idx, source, line, edges, definitions, uses);
+                }
+            }
+            "sizeof_expression" => {}
+            "cast_expression" => {
+                if let Some(value) = self.child_by_field(node, "value") {
+                    self.dfg_collect_uses(value, source, line, edges, definitions, uses);
+                }
+            }
+            _ => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.is_named() {
+                        self.dfg_collect_uses(child, source, line, edges, definitions, uses);
+                    }
                 }
             }
         }

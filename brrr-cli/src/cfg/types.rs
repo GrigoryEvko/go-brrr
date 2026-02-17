@@ -982,6 +982,14 @@ impl CFGInfo {
 }
 
 impl CFGInfo {
+    /// Return the maximum block ID value across all blocks.
+    ///
+    /// This is needed for FixedBitSet sizing because block IDs may not be
+    /// contiguous (e.g., 0, 2, 5, 8). The capacity must be max_id + 1.
+    fn max_block_id(&self) -> usize {
+        self.blocks.keys().map(|id| id.0).max().unwrap_or(0)
+    }
+
     /// Calculate cyclomatic complexity using decision points.
     ///
     /// Uses the formula: M = decision_points + 1
@@ -1332,7 +1340,7 @@ impl CFGInfo {
     /// An edge to a node currently in the recursion stack is a back edge.
     #[allow(dead_code)]
     pub fn has_back_edge(&self) -> bool {
-        let capacity = self.blocks.len();
+        let capacity = self.max_block_id() + 1;
         let mut visited = FixedBitSet::with_capacity(capacity);
         let mut stack = FixedBitSet::with_capacity(capacity);
         self.has_back_edge_dfs(self.entry, &mut visited, &mut stack)
@@ -1480,7 +1488,7 @@ impl CFGInfo {
     /// Set of (from, to) block ID pairs representing back edges.
     fn find_back_edges(&self) -> FxHashSet<(BlockId, BlockId)> {
         let mut back_edges = FxHashSet::default();
-        let capacity = self.blocks.len();
+        let capacity = self.max_block_id() + 1;
         let mut visited = FixedBitSet::with_capacity(capacity);
         let mut stack = FixedBitSet::with_capacity(capacity);
         self.find_back_edges_dfs(self.entry, &mut visited, &mut stack, &mut back_edges);
