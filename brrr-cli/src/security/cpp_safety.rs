@@ -198,7 +198,7 @@ struct RuleDef {
     cwe: Option<u32>,
 }
 
-/// Complete rule catalog — 38 rules across 9 categories.
+/// Complete rule catalog.
 const RULES: &[RuleDef] = &[
     // ── InitSafe ────────────────────────────────────────────────────────────
     RuleDef {
@@ -597,6 +597,112 @@ const RULES: &[RuleDef] = &[
         remediation: "Use std::expected (C++23), error codes, or Result types",
         cwe: None,
     },
+
+    // ── Lifetime Safety (§1.5.1 D3390) ────────────────────────────────────
+    RuleDef {
+        id: "LIFE-001",
+        axiom: SafetyAxiom::MemSafe,
+        severity: Severity::High,
+        confidence: Confidence::Medium,
+        title: "string_view bound to temporary std::string",
+        description: "string_view does not own its data; binding to a temporary string creates a dangling view after the statement ends.",
+        remediation: "Store the string in a named variable first, or use std::string directly",
+        cwe: Some(416),
+    },
+    RuleDef {
+        id: "LIFE-002",
+        axiom: SafetyAxiom::MemSafe,
+        severity: Severity::High,
+        confidence: Confidence::Medium,
+        title: "span bound to temporary container",
+        description: "span does not own its data; binding to a temporary container creates a dangling span.",
+        remediation: "Store the container in a named variable first, or pass by reference",
+        cwe: Some(416),
+    },
+    RuleDef {
+        id: "LIFE-003",
+        axiom: SafetyAxiom::MemSafe,
+        severity: Severity::Medium,
+        confidence: Confidence::Low,
+        title: "Non-owning view stored as class member",
+        description: "string_view/span stored as struct/class member may outlive the referenced data.",
+        remediation: "Use std::string/std::vector for owned storage, or document the lifetime contract explicitly",
+        cwe: Some(416),
+    },
+    RuleDef {
+        id: "LIFE-004",
+        axiom: SafetyAxiom::MemSafe,
+        severity: Severity::High,
+        confidence: Confidence::High,
+        title: "Returning non-owning view to local data",
+        description: "Returning string_view or span to function-local data creates a dangling reference.",
+        remediation: "Return std::string or std::vector instead of the non-owning view",
+        cwe: Some(416),
+    },
+
+    // ── Iterator Invalidation (§2.2.2 D3390) ──────────────────────────────
+    RuleDef {
+        id: "LIFE-005",
+        axiom: SafetyAxiom::MemSafe,
+        severity: Severity::High,
+        confidence: Confidence::High,
+        title: "Container mutation during range-for loop",
+        description: "Calling push_back/erase/insert/clear on a container while iterating over it with range-for invalidates iterators, causing UB.",
+        remediation: "Collect modifications and apply after the loop, or use erase-remove idiom",
+        cwe: Some(416),
+    },
+    RuleDef {
+        id: "LIFE-006",
+        axiom: SafetyAxiom::MemSafe,
+        severity: Severity::High,
+        confidence: Confidence::High,
+        title: "Container mutation while holding iterator",
+        description: "Modifying a container while iterating with begin()/end() invalidates the iterator.",
+        remediation: "Use the return value of erase() to advance, or collect changes for post-loop application",
+        cwe: Some(416),
+    },
+    RuleDef {
+        id: "LIFE-007",
+        axiom: SafetyAxiom::MemSafe,
+        severity: Severity::Medium,
+        confidence: Confidence::Low,
+        title: "Container mutation while reference/pointer to element exists",
+        description: "Mutating a container (push_back, insert, erase) while holding a reference or pointer to an element may invalidate that reference.",
+        remediation: "Re-obtain references after container mutation, or use stable containers like std::list",
+        cwe: Some(416),
+    },
+
+    // ── Initializer List Dangling (§2.2.3 D3390) ──────────────────────────
+    RuleDef {
+        id: "LIFE-008",
+        axiom: SafetyAxiom::MemSafe,
+        severity: Severity::High,
+        confidence: Confidence::High,
+        title: "Local variable of type std::initializer_list",
+        description: "The backing array of initializer_list is destroyed at the end of the full expression; storing it in a local variable creates a dangling reference.",
+        remediation: "Use std::vector, std::array, or a C array instead",
+        cwe: Some(416),
+    },
+    RuleDef {
+        id: "LIFE-009",
+        axiom: SafetyAxiom::MemSafe,
+        severity: Severity::Medium,
+        confidence: Confidence::Medium,
+        title: "Function parameter of type std::initializer_list stored or returned",
+        description: "The backing array only lives for the duration of the function call; storing it outlives the data.",
+        remediation: "Accept a span<const T> or const vector<T>& instead",
+        cwe: Some(416),
+    },
+    RuleDef {
+        id: "LIFE-010",
+        axiom: SafetyAxiom::MemSafe,
+        severity: Severity::High,
+        confidence: Confidence::High,
+        title: "std::initializer_list as class data member",
+        description: "Storing initializer_list as a member is almost always wrong; the backing array doesn't persist beyond the initializing expression.",
+        remediation: "Use std::vector<T> or std::array<T, N> as the member type",
+        cwe: Some(416),
+    },
 ];
 
 /// CWE for resource leak via missing virtual destructor (improper resource shutdown).
@@ -716,6 +822,9 @@ pub fn scan_file_cpp_safety(
     check_det_drop(source_str, &file_path, &mut findings);
     check_performance(source_str, &file_path, &mut findings);
     check_anti_patterns(&tree, &source, &file_path, source_str, lang.name(), is_cpp, &mut findings)?;
+    check_lifetime_safety(source_str, &file_path, is_cpp, &mut findings);
+    check_iterator_invalidation(source_str, &file_path, is_cpp, &mut findings);
+    check_initializer_list_dangling(source_str, &file_path, is_cpp, &mut findings);
 
     // Apply filters
     let filtered = findings
@@ -2044,6 +2153,543 @@ fn check_throw_statements(
 }
 
 // =============================================================================
+// Lifetime Safety Checker (§1.5.1 D3390)
+// =============================================================================
+
+/// Non-owning view types that create dangling references when bound to temporaries.
+const VIEW_TYPES: &[&str] = &[
+    "string_view", "std::string_view",
+    "span", "std::span", "gsl::span",
+    "QStringView",
+];
+
+fn check_lifetime_safety(
+    source_str: &str,
+    file_path: &str,
+    is_cpp: bool,
+    findings: &mut Vec<CppSafetyFinding>,
+) {
+    if !is_cpp {
+        return;
+    }
+
+    check_view_from_temporary(source_str, file_path, findings);
+    check_view_as_member(source_str, file_path, findings);
+    check_return_view_to_local(source_str, file_path, findings);
+}
+
+/// LIFE-001 / LIFE-002: string_view or span initialized from a temporary.
+///
+/// Detects patterns like:
+///   string_view sv = std::string("hello");
+///   string_view sv = func_returning_string();
+///   span<int> s = std::vector<int>{1,2,3};
+///   string_view sv = a + b;  (string concatenation yields temporary)
+fn check_view_from_temporary(
+    source_str: &str,
+    file_path: &str,
+    findings: &mut Vec<CppSafetyFinding>,
+) {
+    // Temporary-producing patterns on the RHS of a view initialization
+    let string_temp_patterns = [
+        "std::string(", "std::string{",
+        "std::to_string(", "to_string(",
+        ".str()", ".string()",
+        "substr(", ".c_str()",
+    ];
+
+    let container_temp_patterns = [
+        "std::vector<", "std::vector{",
+        "std::array<", "std::array{",
+        "std::initializer_list",
+    ];
+
+    for (line_idx, line) in source_str.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+            continue;
+        }
+
+        // Check for string_view bound to string temporary
+        let has_sv = trimmed.contains("string_view")
+            && (trimmed.contains('=') || trimmed.contains("string_view("));
+
+        if has_sv {
+            // Split at '=' to check RHS
+            let rhs = if let Some(eq_pos) = trimmed.find('=') {
+                &trimmed[eq_pos + 1..]
+            } else {
+                trimmed
+            };
+
+            for pat in &string_temp_patterns {
+                if rhs.contains(pat) {
+                    let loc = SourceLocation::new(
+                        file_path, line_idx + 1, 1, line_idx + 1, trimmed.len(),
+                    );
+                    findings.push(make_finding("LIFE-001", loc, trimmed.to_string()));
+                    break;
+                }
+            }
+
+            // Also catch string concatenation (a + b where result is temp string)
+            // Pattern: string_view sv = expr + expr; (contains '+' and string-ish types)
+            if rhs.contains(" + ") && (rhs.contains("\"") || rhs.contains("str")) {
+                let loc = SourceLocation::new(
+                    file_path, line_idx + 1, 1, line_idx + 1, trimmed.len(),
+                );
+                findings.push(make_finding("LIFE-001", loc, trimmed.to_string()));
+            }
+        }
+
+        // Check for span bound to container temporary
+        let has_span = (trimmed.contains("span<") || trimmed.contains("span "))
+            && (trimmed.contains('=') || trimmed.contains("span(") || trimmed.contains("span{"));
+
+        if has_span {
+            let rhs = if let Some(eq_pos) = trimmed.find('=') {
+                &trimmed[eq_pos + 1..]
+            } else {
+                trimmed
+            };
+
+            for pat in &container_temp_patterns {
+                if rhs.contains(pat) {
+                    let loc = SourceLocation::new(
+                        file_path, line_idx + 1, 1, line_idx + 1, trimmed.len(),
+                    );
+                    findings.push(make_finding("LIFE-002", loc, trimmed.to_string()));
+                    break;
+                }
+            }
+
+            // Brace-enclosed initializer list: span<int> s = {1, 2, 3};
+            if rhs.trim_start().starts_with('{') {
+                let loc = SourceLocation::new(
+                    file_path, line_idx + 1, 1, line_idx + 1, trimmed.len(),
+                );
+                findings.push(make_finding("LIFE-002", loc, trimmed.to_string()));
+            }
+        }
+    }
+}
+
+/// LIFE-003: string_view or span stored as struct/class member field.
+fn check_view_as_member(
+    source_str: &str,
+    file_path: &str,
+    findings: &mut Vec<CppSafetyFinding>,
+) {
+    let mut in_struct = false;
+    let mut brace_depth = 0i32;
+
+    for (line_idx, line) in source_str.lines().enumerate() {
+        let trimmed = line.trim();
+
+        if (trimmed.starts_with("struct ") || trimmed.starts_with("class "))
+            && (trimmed.contains('{') || !trimmed.contains(';'))
+        {
+            in_struct = true;
+            brace_depth = 0;
+        }
+
+        if in_struct {
+            brace_depth += trimmed.matches('{').count() as i32;
+            brace_depth -= trimmed.matches('}').count() as i32;
+
+            if brace_depth <= 0 && trimmed.contains('}') {
+                in_struct = false;
+                continue;
+            }
+
+            // Only look at brace_depth == 1 (direct members, not nested structs)
+            if brace_depth != 1 {
+                continue;
+            }
+
+            if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+                continue;
+            }
+
+            // Skip methods (contain parens for params), skip access specifiers
+            if trimmed.contains('(') || trimmed.starts_with("public")
+                || trimmed.starts_with("private") || trimmed.starts_with("protected")
+                || trimmed.starts_with("friend") || trimmed.starts_with("using")
+                || trimmed.starts_with("static ") || trimmed.starts_with("constexpr ")
+            {
+                continue;
+            }
+
+            // Check for view types in field declarations
+            for vt in VIEW_TYPES {
+                if trimmed.contains(vt) {
+                    let col = trimmed.find(vt).unwrap_or(0);
+                    let loc = SourceLocation::new(
+                        file_path, line_idx + 1, col + 1, line_idx + 1, col + vt.len() + 1,
+                    );
+                    findings.push(make_finding("LIFE-003", loc, trimmed.to_string()));
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// LIFE-004: Function returning string_view/span constructed from local data.
+///
+/// Detects patterns like:
+///   std::string_view get_name() { std::string s = ...; return s; }
+///   std::string_view get_name() { ... return std::string_view(local); }
+fn check_return_view_to_local(
+    source_str: &str,
+    file_path: &str,
+    findings: &mut Vec<CppSafetyFinding>,
+) {
+    let lines: Vec<&str> = source_str.lines().collect();
+    let mut func_returns_view = false;
+    let mut func_brace_depth = 0i32;
+    let mut in_func_body = false;
+    let mut local_vars: Vec<String> = Vec::new();
+
+    for (line_idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+
+        // Detect function declarations that return a view type
+        // Pattern: "string_view funcname(" or "auto funcname(...) -> string_view"
+        if !in_func_body {
+            let returns_view = VIEW_TYPES.iter().any(|vt| {
+                // Return type at start: string_view foo(
+                (trimmed.contains(vt) && trimmed.contains('(')
+                    && trimmed.find(vt).unwrap_or(usize::MAX) < trimmed.find('(').unwrap_or(0))
+                // Trailing return type: -> string_view
+                || (trimmed.contains("->") && trimmed.contains(vt)
+                    && trimmed.find("->").unwrap_or(0) < trimmed.find(vt).unwrap_or(usize::MAX))
+            });
+
+            if returns_view && (trimmed.contains('{') || trimmed.ends_with('{')) {
+                func_returns_view = true;
+                in_func_body = true;
+                func_brace_depth = 0;
+                local_vars.clear();
+            }
+        }
+
+        if in_func_body {
+            func_brace_depth += trimmed.matches('{').count() as i32;
+            func_brace_depth -= trimmed.matches('}').count() as i32;
+
+            // Track local variable declarations inside the function
+            if trimmed.contains('=') && !trimmed.starts_with("return")
+                && !trimmed.starts_with("if") && !trimmed.starts_with("for")
+            {
+                // Extract potential variable name before '='
+                if let Some(eq_pos) = trimmed.find('=') {
+                    let before_eq = trimmed[..eq_pos].trim();
+                    // Last token before '=' is the variable name
+                    if let Some(var) = before_eq.split_whitespace().last() {
+                        let clean = var.trim_start_matches('*').trim_start_matches('&');
+                        if !clean.is_empty() && clean.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                            local_vars.push(clean.to_string());
+                        }
+                    }
+                }
+            }
+
+            // Look for return statements that construct views from locals
+            if func_returns_view && trimmed.starts_with("return ") {
+                let return_expr = &trimmed["return ".len()..].trim_end_matches(';').trim();
+
+                // Check if return expr is a known local variable name
+                let is_local_var = local_vars.iter().any(|v| v == return_expr);
+
+                // Also flag explicit view construction from a local
+                let constructs_view = VIEW_TYPES.iter().any(|vt| return_expr.contains(vt));
+
+                if is_local_var || constructs_view {
+                    let loc = SourceLocation::new(
+                        file_path, line_idx + 1, 1, line_idx + 1, trimmed.len(),
+                    );
+                    findings.push(make_finding("LIFE-004", loc, trimmed.to_string()));
+                }
+            }
+
+            if func_brace_depth <= 0 {
+                in_func_body = false;
+                func_returns_view = false;
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Iterator Invalidation Checker (§2.2.2 D3390)
+// =============================================================================
+
+/// Methods that invalidate iterators/references on sequence containers.
+const INVALIDATING_METHODS: &[&str] = &[
+    "push_back", "emplace_back", "push_front", "emplace_front",
+    "insert", "emplace", "erase", "clear", "resize", "reserve",
+    "assign", "pop_back", "pop_front",
+];
+
+fn check_iterator_invalidation(
+    source_str: &str,
+    file_path: &str,
+    is_cpp: bool,
+    findings: &mut Vec<CppSafetyFinding>,
+) {
+    if !is_cpp {
+        return;
+    }
+
+    check_range_for_invalidation(source_str, file_path, findings);
+    check_iterator_loop_invalidation(source_str, file_path, findings);
+}
+
+/// LIFE-005: Range-for loop body mutates the iterated container.
+///
+/// Detects: `for (auto& x : vec) { vec.push_back(...); }`
+fn check_range_for_invalidation(
+    source_str: &str,
+    file_path: &str,
+    findings: &mut Vec<CppSafetyFinding>,
+) {
+    let lines: Vec<&str> = source_str.lines().collect();
+
+    for (line_idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+
+        // Match range-for: for (...keyword... : container_name)
+        if !trimmed.starts_with("for ") && !trimmed.starts_with("for(") {
+            continue;
+        }
+
+        // Extract the container name after ':'
+        let Some(colon_pos) = trimmed.find(':') else { continue };
+        let after_colon = &trimmed[colon_pos + 1..];
+        // Trim to closing paren
+        let Some(paren_pos) = after_colon.find(')') else { continue };
+        let container = after_colon[..paren_pos].trim();
+
+        // Container must be a simple identifier (not a function call or complex expression)
+        if container.is_empty()
+            || container.contains('(')
+            || container.contains('<')
+            || container.contains('"')
+            || !container.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+
+        // Scan the loop body for mutations on this container
+        let mut brace_depth = 0i32;
+        let mut started = false;
+
+        for body_line_idx in line_idx..lines.len() {
+            let body_trimmed = lines[body_line_idx].trim();
+            brace_depth += body_trimmed.matches('{').count() as i32;
+            brace_depth -= body_trimmed.matches('}').count() as i32;
+
+            if body_trimmed.contains('{') {
+                started = true;
+            }
+
+            if started && brace_depth <= 0 {
+                break;
+            }
+
+            if !started {
+                continue;
+            }
+
+            // Look for container.invalidating_method(
+            for method in INVALIDATING_METHODS {
+                let pattern = format!("{container}.{method}(");
+                if body_trimmed.contains(&pattern) {
+                    let loc = SourceLocation::new(
+                        file_path,
+                        body_line_idx + 1,
+                        1,
+                        body_line_idx + 1,
+                        body_trimmed.len(),
+                    );
+                    let mut finding = make_finding("LIFE-005", loc, body_trimmed.to_string());
+                    finding.metadata.insert("container".to_string(), container.to_string());
+                    finding.metadata.insert("method".to_string(), method.to_string());
+                    findings.push(finding);
+                }
+            }
+        }
+    }
+}
+
+/// LIFE-006: Iterator loop body mutates the container the iterator came from.
+///
+/// Detects: `for (auto it = vec.begin(); it != vec.end(); ++it) { vec.push_back(...); }`
+fn check_iterator_loop_invalidation(
+    source_str: &str,
+    file_path: &str,
+    findings: &mut Vec<CppSafetyFinding>,
+) {
+    let lines: Vec<&str> = source_str.lines().collect();
+
+    for (line_idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+
+        if !trimmed.starts_with("for ") && !trimmed.starts_with("for(") {
+            continue;
+        }
+
+        // Look for .begin() or .cbegin() in the for-init
+        let container = extract_iterator_container(trimmed);
+        let Some(container) = container else { continue };
+
+        // Scan loop body
+        let mut brace_depth = 0i32;
+        let mut started = false;
+
+        for body_line_idx in line_idx..lines.len() {
+            let body_trimmed = lines[body_line_idx].trim();
+            brace_depth += body_trimmed.matches('{').count() as i32;
+            brace_depth -= body_trimmed.matches('}').count() as i32;
+
+            if body_trimmed.contains('{') {
+                started = true;
+            }
+
+            if started && brace_depth <= 0 {
+                break;
+            }
+
+            if !started || body_line_idx == line_idx {
+                continue;
+            }
+
+            for method in INVALIDATING_METHODS {
+                let pattern = format!("{container}.{method}(");
+                if body_trimmed.contains(&pattern) {
+                    let loc = SourceLocation::new(
+                        file_path,
+                        body_line_idx + 1,
+                        1,
+                        body_line_idx + 1,
+                        body_trimmed.len(),
+                    );
+                    let mut finding = make_finding("LIFE-006", loc, body_trimmed.to_string());
+                    finding.metadata.insert("container".to_string(), container.to_string());
+                    finding.metadata.insert("method".to_string(), method.to_string());
+                    findings.push(finding);
+                }
+            }
+        }
+    }
+}
+
+/// Extract container name from iterator-based for loop init.
+/// Looks for patterns like `container.begin()`, `container.cbegin()`, `std::begin(container)`.
+fn extract_iterator_container(for_line: &str) -> Option<String> {
+    // Pattern: something.begin() or something.cbegin()
+    for begin_fn in &[".begin()", ".cbegin()", ".rbegin()"] {
+        if let Some(pos) = for_line.find(begin_fn) {
+            // Walk backwards from '.' to find the container name
+            let before_dot = &for_line[..pos];
+            // Last token is the container
+            let container = before_dot.split(|c: char| !c.is_alphanumeric() && c != '_')
+                .filter(|s| !s.is_empty())
+                .last()?;
+            if container.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                return Some(container.to_string());
+            }
+        }
+    }
+    None
+}
+
+// =============================================================================
+// Initializer List Dangling Checker (§2.2.3 D3390)
+// =============================================================================
+
+fn check_initializer_list_dangling(
+    source_str: &str,
+    file_path: &str,
+    is_cpp: bool,
+    findings: &mut Vec<CppSafetyFinding>,
+) {
+    if !is_cpp {
+        return;
+    }
+
+    let mut in_struct = false;
+    let mut brace_depth = 0i32;
+    let mut in_function = false;
+    let mut func_brace_depth = 0i32;
+
+    for (line_idx, line) in source_str.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+            continue;
+        }
+
+        // Track struct scope for LIFE-010
+        if (trimmed.starts_with("struct ") || trimmed.starts_with("class "))
+            && (trimmed.contains('{') || !trimmed.contains(';'))
+        {
+            in_struct = true;
+            brace_depth = 0;
+        }
+
+        if in_struct {
+            brace_depth += trimmed.matches('{').count() as i32;
+            brace_depth -= trimmed.matches('}').count() as i32;
+
+            if brace_depth <= 0 && trimmed.contains('}') {
+                in_struct = false;
+            }
+
+            // LIFE-010: initializer_list as class member
+            if brace_depth == 1 && trimmed.contains("initializer_list")
+                && !trimmed.contains('(')  // not a method
+                && !trimmed.starts_with("friend")
+                && !trimmed.starts_with("using")
+            {
+                let col = trimmed.find("initializer_list").unwrap_or(0);
+                let loc = SourceLocation::new(
+                    file_path, line_idx + 1, col + 1, line_idx + 1, trimmed.len(),
+                );
+                findings.push(make_finding("LIFE-010", loc, trimmed.to_string()));
+            }
+        }
+
+        // Track function scope for LIFE-008
+        if !in_function && trimmed.contains('(') && trimmed.contains('{')
+            && !trimmed.starts_with("struct") && !trimmed.starts_with("class")
+            && !trimmed.starts_with("enum") && !trimmed.starts_with("namespace")
+        {
+            in_function = true;
+            func_brace_depth = 0;
+        }
+
+        if in_function {
+            func_brace_depth += trimmed.matches('{').count() as i32;
+            func_brace_depth -= trimmed.matches('}').count() as i32;
+
+            // LIFE-008: Local variable of type initializer_list
+            if trimmed.contains("initializer_list") && trimmed.contains('=') {
+                let col = trimmed.find("initializer_list").unwrap_or(0);
+                let loc = SourceLocation::new(
+                    file_path, line_idx + 1, col + 1, line_idx + 1, trimmed.len(),
+                );
+                findings.push(make_finding("LIFE-008", loc, trimmed.to_string()));
+            }
+
+            if func_brace_depth <= 0 {
+                in_function = false;
+            }
+        }
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -2583,5 +3229,205 @@ auto y = reinterpret_cast<float*>(z);
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), original_len, "Duplicate rule IDs found");
+    }
+
+    // ── Lifetime Safety tests (LIFE-001 to LIFE-004) ─────────────────────
+
+    #[test]
+    fn test_life001_string_view_from_temp_string() {
+        let findings = scan_cpp(r#"
+void foo() {
+    std::string_view sv = std::string("hello");
+}
+"#);
+        let life = findings_with_rule(&findings, "LIFE-001");
+        assert!(!life.is_empty(), "Should flag string_view from temporary std::string");
+    }
+
+    #[test]
+    fn test_life001_string_view_from_substr() {
+        let findings = scan_cpp(r#"
+void foo(std::string s) {
+    std::string_view sv = s.substr(0, 5);
+}
+"#);
+        let life = findings_with_rule(&findings, "LIFE-001");
+        assert!(!life.is_empty(), "Should flag string_view from substr (returns temp)");
+    }
+
+    #[test]
+    fn test_life001_string_view_from_named_ok() {
+        let findings = scan_cpp(r#"
+void foo() {
+    std::string s = "hello";
+    std::string_view sv = s;
+}
+"#);
+        let life = findings_with_rule(&findings, "LIFE-001");
+        assert!(life.is_empty(), "Should NOT flag string_view from named variable");
+    }
+
+    #[test]
+    fn test_life002_span_from_temp_vector() {
+        let findings = scan_cpp(r#"
+void foo() {
+    std::span<int> s = std::vector<int>{1, 2, 3};
+}
+"#);
+        let life = findings_with_rule(&findings, "LIFE-002");
+        assert!(!life.is_empty(), "Should flag span from temporary vector");
+    }
+
+    #[test]
+    fn test_life003_view_as_class_member() {
+        let findings = scan_cpp(r#"
+struct Config {
+    std::string_view name;
+    int value;
+};
+"#);
+        let life = findings_with_rule(&findings, "LIFE-003");
+        assert!(!life.is_empty(), "Should flag string_view as class member");
+    }
+
+    #[test]
+    fn test_life003_string_member_ok() {
+        let findings = scan_cpp(r#"
+struct Config {
+    std::string name;
+    int value;
+};
+"#);
+        let life = findings_with_rule(&findings, "LIFE-003");
+        assert!(life.is_empty(), "Should NOT flag std::string as member");
+    }
+
+    #[test]
+    fn test_life004_return_view_to_local() {
+        let findings = scan_cpp(r#"
+std::string_view get_name() {
+    std::string s = "hello";
+    return s;
+}
+"#);
+        let life = findings_with_rule(&findings, "LIFE-004");
+        assert!(!life.is_empty(), "Should flag returning string_view to local");
+    }
+
+    #[test]
+    fn test_life004_return_string_ok() {
+        let findings = scan_cpp(r#"
+std::string get_name() {
+    std::string s = "hello";
+    return s;
+}
+"#);
+        let life = findings_with_rule(&findings, "LIFE-004");
+        assert!(life.is_empty(), "Should NOT flag returning std::string (owning)");
+    }
+
+    // ── Iterator Invalidation tests (LIFE-005 to LIFE-007) ───────────────
+
+    #[test]
+    fn test_life005_range_for_push_back() {
+        let findings = scan_cpp(r#"
+void foo(std::vector<int>& vec) {
+    for (auto& x : vec) {
+        if (x > 0) vec.push_back(x * 2);
+    }
+}
+"#);
+        let life = findings_with_rule(&findings, "LIFE-005");
+        assert!(!life.is_empty(), "Should flag push_back during range-for");
+    }
+
+    #[test]
+    fn test_life005_range_for_erase() {
+        let findings = scan_cpp(r#"
+void foo(std::vector<int>& vec) {
+    for (auto& x : vec) {
+        vec.erase(vec.begin());
+    }
+}
+"#);
+        let life = findings_with_rule(&findings, "LIFE-005");
+        assert!(!life.is_empty(), "Should flag erase during range-for");
+    }
+
+    #[test]
+    fn test_life005_range_for_read_ok() {
+        let findings = scan_cpp(r#"
+void foo(std::vector<int>& vec) {
+    for (auto& x : vec) {
+        int y = vec.size();
+    }
+}
+"#);
+        let life = findings_with_rule(&findings, "LIFE-005");
+        assert!(life.is_empty(), "Should NOT flag read-only access during range-for");
+    }
+
+    #[test]
+    fn test_life006_iterator_loop_push_back() {
+        let findings = scan_cpp(r#"
+void foo(std::vector<int>& vec) {
+    for (auto it = vec.begin(); it != vec.end(); ++it) {
+        vec.push_back(*it);
+    }
+}
+"#);
+        let life = findings_with_rule(&findings, "LIFE-006");
+        assert!(!life.is_empty(), "Should flag push_back during iterator loop");
+    }
+
+    #[test]
+    fn test_life006_iterator_loop_no_mutation_ok() {
+        let findings = scan_cpp(r#"
+void foo(std::vector<int>& vec) {
+    for (auto it = vec.begin(); it != vec.end(); ++it) {
+        std::cout << *it;
+    }
+}
+"#);
+        let life = findings_with_rule(&findings, "LIFE-006");
+        assert!(life.is_empty(), "Should NOT flag read-only iterator loop");
+    }
+
+    // ── Initializer List Dangling tests (LIFE-008 to LIFE-010) ───────────
+
+    #[test]
+    fn test_life008_local_initializer_list() {
+        let findings = scan_cpp(r#"
+void foo() {
+    std::initializer_list<int> il = {1, 2, 3};
+    use(il);
+}
+"#);
+        let life = findings_with_rule(&findings, "LIFE-008");
+        assert!(!life.is_empty(), "Should flag local initializer_list variable");
+    }
+
+    #[test]
+    fn test_life010_member_initializer_list() {
+        let findings = scan_cpp(r#"
+struct Widget {
+    std::initializer_list<int> values;
+    int count;
+};
+"#);
+        let life = findings_with_rule(&findings, "LIFE-010");
+        assert!(!life.is_empty(), "Should flag initializer_list as class member");
+    }
+
+    #[test]
+    fn test_life010_vector_member_ok() {
+        let findings = scan_cpp(r#"
+struct Widget {
+    std::vector<int> values;
+    int count;
+};
+"#);
+        let life = findings_with_rule(&findings, "LIFE-010");
+        assert!(life.is_empty(), "Should NOT flag std::vector member");
     }
 }
