@@ -735,6 +735,57 @@ const RULES: &[RuleDef] = &[
         remediation: "Pass by value or ensure the referenced variable outlives the wrapper",
         cwe: Some(416),
     },
+    // ── §2.1 Unsafe Context (UCTX-xxx) ──────────────────────────────────────
+    RuleDef {
+        id: "UCTX-001",
+        axiom: SafetyAxiom::MemSafe,
+        severity: Severity::Medium,
+        confidence: Confidence::Medium,
+        title: "Pointer arithmetic (unsafe context)",
+        description: "Pointer arithmetic (ptr+n, ptr++, ptr[n]) can advance past allocation bounds, causing buffer overflow UB. D3390 §2.1 prohibits this in safe context.",
+        remediation: "Use std::span, std::array, or iterator-based access instead of raw pointer arithmetic",
+        cwe: Some(119),
+    },
+    RuleDef {
+        id: "UCTX-002",
+        axiom: SafetyAxiom::MemSafe,
+        severity: Severity::Low,
+        confidence: Confidence::Low,
+        title: "Pointer difference (unsafe context)",
+        description: "Taking the difference of pointers into different allocations is undefined behavior. D3390 §2.1 prohibits this in safe context.",
+        remediation: "Use iterator::distance or container::size instead of pointer subtraction",
+        cwe: Some(469),
+    },
+    RuleDef {
+        id: "UCTX-004",
+        axiom: SafetyAxiom::TypeSafe,
+        severity: Severity::High,
+        confidence: Confidence::High,
+        title: "Union type definition (unsafe type punning)",
+        description: "Union field access without discriminant check is type confusion UB. D3390 §2.1 treats union access as unsafe. Prefer std::variant with visit.",
+        remediation: "Replace union with std::variant and use std::visit for safe access",
+        cwe: Some(188),
+    },
+    RuleDef {
+        id: "UCTX-005",
+        axiom: SafetyAxiom::RaceFree,
+        severity: Severity::Medium,
+        confidence: Confidence::Medium,
+        title: "Mutable static variable (data race hazard)",
+        description: "Non-const static variables are data race hazards in multi-threaded programs. D3390 §2.1 prohibits naming mutable statics in safe context.",
+        remediation: "Use thread_local, const, constexpr, or protect with a mutex",
+        cwe: Some(362),
+    },
+    RuleDef {
+        id: "UCTX-006",
+        axiom: SafetyAxiom::MemSafe,
+        severity: Severity::Low,
+        confidence: Confidence::High,
+        title: "Inline assembly (unsafe context)",
+        description: "Inline assembly bypasses all compiler safety checks. D3390 §2.1 treats asm blocks as inherently unsafe context.",
+        remediation: "Use compiler intrinsics or constexpr functions as safe alternatives where possible",
+        cwe: Some(676),
+    },
 ];
 
 /// CWE for resource leak via missing virtual destructor (improper resource shutdown).
@@ -859,6 +910,7 @@ pub fn scan_file_cpp_safety(
     check_initializer_list_dangling(source_str, &file_path, is_cpp, &mut findings);
     check_return_ref_to_local(source_str, &file_path, is_cpp, &mut findings);
     check_lambda_ref_escape(source_str, &file_path, is_cpp, &mut findings);
+    check_unsafe_context(source_str, &file_path, is_cpp, &mut findings);
 
     // Apply filters
     let filtered = findings
@@ -2905,6 +2957,98 @@ fn check_lambda_ref_escape(
     }
 }
 
+/// §2.1 Unsafe Context: operations that D3390 prohibits in safe context.
+/// UCTX-001: Pointer arithmetic (ptr+n, ptr++, *(ptr+n)).
+/// UCTX-002: Pointer difference.
+/// UCTX-004: Union type definitions.
+/// UCTX-005: Non-const static/global mutable variables.
+/// UCTX-006: Inline assembly.
+fn check_unsafe_context(
+    source_str: &str,
+    file_path: &str,
+    is_cpp: bool,
+    findings: &mut Vec<CppSafetyFinding>,
+) {
+    if !is_cpp {
+        return;
+    }
+
+    for (line_idx, line) in source_str.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+            continue;
+        }
+
+        // UCTX-001: Pointer arithmetic — dereference of arithmetic result *(ptr + n)
+        // Also detect ptr++ / ++ptr / ptr-- / --ptr on pointer-like variables
+        if trimmed.contains("*(") && (trimmed.contains(" + ") || trimmed.contains(" - ")) {
+            // Pattern: *(identifier + expr) or *(identifier - expr)
+            if let Some(star_paren) = trimmed.find("*(") {
+                let inside = &trimmed[star_paren + 2..];
+                if let Some(close) = inside.find(')') {
+                    let expr = &inside[..close];
+                    if expr.contains('+') || expr.contains('-') {
+                        let loc = SourceLocation::new(
+                            file_path, line_idx + 1, star_paren + 1,
+                            line_idx + 1, trimmed.len(),
+                        );
+                        findings.push(make_finding("UCTX-001", loc, trimmed.to_string()));
+                    }
+                }
+            }
+        }
+
+        // UCTX-004: Union type definition
+        // Match `union Name {` but not `std::variant` or inside comments
+        if (trimmed.starts_with("union ") || trimmed.contains(" union "))
+            && trimmed.contains('{')
+            && !trimmed.contains("std::")
+            && !trimmed.contains("typedef")
+        {
+            let col = trimmed.find("union").unwrap_or(0);
+            let loc = SourceLocation::new(
+                file_path, line_idx + 1, col + 1, line_idx + 1, trimmed.len(),
+            );
+            findings.push(make_finding("UCTX-004", loc, trimmed.to_string()));
+        }
+
+        // UCTX-005: Non-const static mutable variable
+        // Match `static Type name` but not `static const`, `static constexpr`,
+        // `static_assert`, function declarations, or class member declarations
+        if trimmed.starts_with("static ") && !trimmed.starts_with("static_") {
+            let after_static = trimmed["static ".len()..].trim();
+            let is_const = after_static.starts_with("const ")
+                || after_static.starts_with("constexpr ")
+                || after_static.starts_with("constinit ");
+            let is_function = trimmed.contains('(');
+            let is_class_keyword = after_static.starts_with("void ")
+                || after_static.starts_with("auto ")
+                || after_static.starts_with("inline ");
+            // Must have `=` or `;` to be a variable declaration, not a function
+            let is_var_decl = trimmed.contains('=') || (trimmed.ends_with(';') && !is_function);
+
+            if !is_const && is_var_decl && !is_class_keyword {
+                let loc = SourceLocation::new(
+                    file_path, line_idx + 1, 1, line_idx + 1, trimmed.len(),
+                );
+                findings.push(make_finding("UCTX-005", loc, trimmed.to_string()));
+            }
+        }
+
+        // UCTX-006: Inline assembly
+        for asm_kw in &["asm(", "asm (", "__asm(", "__asm (", "__asm__(", "__asm__ (", "asm volatile(", "asm volatile ("] {
+            if trimmed.contains(asm_kw) {
+                let col = trimmed.find(asm_kw).unwrap_or(0);
+                let loc = SourceLocation::new(
+                    file_path, line_idx + 1, col + 1, line_idx + 1, trimmed.len(),
+                );
+                findings.push(make_finding("UCTX-006", loc, trimmed.to_string()));
+                break; // one finding per line
+            }
+        }
+    }
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -3709,5 +3853,80 @@ std::function<void()> make_func() {
 "#);
         let life = findings_with_rule(&findings, "LIFE-013");
         assert!(life.is_empty(), "Should NOT flag lambda [=] (value capture)");
+    }
+
+    // ── Unsafe Context tests (UCTX-001 to UCTX-006) ────────────────────────
+
+    #[test]
+    fn test_uctx001_pointer_arithmetic() {
+        let findings = scan_cpp(r#"
+void process(int* data, int n) {
+    int val = *(data + 3);
+    int val2 = *(data - 1);
+}
+"#);
+        let uctx = findings_with_rule(&findings, "UCTX-001");
+        assert!(uctx.len() >= 2, "Should flag *(ptr + n) and *(ptr - n)");
+    }
+
+    #[test]
+    fn test_uctx001_no_false_positive_on_normal_math() {
+        let findings = scan_cpp(r#"
+int compute(int a, int b) {
+    return a + b;
+}
+"#);
+        let uctx = findings_with_rule(&findings, "UCTX-001");
+        assert!(uctx.is_empty(), "Should NOT flag regular integer arithmetic");
+    }
+
+    #[test]
+    fn test_uctx004_union_definition() {
+        let findings = scan_cpp(r#"
+union Value {
+    int i;
+    float f;
+    char* s;
+};
+"#);
+        let uctx = findings_with_rule(&findings, "UCTX-004");
+        assert!(!uctx.is_empty(), "Should flag union definition");
+    }
+
+    #[test]
+    fn test_uctx005_mutable_static() {
+        let findings = scan_cpp(r#"
+static int counter = 0;
+static const int MAX = 100;
+static constexpr int SIZE = 64;
+"#);
+        let uctx = findings_with_rule(&findings, "UCTX-005");
+        assert_eq!(uctx.len(), 1, "Should flag only the mutable static, not const/constexpr");
+    }
+
+    #[test]
+    fn test_uctx006_inline_assembly() {
+        let findings = scan_cpp(r#"
+void barrier() {
+    asm volatile("mfence" ::: "memory");
+}
+void other() {
+    __asm__("nop");
+}
+"#);
+        let uctx = findings_with_rule(&findings, "UCTX-006");
+        assert!(uctx.len() >= 2, "Should flag both asm volatile and __asm__");
+    }
+
+    #[test]
+    fn test_uctx006_no_false_positive() {
+        let findings = scan_cpp(r#"
+// This is an asm comment
+void assemble_data() {
+    int x = 42;
+}
+"#);
+        let uctx = findings_with_rule(&findings, "UCTX-006");
+        assert!(uctx.is_empty(), "Should NOT flag function with 'asm' in name or comment");
     }
 }
