@@ -76,10 +76,12 @@
 //! - `# security-ignore: <ID>`
 
 pub mod common;
+pub mod cpp_safety;
 pub mod crypto;
 pub mod deserialization;
 pub mod injection;
 pub mod input_validation;
+pub mod memory_safety;
 pub mod prototype_pollution;
 pub mod redos;
 pub mod sarif;
@@ -169,6 +171,7 @@ pub fn scan_security(path: impl AsRef<Path>, config: &SecurityConfig) -> Result<
             Box::new(|| run_log_injection_scan(path, config)),
             Box::new(|| run_header_injection_scan(path, config)),
             Box::new(|| run_template_injection_scan(path, config)),
+            Box::new(|| run_cpp_safety_scan(path, config)),
         ];
 
         let findings_per_analyzer: Vec<Vec<SecurityFinding>> =
@@ -190,6 +193,7 @@ pub fn scan_security(path: impl AsRef<Path>, config: &SecurityConfig) -> Result<
         all_findings.extend(run_log_injection_scan(path, config));
         all_findings.extend(run_header_injection_scan(path, config));
         all_findings.extend(run_template_injection_scan(path, config));
+        all_findings.extend(run_cpp_safety_scan(path, config));
     }
 
     // Apply suppression detection by reading source files
@@ -1084,6 +1088,69 @@ fn convert_template_confidence(conf: injection::template_injection::Confidence) 
         injection::template_injection::Confidence::Medium => Confidence::Medium,
         injection::template_injection::Confidence::Low => Confidence::Low,
     }
+}
+
+/// Run C++ safety axiom analyzer and convert to unified findings.
+fn run_cpp_safety_scan(path: &Path, config: &SecurityConfig) -> Vec<SecurityFinding> {
+    if let Some(ref cats) = config.categories {
+        if !cats.iter().any(|c| {
+            c.to_lowercase().contains("cpp")
+                || c.to_lowercase().contains("c++")
+                || c.to_lowercase().contains("safety")
+                || c.to_lowercase().contains("memory")
+                || c.to_lowercase() == "all"
+        }) {
+            return Vec::new();
+        }
+    }
+
+    let cpp_config = cpp_safety::CppSafetyConfig::default();
+
+    let findings = if path.is_file() {
+        match cpp_safety::scan_file_cpp_safety(path, &cpp_config) {
+            Ok(f) => f,
+            Err(_) => return Vec::new(),
+        }
+    } else {
+        match cpp_safety::scan_cpp_safety(path, &cpp_config) {
+            Ok(report) => report.findings,
+            Err(_) => return Vec::new(),
+        }
+    };
+
+    findings
+        .into_iter()
+        .map(|f| {
+            let category = SecurityCategory::Other(format!("CppSafety:{}", f.axiom));
+            let mut finding = SecurityFinding::new(
+                f.rule_id,
+                category,
+                f.severity,
+                f.confidence,
+                Location::new(
+                    &f.location.file,
+                    f.location.line,
+                    f.location.column,
+                    f.location.end_line,
+                    f.location.end_column,
+                ),
+                f.title,
+                f.description,
+            )
+            .with_remediation(f.remediation)
+            .with_code_snippet(f.code_snippet);
+
+            if let Some(cwe) = f.cwe_id {
+                finding = finding.with_cwe(cwe);
+            }
+
+            for (k, v) in f.metadata {
+                finding = finding.with_metadata(&k, v);
+            }
+
+            finding
+        })
+        .collect()
 }
 
 impl Confidence {

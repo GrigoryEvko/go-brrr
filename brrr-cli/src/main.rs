@@ -2292,6 +2292,55 @@ enum SecurityCommands {
         #[arg(long, value_enum, default_value = "json")]
         format: OutputFormat,
     },
+
+    /// C++26 Safety Axiom Analyzer (38 rules across 9 categories)
+    #[command(
+        name = "cpp-safety",
+        about = "Enforce C++ safety axioms (MemSafe, TypeSafe, NullSafe, RaceFree, etc.)",
+        long_about = "C++26 Safety Axiom Analyzer — enforces 7 Crucible safety axioms\n\
+            plus performance and anti-pattern rules (38 rules total).\n\n\
+            Safety Axioms:\n\
+            - MemSafe (Critical): No UAF, double-free, buffer overflow\n\
+            - TypeSafe (High): No type confusion or category errors\n\
+            - RaceFree (High): No data races on shared mutable state\n\
+            - NullSafe (Medium): No null pointer dereference\n\
+            - InitSafe (Medium): Every value initialized before first read\n\
+            - LeakFree (Low): No resource leaks\n\
+            - DetDrop (Low): Deterministic destruction order\n\n\
+            Supplementary:\n\
+            - Performance: False sharing, unnecessary allocations\n\
+            - AntiPattern: RTTI abuse, exception misuse\n\n\
+            Profiles:\n\
+            - crucible: Only the 7 safety axioms\n\
+            - standard: All categories (default)\n\n\
+            Examples:\n\
+            - brrr security cpp-safety src/                       # Scan C/C++ source\n\
+            - brrr security cpp-safety src/ --axiom mem            # Only MemSafe rules\n\
+            - brrr security cpp-safety src/ --profile crucible     # Safety axioms only\n\
+            - brrr security cpp-safety src/ --min-severity high    # High+ only\n\
+            - brrr security cpp-safety file.cpp --format text      # Human-readable"
+    )]
+    CppSafety {
+        /// Path to file or directory to scan
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Filter to a specific axiom (init, type, null, mem, race, leak, det, perf, anti)
+        #[arg(long)]
+        axiom: Option<String>,
+
+        /// Analysis profile (crucible = axioms only, standard = all)
+        #[arg(long, default_value = "standard")]
+        profile: String,
+
+        /// Minimum severity to report (low, medium, high, critical)
+        #[arg(long, default_value = "low")]
+        min_severity: String,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "json")]
+        format: OutputFormat,
+    },
 }
 
 // =============================================================================
@@ -4301,14 +4350,13 @@ fn cmd_structure(
     // Validate path exists and is a directory
     require_directory(path)?;
 
-    // Auto-detect language if not specified
-    let lang_str = lang
-        .map(|l| l.to_string())
-        .unwrap_or_else(|| detect_project_language(path));
+    // Only pass a language filter when the user explicitly specified --lang.
+    // Without --lang, code_structure scans all supported languages.
+    let lang_str = lang.map(|l| l.to_string());
 
     let result = ast::code_structure(
         path.to_str().context("Invalid path")?,
-        Some(&lang_str),
+        lang_str.as_deref(),
         limit,
         no_ignore,
     )
@@ -4768,17 +4816,17 @@ fn cmd_calls(
     // Validate path exists and is a directory
     require_directory(path)?;
 
-    // Resolve project root (walks up to find .git, Cargo.toml, etc.)
-    let project_root = resolve_project_root(path);
-
-    // Auto-detect language if not specified
+    // Auto-detect language from the USER's path (not the git root).
+    // detect_project_language on the git root would pick "python" for pytorch
+    // even when the user asks to analyze c10/core/ which is pure C++.
     let detected_lang = lang
         .map(|l| l.to_string())
-        .unwrap_or_else(|| detect_project_language(&project_root));
+        .unwrap_or_else(|| detect_project_language(path));
 
-    // Use cached graph with incremental updates, respecting no_ignore flag
+    // Build graph from the user's path — scan only the directory they asked for.
+    // resolve_project_root would walk up to the git root and scan the entire repo.
     let graph =
-        callgraph::get_or_build_graph_with_config(&project_root, Some(&detected_lang), no_ignore)
+        callgraph::get_or_build_graph_with_config(path, Some(&detected_lang), no_ignore)
             .context("Failed to build call graph")?;
 
     match format {
@@ -4848,17 +4896,14 @@ fn cmd_impact(
     // Validate path exists and is a directory
     require_directory(path)?;
 
-    // Resolve project root (walks up to find .git, Cargo.toml, etc.)
-    let project_root = resolve_project_root(path);
-
-    // Auto-detect language if not specified
+    // Auto-detect language from the user's path, not the git root
     let detected_lang = lang
         .map(|l| l.to_string())
-        .unwrap_or_else(|| detect_project_language(&project_root));
+        .unwrap_or_else(|| detect_project_language(path));
 
-    // Build graph with no_ignore support
+    // Build graph from the user's path
     let graph =
-        callgraph::get_or_build_graph_with_config(&project_root, Some(&detected_lang), no_ignore)
+        callgraph::get_or_build_graph_with_config(path, Some(&detected_lang), no_ignore)
             .context("Failed to build call graph")?;
 
     // Analyze impact using the graph
@@ -4916,17 +4961,14 @@ fn cmd_dead(
     // Validate path exists and is a directory
     require_directory(path)?;
 
-    // Resolve project root (walks up to find .git, Cargo.toml, etc.)
-    let project_root = resolve_project_root(path);
-
-    // Set language-specific heuristics: use provided language or auto-detect
+    // Auto-detect language from the user's path, not the git root
     let detected_lang = lang
         .map(|l| l.to_string())
-        .unwrap_or_else(|| detect_project_language(&project_root));
+        .unwrap_or_else(|| detect_project_language(path));
 
-    // Build graph with no_ignore support
+    // Build graph from the user's path
     let mut graph =
-        callgraph::get_or_build_graph_with_config(&project_root, Some(&detected_lang), no_ignore)
+        callgraph::get_or_build_graph_with_config(path, Some(&detected_lang), no_ignore)
             .context("Failed to build call graph")?;
     graph.build_indexes();
 
@@ -5011,18 +5053,16 @@ fn cmd_arch(path: &PathBuf, lang: Option<Language>, no_ignore: bool) -> Result<(
     // Validate path exists and is a directory
     require_directory(path)?;
 
-    // Resolve project root (walks up to find .git, Cargo.toml, etc.)
-    let project_root = resolve_project_root(path);
-    let path_str = project_root.to_str().context("Invalid path")?;
+    let path_str = path.to_str().context("Invalid path")?;
 
-    // Auto-detect language if not specified
+    // Auto-detect language from the user's path, not the git root
     let detected_lang = lang
         .map(|l| l.to_string())
-        .unwrap_or_else(|| detect_project_language(&project_root));
+        .unwrap_or_else(|| detect_project_language(path));
 
-    // Build graph with no_ignore support
+    // Build graph from the user's path — scan only what they asked for
     let mut graph =
-        callgraph::get_or_build_graph_with_config(&project_root, Some(&detected_lang), no_ignore)
+        callgraph::get_or_build_graph_with_config(path, Some(&detected_lang), no_ignore)
             .context("Failed to build call graph")?;
     graph.build_indexes();
 
@@ -5118,17 +5158,15 @@ fn cmd_importers(
     lang: Option<Language>,
     no_ignore: bool,
 ) -> Result<()> {
-    // Resolve project root (walks up to find .git, Cargo.toml, etc.)
-    let project_root = resolve_project_root(path);
-    let path_str = project_root.to_str().context("Invalid path")?;
+    let path_str = path.to_str().context("Invalid path")?;
 
     // Build scanner configuration
     let mut config = callgraph::scanner::ScanConfig::default();
 
-    // Apply language filter: use specified or auto-detect
+    // Apply language filter: use specified or auto-detect from user's path
     let lang_str = lang
         .map(|l| l.to_string().to_lowercase())
-        .unwrap_or_else(|| detect_project_language(&project_root));
+        .unwrap_or_else(|| detect_project_language(path));
     config.language = Some(lang_str.clone());
 
     // Apply no_ignore flag to bypass .gitignore/.brrrignore patterns
@@ -5157,7 +5195,7 @@ fn cmd_importers(
             if import_matches_module(imp, module) {
                 // Compute relative path for cleaner output
                 let rel_path = file_path
-                    .strip_prefix(&project_root)
+                    .strip_prefix(path)
                     .unwrap_or(file_path)
                     .display()
                     .to_string();
@@ -5175,7 +5213,7 @@ fn cmd_importers(
 
     let result = serde_json::json!({
         "module": module,
-        "root": project_root.display().to_string(),
+        "root": path.display().to_string(),
         "language": lang_str,
         "importers": importers,
         "count": importers.len(),
@@ -5608,9 +5646,8 @@ fn cmd_change_impact(
     // Get language registry for detection
     let registry = lang::LanguageRegistry::global();
 
-    // Project-level language detection as fallback
-    let project_root = resolve_project_root(project);
-    let project_lang = detect_project_language(&project_root);
+    // Project-level language detection as fallback (use user's path, not git root)
+    let project_lang = detect_project_language(project);
 
     for file in &changed_files {
         // Skip non-source files
@@ -8017,6 +8054,15 @@ fn cmd_security(subcmd: SecurityCommands) -> Result<()> {
         SecurityCommands::MemorySafety { path, lang, format } => {
             cmd_memory_safety(&path, lang, format)?;
         }
+        SecurityCommands::CppSafety {
+            path,
+            axiom,
+            profile,
+            min_severity,
+            format,
+        } => {
+            cmd_cpp_safety(&path, axiom, &profile, &min_severity, format)?;
+        }
     }
     Ok(())
 }
@@ -10262,6 +10308,101 @@ fn cmd_memory_safety(
                     );
                     println!("   Pattern: {}", finding.pattern);
                     println!("   CWE: CWE-{}", finding.cwe_id);
+                    println!("   Description: {}", finding.description);
+                    if !finding.code_snippet.is_empty() {
+                        println!("   Code:");
+                        for line in finding.code_snippet.lines() {
+                            println!("     | {}", line);
+                        }
+                    }
+                    println!("   Remediation: {}", finding.remediation);
+                    println!();
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_cpp_safety(
+    path: &PathBuf,
+    axiom: Option<String>,
+    profile: &str,
+    min_severity: &str,
+    format: OutputFormat,
+) -> Result<()> {
+    require_exists(path)?;
+
+    let axiom_filter = axiom
+        .map(|a| {
+            a.parse::<security::cpp_safety::SafetyAxiom>()
+                .map_err(|e| anyhow::anyhow!("{}", e))
+        })
+        .transpose()?;
+
+    let profile = profile
+        .parse::<security::cpp_safety::CppSafetyProfile>()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let severity = min_severity
+        .parse::<security::Severity>()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let config = security::cpp_safety::CppSafetyConfig {
+        axiom_filter,
+        profile,
+        min_severity: severity,
+    };
+
+    let report = security::cpp_safety::scan_cpp_safety(path, &config)
+        .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
+
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).context("Failed to serialize")?
+            );
+        }
+        OutputFormat::Text | OutputFormat::Mermaid | OutputFormat::Dot | OutputFormat::Csv => {
+            println!("C++26 Safety Axiom Analysis");
+            println!("===========================");
+            println!(
+                "Files scanned: {}  |  Total findings: {}  |  Profile: {:?}",
+                report.files_scanned,
+                report.findings.len(),
+                config.profile
+            );
+            println!();
+
+            if !report.axiom_summary.is_empty() {
+                println!("By Axiom:");
+                let mut axioms: Vec<_> = report.axiom_summary.iter().collect();
+                axioms.sort_by(|a, b| b.1.cmp(a.1));
+                for (axiom, count) in axioms {
+                    println!("  {}: {}", axiom, count);
+                }
+                println!();
+            }
+
+            if report.findings.is_empty() {
+                println!("No safety axiom violations detected.");
+            } else {
+                for (i, finding) in report.findings.iter().enumerate() {
+                    println!(
+                        "{}. [{}] {} ({}) - {}:{}",
+                        i + 1,
+                        finding.severity,
+                        finding.rule_id,
+                        finding.axiom,
+                        finding.location.file,
+                        finding.location.line
+                    );
+                    println!("   {}", finding.title);
+                    if let Some(cwe) = finding.cwe_id {
+                        println!("   CWE: CWE-{}", cwe);
+                    }
                     println!("   Description: {}", finding.description);
                     if !finding.code_snippet.is_empty() {
                         println!("   Code:");
