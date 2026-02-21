@@ -703,6 +703,38 @@ const RULES: &[RuleDef] = &[
         remediation: "Use std::vector<T> or std::array<T, N> as the member type",
         cwe: Some(416),
     },
+
+    // ── Return Reference/Pointer to Local (§2.2 D3390) ────────────────────
+    RuleDef {
+        id: "LIFE-011",
+        axiom: SafetyAxiom::MemSafe,
+        severity: Severity::Critical,
+        confidence: Confidence::High,
+        title: "Returning reference or pointer to local variable",
+        description: "Function returns reference or pointer to a local variable; the variable is destroyed when the function returns, creating a dangling reference.",
+        remediation: "Return by value, use an output parameter, or allocate on the heap",
+        cwe: Some(562),
+    },
+    RuleDef {
+        id: "LIFE-013",
+        axiom: SafetyAxiom::MemSafe,
+        severity: Severity::High,
+        confidence: Confidence::Medium,
+        title: "Lambda capturing by reference escapes function scope",
+        description: "A lambda with [&] capture that is returned, stored in std::function, or passed to async/thread creates dangling references when the enclosing scope exits.",
+        remediation: "Capture by value [=] or explicitly capture needed variables by value",
+        cwe: Some(416),
+    },
+    RuleDef {
+        id: "LIFE-014",
+        axiom: SafetyAxiom::MemSafe,
+        severity: Severity::High,
+        confidence: Confidence::Medium,
+        title: "std::ref/std::cref wrapping local variable",
+        description: "std::reference_wrapper wrapping a local variable that escapes scope creates a dangling reference.",
+        remediation: "Pass by value or ensure the referenced variable outlives the wrapper",
+        cwe: Some(416),
+    },
 ];
 
 /// CWE for resource leak via missing virtual destructor (improper resource shutdown).
@@ -825,6 +857,8 @@ pub fn scan_file_cpp_safety(
     check_lifetime_safety(source_str, &file_path, is_cpp, &mut findings);
     check_iterator_invalidation(source_str, &file_path, is_cpp, &mut findings);
     check_initializer_list_dangling(source_str, &file_path, is_cpp, &mut findings);
+    check_return_ref_to_local(source_str, &file_path, is_cpp, &mut findings);
+    check_lambda_ref_escape(source_str, &file_path, is_cpp, &mut findings);
 
     // Apply filters
     let filtered = findings
@@ -2690,6 +2724,188 @@ fn check_initializer_list_dangling(
 }
 
 // =============================================================================
+// Return Reference/Pointer to Local Checker (§2.2 D3390)
+// =============================================================================
+
+/// LIFE-011: Function returning reference or pointer to a local variable.
+fn check_return_ref_to_local(
+    source_str: &str,
+    file_path: &str,
+    is_cpp: bool,
+    findings: &mut Vec<CppSafetyFinding>,
+) {
+    if !is_cpp {
+        return;
+    }
+
+    let lines: Vec<&str> = source_str.lines().collect();
+    let mut func_returns_ref = false;
+    let mut func_returns_ptr = false;
+    let mut in_func_body = false;
+    let mut func_brace_depth = 0i32;
+    let mut local_vars: Vec<String> = Vec::new();
+
+    for (line_idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+
+        // Detect function returning reference or pointer
+        if !in_func_body {
+            // Skip lambda expressions — they have [capture] before (params)
+            let is_lambda = trimmed.contains("[&]") || trimmed.contains("[=]")
+                || trimmed.contains("[this]") || trimmed.contains("[&,")
+                || trimmed.contains(", &]") || trimmed.contains("[=,");
+
+            if !is_lambda {
+                // Check for reference return: T& func( or const T& func(
+                let returns_ref = (trimmed.contains("& ") || trimmed.contains("&\t"))
+                    && trimmed.contains('(')
+                    && !trimmed.starts_with("//")
+                    && !trimmed.contains("operator")
+                    // Ensure & is in return type, not parameter
+                    && trimmed.find('&').unwrap_or(usize::MAX)
+                        < trimmed.find('(').unwrap_or(0);
+
+                // Check for pointer return: T* func(
+                let returns_ptr = trimmed.contains("* ")
+                    && trimmed.contains('(')
+                    && !trimmed.starts_with("//")
+                    && !trimmed.contains("operator")
+                    && trimmed.find('*').unwrap_or(usize::MAX)
+                        < trimmed.find('(').unwrap_or(0);
+
+                if (returns_ref || returns_ptr)
+                    && (trimmed.contains('{') || trimmed.ends_with('{'))
+                {
+                    func_returns_ref = returns_ref;
+                    func_returns_ptr = returns_ptr;
+                    in_func_body = true;
+                    func_brace_depth = 0;
+                    local_vars.clear();
+                }
+            }
+        }
+
+        if in_func_body {
+            func_brace_depth += trimmed.matches('{').count() as i32;
+            func_brace_depth -= trimmed.matches('}').count() as i32;
+
+            // Track local variable declarations
+            if trimmed.contains('=') && !trimmed.starts_with("return")
+                && !trimmed.starts_with("if") && !trimmed.starts_with("for")
+            {
+                if let Some(eq_pos) = trimmed.find('=') {
+                    let before_eq = trimmed[..eq_pos].trim();
+                    if let Some(var) = before_eq.split_whitespace().last() {
+                        let clean = var.trim_start_matches('*').trim_start_matches('&');
+                        if !clean.is_empty() && clean.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                            local_vars.push(clean.to_string());
+                        }
+                    }
+                }
+            }
+
+            // Check return statements
+            if trimmed.starts_with("return ") && (func_returns_ref || func_returns_ptr) {
+                let return_expr = trimmed["return ".len()..].trim_end_matches(';').trim();
+
+                // For reference returns: `return local_var;`
+                // For pointer returns: `return &local_var;`
+                let returned_var = if return_expr.starts_with('&') {
+                    return_expr[1..].trim()
+                } else {
+                    return_expr
+                };
+
+                if local_vars.iter().any(|v| v == returned_var) {
+                    let loc = SourceLocation::new(
+                        file_path, line_idx + 1, 1, line_idx + 1, trimmed.len(),
+                    );
+                    findings.push(make_finding("LIFE-011", loc, trimmed.to_string()));
+                }
+            }
+
+            if func_brace_depth <= 0 {
+                in_func_body = false;
+                func_returns_ref = false;
+                func_returns_ptr = false;
+            }
+        }
+    }
+}
+
+/// LIFE-013: Lambda with [&] capture escaping scope.
+/// LIFE-014: std::ref/std::cref usage (potential dangling wrapper).
+fn check_lambda_ref_escape(
+    source_str: &str,
+    file_path: &str,
+    is_cpp: bool,
+    findings: &mut Vec<CppSafetyFinding>,
+) {
+    if !is_cpp {
+        return;
+    }
+
+    for (line_idx, line) in source_str.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+            continue;
+        }
+
+        // LIFE-013: Lambda with [&] that's returned, stored in std::function, or passed to thread/async
+        if trimmed.contains("[&]") || trimmed.contains("[&,") || trimmed.contains(", &]") {
+            let lambda_pos = trimmed.find("[&]")
+                .or_else(|| trimmed.find("[&,"))
+                .or_else(|| trimmed.find(", &]"))
+                .unwrap_or(0);
+
+            // Explicit escape mechanisms (always flag regardless of return)
+            let has_escape_mechanism = trimmed.contains("std::function")
+                || trimmed.contains("std::thread")
+                || trimmed.contains("std::async")
+                || trimmed.contains("std::jthread")
+                || trimmed.contains("detach");
+
+            // `return [&]` — lambda itself being returned directly
+            let lambda_returned_directly = trimmed.starts_with("return ")
+                && trimmed[7..].trim().starts_with("[&");
+
+            // `return` before `[&]` WITHOUT escape mechanism = inline use
+            // e.g., `return data.match([&](...) { ... });` — not escaping
+            let return_before_lambda = trimmed.starts_with("return ")
+                && lambda_pos > 7;
+            let is_inline_use = return_before_lambda && !has_escape_mechanism;
+
+            if !is_inline_use && (has_escape_mechanism || lambda_returned_directly) {
+                let col = lambda_pos;
+                let loc = SourceLocation::new(
+                    file_path, line_idx + 1, col + 1, line_idx + 1, trimmed.len(),
+                );
+                findings.push(make_finding("LIFE-013", loc, trimmed.to_string()));
+            }
+        }
+
+        // LIFE-014: std::ref / std::cref
+        for ref_fn in &["std::ref(", "std::cref("] {
+            if trimmed.contains(ref_fn) {
+                // Flag if it's being passed to thread, async, or stored
+                let is_risky = trimmed.contains("thread")
+                    || trimmed.contains("async")
+                    || trimmed.contains("bind")
+                    || trimmed.contains("function");
+
+                if is_risky {
+                    let col = trimmed.find(ref_fn).unwrap_or(0);
+                    let loc = SourceLocation::new(
+                        file_path, line_idx + 1, col + 1, line_idx + 1, trimmed.len(),
+                    );
+                    findings.push(make_finding("LIFE-014", loc, trimmed.to_string()));
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -3429,5 +3645,69 @@ struct Widget {
 "#);
         let life = findings_with_rule(&findings, "LIFE-010");
         assert!(life.is_empty(), "Should NOT flag std::vector member");
+    }
+
+    // ── Return Ref/Ptr to Local tests (LIFE-011 to LIFE-014) ────────────
+
+    #[test]
+    fn test_life011_return_ref_to_local() {
+        let findings = scan_cpp(r#"
+const std::string& get_name() {
+    std::string name = "hello";
+    return name;
+}
+"#);
+        let life = findings_with_rule(&findings, "LIFE-011");
+        assert!(!life.is_empty(), "Should flag returning reference to local");
+    }
+
+    #[test]
+    fn test_life011_return_ptr_to_local() {
+        let findings = scan_cpp(r#"
+int* get_value() {
+    int val = 42;
+    return &val;
+}
+"#);
+        let life = findings_with_rule(&findings, "LIFE-011");
+        assert!(!life.is_empty(), "Should flag returning pointer to local");
+    }
+
+    #[test]
+    fn test_life011_return_member_ok() {
+        let findings = scan_cpp(r#"
+class Foo {
+    std::string name_;
+    const std::string& get_name() {
+        return name_;
+    }
+};
+"#);
+        let life = findings_with_rule(&findings, "LIFE-011");
+        assert!(life.is_empty(), "Should NOT flag returning reference to member");
+    }
+
+    #[test]
+    fn test_life013_lambda_ref_escape() {
+        let findings = scan_cpp(r#"
+std::function<void()> make_func() {
+    int x = 42;
+    return std::function<void()>([&] { use(x); });
+}
+"#);
+        let life = findings_with_rule(&findings, "LIFE-013");
+        assert!(!life.is_empty(), "Should flag lambda [&] escaping via std::function return");
+    }
+
+    #[test]
+    fn test_life013_lambda_value_capture_ok() {
+        let findings = scan_cpp(r#"
+std::function<void()> make_func() {
+    int x = 42;
+    return std::function<void()>([=] { use(x); });
+}
+"#);
+        let life = findings_with_rule(&findings, "LIFE-013");
+        assert!(life.is_empty(), "Should NOT flag lambda [=] (value capture)");
     }
 }
