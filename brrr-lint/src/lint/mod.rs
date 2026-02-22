@@ -37,8 +37,17 @@ pub use duplicate_types::DuplicateTypesRule;
 pub use effect_checker::{Effect, EffectCheckerRule};
 pub use engine::{LintConfig, LintEngine};
 pub use fstar_traps::{
-    FunctionEqualityRule, KeywordAsIdentifierRule, LemmaEnsuresAmbiguityRule,
-    MissingMulOpenRule, MissingNoeqRule, UnguardedForallRule, ValBinderArrowRule,
+    AssumeTypeVsValRule, AttributeTargetRule, AutoClassificationRule,
+    DecreasesBoundRule, DoNotUnrefineRule, DollarBinderRule,
+    ErasableSuggestionRule, FunctionEqualityRule, IntroduceWithRule,
+    KeywordAsIdentifierRule, LemmaEnsuresAmbiguityRule,
+    MissingDecreasesRule, MissingMulOpenRule, MissingNoeqRule, MissingPluginRule,
+    NoeqVsUnopteqRule, OpaqueWithoutRevealRule,
+    PatternDisjunctionRule, RequiresTrueOkRule, RevealInTotRule,
+    SimpCandidateRule, SimpCommGuardRule, SquashBridgeRule, StrictOnArgumentsRule,
+    SumVsOrRule, TacticSuggestionRule, TickVsExplicitRule,
+    TotVsGtotRule, UnfoldAliasRule, UnguardedForallRule, UniverseHintRule,
+    ValBinderArrowRule,
 };
 pub use import_optimizer::ImportOptimizerRule;
 pub use module_deps::{

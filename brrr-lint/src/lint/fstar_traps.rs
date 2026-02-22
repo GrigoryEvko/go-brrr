@@ -18,7 +18,9 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use std::path::Path;
 
-use super::rules::{Diagnostic, DiagnosticSeverity, Edit, Fix, FixConfidence, Range, Rule, RuleCode};
+use super::rules::{
+    Diagnostic, DiagnosticSeverity, Edit, Fix, FixConfidence, FixSafetyLevel, Range, Rule, RuleCode,
+};
 
 lazy_static! {
     /// Matches `open FStar.Mul` (with optional leading whitespace).
@@ -419,7 +421,7 @@ fn build_autofix(file: &Path, content: &str) -> Fix {
         }],
         confidence: FixConfidence::High,
         unsafe_reason: None,
-        safety_level: super::rules::FixSafetyLevel::Safe,
+        safety_level: FixSafetyLevel::Safe,
         reversible: true,
         requires_review: false,
     }
@@ -567,7 +569,7 @@ impl Rule for ValBinderArrowRule {
                     ],
                     confidence: FixConfidence::High,
                     unsafe_reason: None,
-                    safety_level: super::rules::FixSafetyLevel::Safe,
+                    safety_level: FixSafetyLevel::Safe,
                     reversible: true,
                     requires_review: false,
                 };
@@ -1446,7 +1448,7 @@ impl Rule for MissingNoeqRule {
                     }],
                     confidence: FixConfidence::High,
                     unsafe_reason: None,
-                    safety_level: super::rules::FixSafetyLevel::Safe,
+                    safety_level: FixSafetyLevel::Safe,
                     reversible: true,
                     requires_review: false,
                 };
@@ -1799,6 +1801,3370 @@ fn is_bare_function_ident(token: &str) -> bool {
     }
     true
 }
+
+// ==========================================================================
+// Tests
+// ==========================================================================
+
+
+// ==========================================================================
+// Shared helpers for FST024+ rules
+// ==========================================================================
+
+fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'\''
+}
+
+
+fn is_fstar_ident(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let first = s.as_bytes()[0];
+    if !first.is_ascii_alphabetic() && first != b'_' {
+        return false;
+    }
+    s.bytes().all(|b| is_ident_char(b) || b == b'.')
+}
+
+
+fn strip_line_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    let mut in_string = false;
+    while i < bytes.len() {
+        if in_string {
+            if bytes[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            return &line[..i];
+        }
+        i += 1;
+    }
+    line
+}
+
+
+fn line_in_block_comment(depth_before: u32, line: &str) -> bool {
+    if depth_before > 0 {
+        // Check if we ever drop to 0 on this line
+        let bytes = line.as_bytes();
+        let mut d = depth_before;
+        let mut i = 0;
+        while i + 1 < bytes.len() {
+            if bytes[i] == b'(' && bytes[i + 1] == b'*' {
+                d += 1;
+                i += 2;
+            } else if bytes[i] == b'*' && bytes[i + 1] == b')' {
+                d = d.saturating_sub(1);
+                if d == 0 {
+                    return false; // code follows after comment close
+                }
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+
+///
+/// Handles single-line `(* ... *)` blocks by replacing their content with spaces.
+/// Does NOT handle multi-line block comments — use `update_block_comment_depth` for that.
+fn strip_comments_full(line: &str, in_block_comment: bool) -> (String, bool) {
+    let mut result = String::with_capacity(line.len());
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    let mut in_block = in_block_comment;
+
+    while i < bytes.len() {
+        if in_block {
+            // Look for `*)`
+            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b')' {
+                in_block = false;
+                result.push(' ');
+                result.push(' ');
+                i += 2;
+            } else {
+                result.push(' ');
+                i += 1;
+            }
+        } else if i + 1 < bytes.len() && bytes[i] == b'(' && bytes[i + 1] == b'*' {
+            in_block = true;
+            result.push(' ');
+            result.push(' ');
+            i += 2;
+        } else if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            // Rest of line is a comment.
+            break;
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+
+    (result, in_block)
+}
+
+
+fn is_word_at(line: &str, pos: usize, keyword: &str) -> bool {
+    let bytes = line.as_bytes();
+    let kw_len = keyword.len();
+    if pos + kw_len > bytes.len() {
+        return false;
+    }
+    if &line[pos..pos + kw_len] != keyword {
+        return false;
+    }
+    let before_ok = pos == 0 || !is_ident_char(bytes[pos - 1]);
+    let after_ok = pos + kw_len >= bytes.len() || !is_ident_char(bytes[pos + kw_len]);
+    before_ok && after_ok
+}
+
+
+// ==========================================================================
+// FST024: DecreasesBoundRule
+// ==========================================================================
+
+/// FST024: Detect `decreases` clauses referencing names not bound in function parameters.
+///
+/// In `let rec f (x: t) (y: t) : ... (decreases z) = ...`, if `z` is not `x`
+/// or `y`, F* silently creates a fresh variable instead of using the intended
+/// parameter, leading to a confusing verification failure.
+pub struct DecreasesBoundRule;
+
+impl DecreasesBoundRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// Extract parameter names from a `let rec` signature line and any continuation
+/// lines up to `=` or `decreases`.
+///
+/// Returns `(params, decreases_line_idx, decreases_col, decreases_body)` or `None`.
+fn parse_let_rec_signature(lines: &[&str], start: usize) -> Option<(Vec<String>, usize, usize, String)> {
+    let first_trimmed = lines[start].trim();
+    if !first_trimmed.starts_with("let rec ") && !first_trimmed.starts_with("and ") {
+        return None;
+    }
+
+    // Collect the entire signature text across continuation lines until `=` at depth 0.
+    let mut sig_text = String::new();
+    // Track which original lines each byte range maps to.
+    let mut line_map: Vec<(usize, usize)> = Vec::new(); // (line_idx, byte_offset_in_sig_text)
+    let mut end_line = start;
+
+    for i in start..lines.len() {
+        let lt = lines[i].trim();
+        if i > start
+            && (lt.starts_with("let ") || lt.starts_with("val ")
+                || lt.starts_with("type ") || lt.starts_with("open ")
+                || lt.starts_with("module ") || lt.is_empty())
+        {
+            break;
+        }
+        line_map.push((i, sig_text.len()));
+        if !sig_text.is_empty() {
+            sig_text.push(' ');
+        }
+        sig_text.push_str(lt);
+        end_line = i;
+
+        // Stop after we see `= ` at paren depth 0 that is the definition body.
+        // Simple heuristic: if the line ends with `=` or contains ` = ` outside parens.
+        if lt.ends_with(" =") || lt.ends_with("\t=") || lt == "=" {
+            break;
+        }
+    }
+
+    // Extract parameter names: tokens inside `(name:` or bare `(name)` patterns.
+    let mut params: Vec<String> = Vec::new();
+    let sig_bytes = sig_text.as_bytes();
+    let mut i = 0;
+
+    // Skip `let rec NAME` or `and NAME`.
+    if sig_text.starts_with("let rec ") {
+        i = 8;
+    } else if sig_text.starts_with("and ") {
+        i = 4;
+    }
+    // Skip function name.
+    while i < sig_bytes.len() && sig_bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    while i < sig_bytes.len() && is_ident_char(sig_bytes[i]) {
+        i += 1;
+    }
+
+    // Now scan for parameter binders.
+    let mut paren_depth: u32 = 0;
+    while i < sig_bytes.len() {
+        match sig_bytes[i] {
+            b'(' => {
+                if paren_depth == 0 {
+                    // Try to extract parameter name after `(`.
+                    let mut j = i + 1;
+                    while j < sig_bytes.len() && sig_bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    // Optional `#` for implicit.
+                    if j < sig_bytes.len() && sig_bytes[j] == b'#' {
+                        j += 1;
+                    }
+                    let name_start = j;
+                    while j < sig_bytes.len() && is_ident_char(sig_bytes[j]) {
+                        j += 1;
+                    }
+                    if j > name_start {
+                        let name = &sig_text[name_start..j];
+                        // Skip whitespace, check for `:` or `)`.
+                        let mut k = j;
+                        while k < sig_bytes.len() && sig_bytes[k].is_ascii_whitespace() {
+                            k += 1;
+                        }
+                        if k < sig_bytes.len() && (sig_bytes[k] == b':' || sig_bytes[k] == b')') {
+                            params.push(name.to_string());
+                        }
+                    }
+                }
+                paren_depth += 1;
+                i += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                i += 1;
+            }
+            _ => {
+                // Bare parameters (no parens): `let rec f x y = ...`
+                if paren_depth == 0 && sig_bytes[i].is_ascii_whitespace() {
+                    let mut j = i + 1;
+                    while j < sig_bytes.len() && sig_bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    let name_start = j;
+                    while j < sig_bytes.len() && is_ident_char(sig_bytes[j]) {
+                        j += 1;
+                    }
+                    if j > name_start {
+                        let candidate = &sig_text[name_start..j];
+                        // Stop at `:` (type annotation start) or `=` (body start).
+                        if candidate != ":" && candidate != "=" && candidate != "decreases"
+                            && candidate != "requires" && candidate != "ensures"
+                            && candidate != "Tot" && candidate != "Pure" && candidate != "Lemma"
+                            && candidate != "GTot" && candidate != "Dv" && candidate != "ST"
+                            && candidate != "Stack" && candidate != "Ghost"
+                        {
+                            // Check the next non-whitespace char isn't `:` with complex type.
+                            let mut k = j;
+                            while k < sig_bytes.len() && sig_bytes[k].is_ascii_whitespace() {
+                                k += 1;
+                            }
+                            if k >= sig_bytes.len() || sig_bytes[k] != b':' {
+                                // It's a bare parameter.
+                                if !candidate.starts_with(|c: char| c.is_ascii_uppercase()) {
+                                    params.push(candidate.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                i += 1;
+            }
+        }
+
+        // If we hit `:` at depth 0, we're in the return type annotation; stop collecting params.
+        if paren_depth == 0 && i < sig_bytes.len() && sig_bytes[i] == b':' {
+            break;
+        }
+    }
+
+    // Find `(decreases ...)` in the signature.
+    for li in start..=end_line {
+        let lt = lines[li];
+        let effective = strip_line_comment(lt);
+        if let Some(dec_pos) = effective.find("decreases") {
+            let before = if dec_pos > 0 { effective.as_bytes()[dec_pos - 1] } else { b' ' };
+            let after_pos = dec_pos + 9;
+            let after = if after_pos < effective.len() { effective.as_bytes()[after_pos] } else { b' ' };
+            if !is_ident_char(before) && !is_ident_char(after) {
+                // Extract the decreases body: everything after `decreases` until `)` or end.
+                let body_start = after_pos;
+                let body = effective[body_start..].trim().trim_start_matches('(').trim_end_matches(')').trim();
+                let col = byte_to_char_col(lt, lt.find("decreases").unwrap_or(0));
+                return Some((params, li, col, body.to_string()));
+            }
+        }
+    }
+
+    None
+}
+
+/// F* builtins allowed in decreases clauses without being parameters.
+const DECREASES_BUILTINS: &[&str] = &[
+    "lex_t", "LexTop", "LexCons", "Cons", "Nil", "true", "false",
+    "fst", "snd", "length", "List.length", "List.Tot.length",
+    "FStar.List.Tot.length", "Seq.length", "FStar.Seq.length",
+];
+
+impl Rule for DecreasesBoundRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST024
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+        let mut block_comment_depth: u32 = 0;
+        let mut i = 0;
+
+        while i < lines.len() {
+            block_comment_depth = update_block_comment_depth(lines[i], block_comment_depth);
+            if block_comment_depth > 0 {
+                i += 1;
+                continue;
+            }
+
+            let trimmed = lines[i].trim();
+            if trimmed.starts_with("let rec ") || trimmed.starts_with("and ") {
+                if let Some((params, dec_line, dec_col, dec_body)) =
+                    parse_let_rec_signature(&lines, i)
+                {
+                    // Extract identifiers from the decreases body.
+                    let dec_idents: Vec<&str> = dec_body
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.')
+                        .filter(|s| !s.is_empty() && is_fstar_ident(s))
+                        .collect();
+
+                    for ident in &dec_idents {
+                        // Skip numeric literals, builtins, and qualified names with dots.
+                        if ident.chars().next().map_or(true, |c| c.is_ascii_digit()) {
+                            continue;
+                        }
+                        if DECREASES_BUILTINS.contains(ident) {
+                            continue;
+                        }
+                        // Check if the base name (before any dots) is a parameter.
+                        let base = ident.split('.').last().unwrap_or(ident);
+                        if !params.iter().any(|p| p == base || p == *ident) {
+                            diagnostics.push(Diagnostic {
+                                rule: RuleCode::FST024,
+                                severity: DiagnosticSeverity::Warning,
+                                file: file.to_path_buf(),
+                                range: Range::new(dec_line + 1, dec_col, dec_line + 1, dec_col + 9),
+                                message: format!(
+                                    "`decreases` references `{}` which is not a parameter of this \
+                                     function. This silently creates a fresh variable. \
+                                     Parameters: [{}].",
+                                    ident,
+                                    params.join(", ")
+                                ),
+                                fix: None,
+                            });
+                            break; // One diagnostic per decreases clause.
+                        }
+                    }
+                }
+            }
+
+            i += 1;
+        }
+
+        diagnostics
+    }
+}
+
+// ==========================================================================
+// FST025: AssumeTypeVsValRule
+// ==========================================================================
+
+/// FST025: Detect `assume type` with function arrows that likely should be `assume val`.
+///
+/// `assume type f : int -> int` assumes a *type* exists with that signature.
+/// If the type has arrows, the user likely meant `assume val f : int -> int`
+/// to assume a *value* (function) exists.
+pub struct AssumeTypeVsValRule;
+
+impl AssumeTypeVsValRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for AssumeTypeVsValRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST025
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut block_comment_depth: u32 = 0;
+
+        for (line_idx, line) in content.lines().enumerate() {
+            block_comment_depth = update_block_comment_depth(line, block_comment_depth);
+            if block_comment_depth > 0 {
+                continue;
+            }
+
+            let trimmed = strip_line_comment(line).trim();
+
+            // Match `assume type NAME ...` (possibly with `:` and type body).
+            if !trimmed.starts_with("assume type ") {
+                continue;
+            }
+
+            let after_assume_type = &trimmed["assume type ".len()..];
+
+            // Check if the rest of the declaration (on this line) contains `->`.
+            if after_assume_type.contains("->") {
+                let col = byte_to_char_col(line, line.find("assume type").unwrap_or(0));
+                let name = after_assume_type
+                    .split(|c: char| c.is_whitespace() || c == ':')
+                    .next()
+                    .unwrap_or("?");
+
+                diagnostics.push(Diagnostic {
+                    rule: RuleCode::FST025,
+                    severity: DiagnosticSeverity::Warning,
+                    file: file.to_path_buf(),
+                    range: Range::new(line_idx + 1, col, line_idx + 1, col + "assume type".len()),
+                    message: format!(
+                        "`assume type {}` has function arrows (`->`). Did you mean \
+                         `assume val {} : ...`? `assume type` assumes a type constructor \
+                         exists, not a value.",
+                        name, name
+                    ),
+                    fix: None,
+                });
+            }
+        }
+
+        diagnostics
+    }
+}
+
+// ==========================================================================
+// FST026: RevealInTotRule
+// ==========================================================================
+
+/// FST026: Detect `reveal` used in a `Tot` (total) computation context.
+///
+/// `reveal` from `FStar.Ghost` has the `GTot` effect -- it can only be used in
+/// `Ghost` or `GTot` contexts, not in `Tot`. When used in a `Tot` function, F*
+/// rejects it with a confusing effect mismatch error.
+pub struct RevealInTotRule;
+
+impl RevealInTotRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for RevealInTotRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST026
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+        let mut block_comment_depth: u32 = 0;
+
+        // Two-pass approach:
+        // 1. Identify functions with explicit `Tot` effect annotation.
+        // 2. Within those function bodies, look for `reveal` / `reveal_opaque` calls.
+
+        let mut i = 0;
+        while i < lines.len() {
+            block_comment_depth = update_block_comment_depth(lines[i], block_comment_depth);
+            if block_comment_depth > 0 {
+                i += 1;
+                continue;
+            }
+
+            let trimmed = lines[i].trim();
+
+            // Detect function/val with explicit Tot annotation.
+            let has_tot_annotation = has_explicit_tot(trimmed);
+
+            if !has_tot_annotation {
+                // Also check multi-line sigs: val on previous lines, `: Tot` on this line.
+                // Skip for simplicity -- only fire on the line with Tot.
+                i += 1;
+                continue;
+            }
+
+            // Found a Tot-annotated definition. Scan its body for `reveal` calls.
+            let def_start = i;
+            let mut def_end = i + 1;
+            while def_end < lines.len() {
+                let dt = lines[def_end].trim();
+                if dt.is_empty() {
+                    break;
+                }
+                if def_end > def_start
+                    && (dt.starts_with("val ") || dt.starts_with("let ")
+                        || dt.starts_with("let rec ") || dt.starts_with("type ")
+                        || dt.starts_with("open ") || dt.starts_with("module ")
+                        || dt.starts_with("assume "))
+                {
+                    break;
+                }
+                def_end += 1;
+            }
+
+            // Scan body for `reveal` or `reveal_opaque`.
+            for k in def_start..def_end {
+                let body_line = strip_line_comment(lines[k]);
+                for keyword in &["reveal_opaque", "reveal"] {
+                    if let Some(pos) = body_line.find(keyword) {
+                        let kw_len = keyword.len();
+                        let before_ok = pos == 0 || !is_ident_char(body_line.as_bytes()[pos - 1]);
+                        let after_ok = pos + kw_len >= body_line.len()
+                            || !is_ident_char(body_line.as_bytes()[pos + kw_len]);
+                        if before_ok && after_ok {
+                            let col = byte_to_char_col(lines[k], lines[k].find(keyword).unwrap_or(0));
+                            diagnostics.push(Diagnostic {
+                                rule: RuleCode::FST026,
+                                severity: DiagnosticSeverity::Error,
+                                file: file.to_path_buf(),
+                                range: Range::new(k + 1, col, k + 1, col + kw_len),
+                                message: format!(
+                                    "`{}` has GTot effect and cannot be used in a Tot context. \
+                                     Change the function's effect to `GTot` or `Ghost`, or use \
+                                     `Ghost.elim_pure` to bridge the effect boundary.",
+                                    keyword
+                                ),
+                                fix: None,
+                            });
+                            break; // One diagnostic per keyword per line.
+                        }
+                    }
+                }
+            }
+
+            i = def_end;
+        }
+
+        diagnostics
+    }
+}
+
+/// Check if a line contains an explicit `Tot` effect annotation.
+///
+/// Matches patterns like `: Tot`, `-> Tot`, `Pure` followed by Tot-like indicators.
+fn has_explicit_tot(line: &str) -> bool {
+    // Look for standalone `Tot` preceded by `:` or `->`.
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i + 3 <= len {
+        if &bytes[i..i + 3] == b"Tot" {
+            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+            let after_ok = i + 3 >= len || !is_ident_char(bytes[i + 3]);
+            if before_ok && after_ok {
+                // Check that it's in a type position (after `:` or `->` or `=`).
+                let prefix = line[..i].trim_end();
+                if prefix.ends_with(':') || prefix.ends_with("->") {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    false
+}
+
+// ==========================================================================
+// FST029: PatternDisjunctionRule
+// ==========================================================================
+
+/// FST029: Detect `{:pattern ...} \/ ...` which creates disjunctive triggers.
+///
+/// In SMT patterns, `\/` separates alternative trigger sets. Users often write
+/// `{:pattern (f x) \/ (g x)}` thinking it is logical OR, when it actually
+/// creates two alternative patterns. The correct conjunctive multi-trigger
+/// syntax uses `;`: `{:pattern (f x); (g x)}`.
+pub struct PatternDisjunctionRule;
+
+impl PatternDisjunctionRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for PatternDisjunctionRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST029
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut block_comment_depth: u32 = 0;
+
+        for (line_idx, line) in content.lines().enumerate() {
+            block_comment_depth = update_block_comment_depth(line, block_comment_depth);
+            if block_comment_depth > 0 {
+                continue;
+            }
+
+            let effective = strip_line_comment(line);
+
+            // Find `{:pattern` blocks.
+            let mut search_from = 0;
+            while let Some(pat_pos) = effective[search_from..].find("{:pattern") {
+                let abs_pos = search_from + pat_pos;
+                let after = &effective[abs_pos..];
+
+                // Find the closing `}` for this pattern block.
+                let block_end = find_brace_close(after);
+                let block = if let Some(end) = block_end {
+                    &after[..end + 1]
+                } else {
+                    after
+                };
+
+                // Check if the block contains `\/` (disjunctive trigger separator).
+                if block.contains(r"\/") {
+                    let disj_offset = block.find(r"\/").unwrap_or(0);
+                    let disj_abs = abs_pos + disj_offset;
+                    let col = byte_to_char_col(line, line.find(&effective[disj_abs..disj_abs + 2]).unwrap_or(disj_abs));
+
+                    diagnostics.push(Diagnostic {
+                        rule: RuleCode::FST029,
+                        severity: DiagnosticSeverity::Warning,
+                        file: file.to_path_buf(),
+                        range: Range::new(line_idx + 1, col, line_idx + 1, col + 2),
+                        message: "`{:pattern ...} \\/` creates a disjunctive trigger (two \
+                                  alternative pattern sets), not a logical OR. For a conjunctive \
+                                  multi-trigger, use `;` instead: `{:pattern (f x); (g x)}`."
+                            .to_string(),
+                        fix: None,
+                    });
+                }
+
+                search_from = abs_pos + block.len().max(1);
+            }
+        }
+
+        diagnostics
+    }
+}
+
+/// Find the closing `}` for a `{:pattern ...}` block, handling nested braces.
+fn find_brace_close(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut depth: u32 = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+// ==========================================================================
+// FST035: SimpCommGuardRule
+// ==========================================================================
+
+/// FST035: Detect `[@@simp_comm]` lemmas without an argument ordering guard.
+///
+/// A commutativity lemma `f a b == f b a` with `[@@simp_comm]` can loop the
+/// simplifier indefinitely unless it has a guard like `a <= b` to break the
+/// symmetry.
+pub struct SimpCommGuardRule;
+
+impl SimpCommGuardRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for SimpCommGuardRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST035
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+        let mut block_comment_depth: u32 = 0;
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            block_comment_depth = update_block_comment_depth(line, block_comment_depth);
+            if block_comment_depth > 0 {
+                continue;
+            }
+
+            let trimmed = line.trim();
+
+            // Look for `simp_comm` in attributes.
+            if !trimmed.contains("simp_comm") {
+                continue;
+            }
+            // Verify it's in an attribute context `[@@` or `[@@@`.
+            if !trimmed.contains("[@@") {
+                continue;
+            }
+            // Verify `simp_comm` is a standalone attribute name.
+            if let Some(pos) = trimmed.find("simp_comm") {
+                let before_ok = pos == 0 || !is_ident_char(trimmed.as_bytes()[pos - 1]);
+                let after_pos = pos + 9;
+                let after_ok = after_pos >= trimmed.len() || !is_ident_char(trimmed.as_bytes()[after_pos]);
+                if !before_ok || !after_ok {
+                    continue;
+                }
+            }
+
+            // Found `[@@simp_comm]`. Scan the next val/let declaration and its body
+            // for an ordering guard (`<=`, `<`, `>=`, `>`).
+            let mut has_guard = false;
+            let attr_line = line_idx;
+
+            for k in (line_idx + 1)..lines.len().min(line_idx + 15) {
+                let dt = lines[k].trim();
+                if dt.is_empty() {
+                    continue;
+                }
+                // Check for ordering guards in requires or body.
+                if dt.contains("<=") || dt.contains(">=")
+                    || (dt.contains('<') && !dt.contains("<:") && !dt.contains("<<"))
+                    || (dt.contains('>') && !dt.contains("->") && !dt.contains(">>"))
+                {
+                    has_guard = true;
+                    break;
+                }
+                // Stop at next top-level declaration beyond the current one.
+                if k > line_idx + 1
+                    && (dt.starts_with("val ") || dt.starts_with("let ")
+                        || dt.starts_with("type ") || dt.starts_with("open ")
+                        || dt.starts_with("[@@"))
+                {
+                    break;
+                }
+            }
+
+            if !has_guard {
+                let col = byte_to_char_col(
+                    line,
+                    line.find("simp_comm").unwrap_or(0),
+                );
+                diagnostics.push(Diagnostic {
+                    rule: RuleCode::FST035,
+                    severity: DiagnosticSeverity::Warning,
+                    file: file.to_path_buf(),
+                    range: Range::new(attr_line + 1, col, attr_line + 1, col + 9),
+                    message: "`[@@simp_comm]` lemma has no argument-ordering guard. \
+                              Without a guard like `requires (a <= b)`, the simplifier \
+                              may loop: `f a b -> f b a -> f a b -> ...`."
+                        .to_string(),
+                    fix: None,
+                });
+            }
+        }
+
+        diagnostics
+    }
+}
+
+// ==========================================================================
+// FST036: DollarBinderRule
+// ==========================================================================
+
+/// FST036: Suggest `$f` binder for implicit parameters with higher-order types.
+///
+/// In F*, `$f` means "always expect this argument explicitly -- don't try to
+/// infer it". This is useful for implicit parameters with function types
+/// (especially those taking `Lemma` or `Tac` results).
+pub struct DollarBinderRule;
+
+impl DollarBinderRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for DollarBinderRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST036
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut block_comment_depth: u32 = 0;
+
+        for (line_idx, line) in content.lines().enumerate() {
+            block_comment_depth = update_block_comment_depth(line, block_comment_depth);
+            if block_comment_depth > 0 {
+                continue;
+            }
+
+            let effective = strip_line_comment(line);
+            let trimmed = effective.trim();
+
+            // Look for `(#name: ... -> Lemma` or `(#name: ... -> Tac` patterns.
+            // These suggest the parameter is higher-order and would benefit from `$`.
+            let bytes = trimmed.as_bytes();
+            let len = bytes.len();
+            let mut i = 0;
+
+            while i + 3 < len {
+                // Find `(#`
+                if bytes[i] == b'(' && bytes[i + 1] == b'#' {
+                    let paren_start = i;
+                    i += 2;
+                    // Skip whitespace.
+                    while i < len && bytes[i].is_ascii_whitespace() {
+                        i += 1;
+                    }
+                    // Read identifier name.
+                    let name_start = i;
+                    while i < len && is_ident_char(bytes[i]) {
+                        i += 1;
+                    }
+                    if i > name_start {
+                        let name = &trimmed[name_start..i];
+                        // Skip to `:`.
+                        while i < len && bytes[i].is_ascii_whitespace() {
+                            i += 1;
+                        }
+                        if i < len && bytes[i] == b':' {
+                            i += 1;
+                            // Scan until matching `)` and check for `-> Lemma` or `-> Tac`.
+                            let type_start = i;
+                            let mut depth: u32 = 1;
+                            while i < len && depth > 0 {
+                                match bytes[i] {
+                                    b'(' => { depth += 1; }
+                                    b')' => { depth -= 1; }
+                                    _ => {}
+                                }
+                                if depth > 0 { i += 1; }
+                            }
+                            let type_body = &trimmed[type_start..i];
+                            // Check for higher-order patterns.
+                            let is_higher_order = type_body.contains("-> Lemma")
+                                || type_body.contains("-> Tac ")
+                                || type_body.contains("-> Tac)")
+                                || type_body.contains("-> Tot ")
+                                || type_body.contains("-> GTot ");
+
+                            if is_higher_order {
+                                let col = byte_to_char_col(
+                                    line,
+                                    line.find(&trimmed[paren_start..paren_start + 2]).unwrap_or(0),
+                                );
+                                diagnostics.push(Diagnostic {
+                                    rule: RuleCode::FST036,
+                                    severity: DiagnosticSeverity::Hint,
+                                    file: file.to_path_buf(),
+                                    range: Range::new(line_idx + 1, col, line_idx + 1, col + 2 + name.len()),
+                                    message: format!(
+                                        "Consider using `(${}` instead of `(#{}` for this higher-order \
+                                         implicit parameter. `$` prevents F* from trying to infer \
+                                         the argument automatically.",
+                                        name, name
+                                    ),
+                                    fix: None,
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        diagnostics
+    }
+}
+
+// ==========================================================================
+// FST039: UnfoldAliasRule (FIXABLE)
+// ==========================================================================
+
+/// FST039: Detect simple type aliases missing the `unfold` qualifier.
+///
+/// A simple alias like `let my_type = existing_type` without `[@@unfold]`
+/// creates a new definition that the normalizer won't automatically expand,
+/// causing unexpected type mismatches.
+pub struct UnfoldAliasRule;
+
+impl UnfoldAliasRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for UnfoldAliasRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST039
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+        let mut block_comment_depth: u32 = 0;
+
+        let mut i = 0;
+        while i < lines.len() {
+            block_comment_depth = update_block_comment_depth(lines[i], block_comment_depth);
+            if block_comment_depth > 0 {
+                i += 1;
+                continue;
+            }
+
+            let trimmed = strip_line_comment(lines[i]).trim().to_string();
+
+            // Check for `let NAME = SIMPLE_RHS` at top level (no `rec`, no params).
+            if !trimmed.starts_with("let ") || trimmed.starts_with("let rec ") {
+                i += 1;
+                continue;
+            }
+
+            let after_let = &trimmed["let ".len()..];
+
+            // Skip if it already has `inline_for_extraction` or `unfold`.
+            // Check previous lines for attributes.
+            let mut has_unfold_attr = false;
+            if i > 0 {
+                for k in (0..i).rev() {
+                    let prev = lines[k].trim();
+                    if prev.is_empty() {
+                        break;
+                    }
+                    if prev.contains("unfold") || prev.contains("inline_for_extraction")
+                        || prev.contains("inline_let")
+                    {
+                        has_unfold_attr = true;
+                        break;
+                    }
+                    // Only look at attribute lines.
+                    if !prev.starts_with("[@@") && !prev.starts_with("[@@@") {
+                        break;
+                    }
+                }
+            }
+            // Also check the let line itself.
+            if trimmed.contains("unfold") || trimmed.contains("inline_for_extraction") {
+                has_unfold_attr = true;
+            }
+
+            if has_unfold_attr {
+                i += 1;
+                continue;
+            }
+
+            // Parse: `let NAME = RHS` where NAME has no parameters.
+            // Split at first `=`.
+            if let Some(eq_pos) = after_let.find('=') {
+                let lhs = after_let[..eq_pos].trim();
+                let rhs = after_let[eq_pos + 1..].trim();
+
+                // LHS must be a single identifier (no parameters, no type annotation).
+                if !is_simple_ident(lhs) {
+                    i += 1;
+                    continue;
+                }
+
+                // RHS must be a simple identifier or qualified name (no computation).
+                if rhs.is_empty() || !is_simple_type_rhs(rhs) {
+                    i += 1;
+                    continue;
+                }
+
+                // Skip if the name starts with underscore (private/temp).
+                if lhs.starts_with('_') {
+                    i += 1;
+                    continue;
+                }
+
+                let line_num = i + 1;
+                let col = byte_to_char_col(lines[i], lines[i].find("let ").unwrap_or(0));
+
+                // Build auto-fix: insert `[@@unfold]\n` before the `let` line.
+                let indent = &lines[i][..lines[i].len() - lines[i].trim_start().len()];
+                let fix = Fix {
+                    message: format!("Add `[@@unfold]` to type alias `{}`", lhs),
+                    edits: vec![Edit {
+                        file: file.to_path_buf(),
+                        range: Range::point(line_num, 1),
+                        new_text: format!("{}[@@unfold]\n", indent),
+                    }],
+                    confidence: FixConfidence::Medium,
+                    unsafe_reason: None,
+                    safety_level: FixSafetyLevel::Caution,
+                    reversible: true,
+                    requires_review: true,
+                };
+
+                diagnostics.push(Diagnostic {
+                    rule: RuleCode::FST039,
+                    severity: DiagnosticSeverity::Info,
+                    file: file.to_path_buf(),
+                    range: Range::new(line_num, col, line_num, col + "let ".len() + lhs.len()),
+                    message: format!(
+                        "Simple type alias `{}` should be marked `[@@unfold]` so the \
+                         normalizer expands it automatically. Without `unfold`, F* treats \
+                         it as an opaque definition, causing type mismatches.",
+                        lhs
+                    ),
+                    fix: Some(fix),
+                });
+            }
+
+            i += 1;
+        }
+
+        diagnostics
+    }
+}
+
+/// Check if a string is a simple F* identifier (no spaces, no special chars).
+fn is_simple_ident(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let first = s.as_bytes()[0];
+    if !first.is_ascii_alphabetic() && first != b'_' {
+        return false;
+    }
+    s.bytes().all(|b| is_ident_char(b))
+}
+
+/// Check if an RHS is a simple type alias (just an identifier or qualified name).
+///
+/// Examples that qualify: `nat`, `FStar.UInt32.t`, `my_other_type`
+/// Examples that don't: `x + 1`, `fun x -> x`, `match ...`, `if ...`
+fn is_simple_type_rhs(s: &str) -> bool {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Must not contain operators or keywords suggesting computation.
+    if trimmed.contains("fun ") || trimmed.contains("match ")
+        || trimmed.contains("if ") || trimmed.contains("let ")
+        || trimmed.contains("begin") || trimmed.contains('(')
+        || trimmed.contains('{') || trimmed.contains('[')
+        || trimmed.contains('+') || trimmed.contains('-')
+        || trimmed.contains('*') || trimmed.contains('/')
+    {
+        return false;
+    }
+    // Must be a single token: identifier with optional dots.
+    let first = trimmed.as_bytes()[0];
+    if !first.is_ascii_alphabetic() && first != b'_' {
+        return false;
+    }
+    trimmed.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'\'' || b == b'.')
+}
+
+// ==========================================================================
+// FST040: AttributeTargetRule
+// ==========================================================================
+
+/// FST040: Detect `@@@` vs `@@` attribute target mismatch.
+///
+/// - `[@@attr]` applies to the NEXT definition/term.
+/// - `[@@@attr]` applies to the ENCLOSING module/declaration.
+///
+/// Common mistake: using `@@@` with per-definition attributes like
+/// `inline_for_extraction`, or `@@` with module-level attributes.
+pub struct AttributeTargetRule;
+
+impl AttributeTargetRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// Attributes that are almost always per-definition (should use `@@`).
+const PER_DEFINITION_ATTRS: &[&str] = &[
+    "inline_for_extraction",
+    "noextract",
+    "unfold",
+    "strict_on_arguments",
+    "plugin",
+    "CInline",
+    "CMacro",
+    "CPrologue",
+    "CEpilogue",
+    "deprecated",
+    "warn_on_use",
+    "simp",
+    "simp_comm",
+    "erasable",
+    "do_not_unrefine",
+    "specialize",
+];
+
+/// Attributes that are almost always module-level (should use `@@@`).
+const MODULE_LEVEL_ATTRS: &[&str] = &[
+    "expect_failure",
+    "expect_lax_failure",
+];
+
+impl Rule for AttributeTargetRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST040
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut block_comment_depth: u32 = 0;
+
+        for (line_idx, line) in content.lines().enumerate() {
+            block_comment_depth = update_block_comment_depth(line, block_comment_depth);
+            if block_comment_depth > 0 {
+                continue;
+            }
+
+            // Strip both block comments `(* ... *)` and line comments `// ...`
+            // so that attributes inside comments are not flagged.
+            let no_block = strip_block_comments(line);
+            let effective = strip_line_comment(&no_block);
+            let trimmed = effective.trim();
+
+            // Check for `[@@@attr]` with per-definition attributes.
+            if trimmed.contains("[@@@") {
+                for &attr in PER_DEFINITION_ATTRS {
+                    let pattern = format!("[@@@{}", attr);
+                    if let Some(pos) = trimmed.find(&pattern) {
+                        // Verify the attribute name ends properly.
+                        let after_pos = pos + pattern.len();
+                        let after_ok = after_pos >= trimmed.len()
+                            || !is_ident_char(trimmed.as_bytes()[after_pos]);
+                        if after_ok {
+                            let col = byte_to_char_col(
+                                line,
+                                line.find(&pattern).unwrap_or(0),
+                            );
+                            diagnostics.push(Diagnostic {
+                                rule: RuleCode::FST040,
+                                severity: DiagnosticSeverity::Warning,
+                                file: file.to_path_buf(),
+                                range: Range::new(line_idx + 1, col, line_idx + 1, col + pattern.len() + 1),
+                                message: format!(
+                                    "`[@@@{}]` applies module-wide. Did you mean `[@@{}]` \
+                                     to apply only to the next definition?",
+                                    attr, attr
+                                ),
+                                fix: None,
+                            });
+                            break; // One diagnostic per line.
+                        }
+                    }
+                }
+            }
+
+            // Check for `[@@attr]` (exactly two `@`) with module-level attributes.
+            // Must NOT be `[@@@` (three `@`).
+            if trimmed.contains("[@@") && !trimmed.contains("[@@@") {
+                for &attr in MODULE_LEVEL_ATTRS {
+                    let pattern = format!("[@@{}", attr);
+                    if let Some(pos) = trimmed.find(&pattern) {
+                        // Make sure it's exactly `[@@` and not `[@@@`.
+                        // We already checked !contains("[@@@"), so this is safe.
+                        let after_pos = pos + pattern.len();
+                        let after_ok = after_pos >= trimmed.len()
+                            || !is_ident_char(trimmed.as_bytes()[after_pos]);
+                        if after_ok {
+                            let col = byte_to_char_col(
+                                line,
+                                line.find(&pattern).unwrap_or(0),
+                            );
+                            diagnostics.push(Diagnostic {
+                                rule: RuleCode::FST040,
+                                severity: DiagnosticSeverity::Warning,
+                                file: file.to_path_buf(),
+                                range: Range::new(line_idx + 1, col, line_idx + 1, col + pattern.len() + 1),
+                                message: format!(
+                                    "`[@@{}]` applies to the next definition only. Did you mean \
+                                     `[@@@{}]` to apply to the enclosing module/scope?",
+                                    attr, attr
+                                ),
+                                fix: None,
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        diagnostics
+    }
+}
+
+// ==========================================================================
+// Tests
+// ==========================================================================
+
+
+// ==========================================================================
+// FST028: StrictOnArgumentsRule
+// ==========================================================================
+
+/// FST028: Detect pattern matching on implicit arguments without `[@@strict_on_arguments]`.
+///
+/// When a function matches on an implicit `#a` argument, it won't reduce unless
+/// that argument is concrete. Adding `[@@strict_on_arguments [...]]` tells the
+/// normalizer to be strict on specific arguments.
+pub struct StrictOnArgumentsRule;
+
+impl StrictOnArgumentsRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for StrictOnArgumentsRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST028
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut block_depth: u32 = 0;
+        let lines: Vec<&str> = content.lines().collect();
+
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            if line_in_block_comment(block_depth, line) {
+                block_depth = update_block_comment_depth(line, block_depth);
+                i += 1;
+                continue;
+            }
+            block_depth = update_block_comment_depth(line, block_depth);
+
+            let trimmed = strip_line_comment(line).trim();
+
+            // Look for `let` or `let rec` function definitions
+            let is_let = trimmed.starts_with("let ")
+                || trimmed.starts_with("let rec ")
+                || trimmed.starts_with("and ");
+
+            if !is_let {
+                i += 1;
+                continue;
+            }
+
+            // Check for strict_on_arguments attribute in preceding lines (up to 5 lines back)
+            let has_strict = has_attribute_before(&lines, i, "strict_on_arguments");
+
+            if has_strict {
+                i += 1;
+                continue;
+            }
+
+            // Extract implicit parameter names from the definition line and continuation
+            let implicit_params = extract_implicit_params(trimmed);
+            if implicit_params.is_empty() {
+                i += 1;
+                continue;
+            }
+
+            // Collect the function body (lines until next top-level definition or blank)
+            let body_start = i;
+            let body = collect_function_body(&lines, body_start);
+
+            // Check if any implicit param is matched on
+            for param in &implicit_params {
+                let match_pattern = format!("match {}", param);
+                let match_pattern2 = format!("match ({}", param);
+                if body.contains(&match_pattern) || body.contains(&match_pattern2) {
+                    let line_num = i + 1;
+                    let col = line.find("let").unwrap_or(0);
+                    diagnostics.push(Diagnostic {
+                        rule: RuleCode::FST028,
+                        severity: DiagnosticSeverity::Info,
+                        file: file.to_path_buf(),
+                        range: Range::new(
+                            line_num,
+                            byte_to_char_col(line, col),
+                            line_num,
+                            byte_to_char_col(line, col + trimmed.len().min(line.len())),
+                        ),
+                        message: format!(
+                            "Function matches on implicit argument `{}` but lacks \
+                             `[@@strict_on_arguments [...]]` — it won't reduce unless \
+                             the implicit is concrete.",
+                            param
+                        ),
+                        fix: None,
+                    });
+                    break; // one diagnostic per function
+                }
+            }
+
+            i += 1;
+        }
+
+        diagnostics
+    }
+}
+
+/// Check if an attribute string appears in the lines preceding index `line_idx`.
+fn has_attribute_before(lines: &[&str], line_idx: usize, attr: &str) -> bool {
+    let start = line_idx.saturating_sub(5);
+    for j in start..line_idx {
+        if lines[j].contains(attr) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Extract implicit parameter names from a function definition line.
+///
+/// Looks for `#name` or `(#name:` patterns. Returns the bare names without `#`.
+fn extract_implicit_params(def_line: &str) -> Vec<String> {
+    let mut params = Vec::new();
+    let bytes = def_line.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if bytes[i] == b'#' {
+            i += 1;
+            // Read identifier after #
+            let start = i;
+            while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'\'') {
+                i += 1;
+            }
+            if i > start {
+                let name = &def_line[start..i];
+                params.push(name.to_string());
+            }
+        } else if bytes[i] == b'=' && (i + 1 >= len || bytes[i + 1] != b'=') {
+            // Stop at the definition body
+            break;
+        } else {
+            i += 1;
+        }
+    }
+
+    params
+}
+
+/// Collect the body of a function starting at `start_idx`.
+///
+/// Concatenates lines from `start_idx` to the next blank line or top-level
+/// definition, returning the joined text.
+fn collect_function_body(lines: &[&str], start_idx: usize) -> String {
+    let mut body = String::new();
+    for j in start_idx..lines.len().min(start_idx + 50) {
+        let t = lines[j].trim();
+        if j > start_idx
+            && (t.starts_with("let ") || t.starts_with("val ")
+                || t.starts_with("type ") || t.starts_with("module ")
+                || t.starts_with("open "))
+            && !t.starts_with("let (")
+        {
+            break;
+        }
+        body.push(' ');
+        body.push_str(t);
+    }
+    body
+}
+
+// ==========================================================================
+// FST031: OpaqueWithoutRevealRule
+// ==========================================================================
+
+/// FST031: Detect `[@@opaque_to_smt]` definitions never `reveal_opaque`d in the same file.
+///
+/// A definition marked `opaque_to_smt` hides its body from the SMT solver.
+/// If there's no corresponding `reveal_opaque` call in the file, the definition
+/// is effectively invisible to proofs, which may be unintentional.
+pub struct OpaqueWithoutRevealRule;
+
+impl OpaqueWithoutRevealRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for OpaqueWithoutRevealRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST031
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut block_depth: u32 = 0;
+        let lines: Vec<&str> = content.lines().collect();
+
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let prev_depth = block_depth;
+            block_depth = update_block_comment_depth(line, block_depth);
+
+            if line_in_block_comment(prev_depth, line) {
+                i += 1;
+                continue;
+            }
+
+            let code = strip_line_comment(line);
+
+            // Look for opaque_to_smt attribute
+            if !code.contains("opaque_to_smt") {
+                i += 1;
+                continue;
+            }
+
+            // Confirm it's an attribute (within [@@...])
+            if !code.contains("[@@") && !code.contains("[@@ ") {
+                i += 1;
+                continue;
+            }
+
+            // Find the name of the next definition (val or let on same or following lines)
+            let def_name = find_next_definition_name(&lines, i);
+            if let Some((name, def_line_idx)) = def_name {
+                // Search the entire file for reveal_opaque with this name
+                let quoted_name = format!("`{}", name);
+                let string_name = format!("\"{}\"", name);
+                // Also check for qualified names ending with .name
+                let dot_name = format!(".{}", name);
+
+                let mut found_reveal = false;
+                for line in &lines {
+                    if line.contains("reveal_opaque") {
+                        if line.contains(&quoted_name)
+                            || line.contains(&string_name)
+                            || line.contains(&dot_name)
+                        {
+                            found_reveal = true;
+                            break;
+                        }
+                    }
+                    // Also check for norm_spec with unfold
+                    if line.contains("norm_spec") && line.contains(&name) {
+                        found_reveal = true;
+                        break;
+                    }
+                }
+
+                if !found_reveal {
+                    let diag_line = def_line_idx + 1;
+                    let col = lines[def_line_idx]
+                        .find(&name)
+                        .unwrap_or(0);
+                    diagnostics.push(Diagnostic {
+                        rule: RuleCode::FST031,
+                        severity: DiagnosticSeverity::Info,
+                        file: file.to_path_buf(),
+                        range: Range::new(
+                            diag_line,
+                            byte_to_char_col(lines[def_line_idx], col),
+                            diag_line,
+                            byte_to_char_col(lines[def_line_idx], col + name.len()),
+                        ),
+                        message: format!(
+                            "`{}` is marked `opaque_to_smt` but `reveal_opaque` is never \
+                             called for it in this file — its definition is invisible to proofs.",
+                            name
+                        ),
+                        fix: None,
+                    });
+                }
+            }
+
+            i += 1;
+        }
+
+        diagnostics
+    }
+}
+
+/// Find the name of the next `val` or `let` definition after line `start_idx`.
+///
+/// Returns `Some((name, line_index))` or `None`.
+fn find_next_definition_name(lines: &[&str], start_idx: usize) -> Option<(String, usize)> {
+    for j in start_idx..lines.len().min(start_idx + 5) {
+        let trimmed = lines[j].trim();
+        // Try val
+        if let Some(rest) = trimmed.strip_prefix("val ") {
+            let name = rest.split(|c: char| c == ':' || c.is_whitespace())
+                .next()
+                .unwrap_or("");
+            if !name.is_empty() {
+                return Some((name.to_string(), j));
+            }
+        }
+        // Try let / let rec
+        for prefix in &["let rec ", "let "] {
+            if let Some(rest) = trimmed.strip_prefix(prefix) {
+                let name = rest.split(|c: char| {
+                    c == ':' || c == '(' || c == '#' || c.is_whitespace()
+                })
+                    .next()
+                    .unwrap_or("");
+                if !name.is_empty() && name != "rec" {
+                    return Some((name.to_string(), j));
+                }
+            }
+        }
+    }
+    None
+}
+
+// ==========================================================================
+// FST034: SimpCandidateRule
+// ==========================================================================
+
+/// FST034: Detect equality lemmas that could be `[@@simp]` candidates.
+///
+/// A lemma whose postcondition is `ensures (f x == g x)` or `ensures (f x = g x)`
+/// is a rewrite rule suitable for the `[@@simp]` attribute. Suggests adding it
+/// when absent.
+pub struct SimpCandidateRule;
+
+impl SimpCandidateRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for SimpCandidateRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST034
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut block_depth: u32 = 0;
+        let lines: Vec<&str> = content.lines().collect();
+
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let prev_depth = block_depth;
+            block_depth = update_block_comment_depth(line, block_depth);
+
+            if line_in_block_comment(prev_depth, line) {
+                i += 1;
+                continue;
+            }
+
+            let trimmed = strip_line_comment(line).trim_start();
+
+            // Look for `val` declarations with `Lemma`
+            if !trimmed.starts_with("val ") {
+                i += 1;
+                continue;
+            }
+
+            // Check if already has [@@simp]
+            if has_attribute_before(&lines, i, "simp") {
+                i += 1;
+                continue;
+            }
+
+            // Collect the val signature (may span multiple lines)
+            let sig = collect_val_signature(&lines, i);
+
+            // Check for Lemma return type with ensures containing == or =
+            if !sig.contains("Lemma") {
+                i += 1;
+                continue;
+            }
+
+            if let Some(ensures_part) = extract_ensures(&sig) {
+                // Check for equality: == or = (but not ==> which is implication)
+                let has_eq = has_double_equals(&ensures_part)
+                    || has_bare_equals(&ensures_part);
+                if has_eq {
+                    let line_num = i + 1;
+                    let col = line.find("val").unwrap_or(0);
+                    let name = trimmed.strip_prefix("val ")
+                        .and_then(|r| r.split(|c: char| c == ':' || c.is_whitespace()).next())
+                        .unwrap_or("?");
+                    diagnostics.push(Diagnostic {
+                        rule: RuleCode::FST034,
+                        severity: DiagnosticSeverity::Hint,
+                        file: file.to_path_buf(),
+                        range: Range::new(
+                            line_num,
+                            byte_to_char_col(line, col),
+                            line_num,
+                            byte_to_char_col(line, col + 3),
+                        ),
+                        message: format!(
+                            "Lemma `{}` has an equality postcondition — \
+                             consider adding `[@@simp]` to use it as a rewrite rule.",
+                            name
+                        ),
+                        fix: None,
+                    });
+                }
+            }
+
+            i += 1;
+        }
+
+        diagnostics
+    }
+}
+
+/// Collect a val signature spanning multiple lines until the next top-level declaration.
+fn collect_val_signature(lines: &[&str], start: usize) -> String {
+    let mut sig = String::new();
+    for j in start..lines.len().min(start + 15) {
+        let t = lines[j].trim();
+        if j > start
+            && (t.starts_with("let ") || t.starts_with("val ")
+                || t.starts_with("type ") || t.starts_with("module ")
+                || t.starts_with("open ") || t.is_empty())
+        {
+            break;
+        }
+        sig.push(' ');
+        sig.push_str(t);
+    }
+    sig
+}
+
+/// Extract the ensures clause content from a signature string.
+fn extract_ensures(sig: &str) -> Option<String> {
+    // Find `ensures` or `ensures (`
+    let idx = sig.find("ensures")?;
+    let rest = &sig[idx + 7..]; // skip "ensures"
+    Some(rest.to_string())
+}
+
+/// Check if a string contains `==` that is NOT part of `==>`.
+fn has_double_equals(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    for i in 0..bytes.len().saturating_sub(1) {
+        if bytes[i] == b'=' && bytes[i + 1] == b'=' {
+            // Not ==> (implication)
+            let next2 = if i + 2 < bytes.len() { bytes[i + 2] } else { b' ' };
+            if next2 != b'>' {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if a string contains bare `=` (not `==`, `==>`, `<=`, `>=`, `!=`).
+fn has_bare_equals(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    for i in 0..bytes.len() {
+        if bytes[i] == b'=' {
+            let prev = if i > 0 { bytes[i - 1] } else { b' ' };
+            let next = if i + 1 < bytes.len() { bytes[i + 1] } else { b' ' };
+            // Not ==, !=, <=, >=, ==>
+            if prev != b'=' && prev != b'!' && prev != b'<' && prev != b'>'
+                && next != b'=' && next != b'>'
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// ==========================================================================
+// FST037: TotVsGtotRule
+// ==========================================================================
+
+/// FST037: Detect `erased` parameters in `Tot` context.
+///
+/// In F*, `erased` values can only be consumed in `GTot` (ghost) context. A
+/// function that takes an `erased` parameter but has a `Tot` effect is always
+/// wrong — it will fail type checking.
+pub struct TotVsGtotRule;
+
+impl TotVsGtotRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for TotVsGtotRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST037
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut block_depth: u32 = 0;
+        let lines: Vec<&str> = content.lines().collect();
+
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let prev_depth = block_depth;
+            block_depth = update_block_comment_depth(line, block_depth);
+
+            if line_in_block_comment(prev_depth, line) {
+                i += 1;
+                continue;
+            }
+
+            let trimmed = strip_line_comment(line).trim_start();
+
+            // Look for val declarations
+            if !trimmed.starts_with("val ") && !trimmed.starts_with("assume val ") {
+                i += 1;
+                continue;
+            }
+
+            let sig = collect_val_signature(&lines, i);
+
+            // Check: has `erased` in parameters AND `Tot` in return type (not GTot)
+            if !sig.contains("erased") {
+                i += 1;
+                continue;
+            }
+
+            // Find arrow-separated parts — the last segment is the return type
+            // Simple heuristic: look for `Tot ` (with space) after the last `->`
+            // and `erased` before it
+            if has_erased_tot_mismatch(&sig) {
+                let line_num = i + 1;
+                let col = line.find("val")
+                    .or_else(|| line.find("assume"))
+                    .unwrap_or(0);
+                let name = extract_val_name(trimmed);
+                diagnostics.push(Diagnostic {
+                    rule: RuleCode::FST037,
+                    severity: DiagnosticSeverity::Error,
+                    file: file.to_path_buf(),
+                    range: Range::new(
+                        line_num,
+                        byte_to_char_col(line, col),
+                        line_num,
+                        byte_to_char_col(line, col + trimmed.len().min(line.len())),
+                    ),
+                    message: format!(
+                        "Function `{}` takes `erased` parameter but returns `Tot` — \
+                         `erased` values can only be consumed in `GTot` context.",
+                        name
+                    ),
+                    fix: None,
+                });
+            }
+
+            i += 1;
+        }
+
+        diagnostics
+    }
+}
+
+/// Check if a signature has the erased-in-Tot mismatch.
+///
+/// Returns true if `erased` appears in parameter position and `Tot` (not `GTot`)
+/// appears as the return effect.
+fn has_erased_tot_mismatch(sig: &str) -> bool {
+    // Find the last `->` to split parameters from return type
+    let last_arrow = sig.rfind("->");
+    if let Some(arrow_pos) = last_arrow {
+        let params = &sig[..arrow_pos];
+        let ret = &sig[arrow_pos..];
+
+        // Parameters must contain `erased`
+        if !params.contains("erased") {
+            return false;
+        }
+
+        // Return type must contain `Tot` but not `GTot`
+        // Pattern: `-> Tot ` or `-> Pure ` (Tot is the default non-ghost effect)
+        if ret.contains("Tot ") || ret.contains("Tot(") {
+            // Make sure it's not GTot
+            if !ret.contains("GTot") {
+                return true;
+            }
+        }
+
+        // Also detect: `erased a -> b` where `b` has no effect annotation
+        // (default is Tot). But this is harder to detect without parsing,
+        // so only flag explicit `Tot`.
+    }
+    false
+}
+
+/// Extract the name from a `val` declaration line.
+fn extract_val_name(trimmed: &str) -> &str {
+    let rest = trimmed
+        .strip_prefix("assume val ")
+        .or_else(|| trimmed.strip_prefix("val "))
+        .unwrap_or(trimmed);
+    rest.split(|c: char| c == ':' || c.is_whitespace())
+        .next()
+        .unwrap_or("?")
+}
+
+// ==========================================================================
+// FST038: IntroduceWithRule
+// ==========================================================================
+
+/// FST038: Suggest `introduce forall ... with` for structured universal proofs.
+///
+/// When code uses `Classical.forall_intro` or similar manual patterns, the
+/// structured `introduce forall x. P x with (proof)` syntax is cleaner.
+pub struct IntroduceWithRule;
+
+impl IntroduceWithRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for IntroduceWithRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST038
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut block_depth: u32 = 0;
+
+        let patterns = [
+            ("Classical.forall_intro", "introduce forall x. P x with (proof)"),
+            ("Classical.forall_intro_2", "introduce forall x y. P x y with (proof)"),
+            ("Classical.forall_intro_3", "introduce forall x y z. P x y z with (proof)"),
+            ("Classical.impl_intro", "introduce implies P with (proof)"),
+        ];
+
+        for (line_idx, line) in content.lines().enumerate() {
+            let prev_depth = block_depth;
+            block_depth = update_block_comment_depth(line, block_depth);
+
+            if line_in_block_comment(prev_depth, line) {
+                continue;
+            }
+
+            let code = strip_line_comment(line);
+
+            for &(pattern, suggestion) in &patterns {
+                if let Some(byte_pos) = code.find(pattern) {
+                    let line_num = line_idx + 1;
+                    diagnostics.push(Diagnostic {
+                        rule: RuleCode::FST038,
+                        severity: DiagnosticSeverity::Hint,
+                        file: file.to_path_buf(),
+                        range: Range::new(
+                            line_num,
+                            byte_to_char_col(line, byte_pos),
+                            line_num,
+                            byte_to_char_col(line, byte_pos + pattern.len()),
+                        ),
+                        message: format!(
+                            "Consider using `{}` instead of `{}` for structured proof.",
+                            suggestion, pattern
+                        ),
+                        fix: None,
+                    });
+                    break; // one diagnostic per line
+                }
+            }
+        }
+
+        diagnostics
+    }
+}
+
+// ==========================================================================
+// FST041: RequiresTrueOkRule
+// ==========================================================================
+
+/// FST041: Flag `requires True` paired with removal hints.
+///
+/// In F*, `requires True` is intentional — it documents that the caller's
+/// proof obligation is trivially satisfied. This rule detects `requires True`
+/// near TODO/FIXME comments suggesting removal, and warns that removal is wrong.
+pub struct RequiresTrueOkRule;
+
+impl RequiresTrueOkRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for RequiresTrueOkRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST041
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut block_depth: u32 = 0;
+        let lines: Vec<&str> = content.lines().collect();
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            let prev_depth = block_depth;
+            block_depth = update_block_comment_depth(line, block_depth);
+
+            if line_in_block_comment(prev_depth, line) {
+                continue;
+            }
+
+            let code = strip_line_comment(line);
+
+            // Look for `requires True` (with various whitespace/paren combos)
+            if !contains_requires_true(code) {
+                continue;
+            }
+
+            // Check nearby lines (same line comment, +/- 2 lines) for removal hints
+            let has_removal_hint = nearby_has_removal_hint(&lines, line_idx);
+
+            if has_removal_hint {
+                let byte_pos = code.find("requires").unwrap_or(0);
+                let line_num = line_idx + 1;
+                diagnostics.push(Diagnostic {
+                    rule: RuleCode::FST041,
+                    severity: DiagnosticSeverity::Hint,
+                    file: file.to_path_buf(),
+                    range: Range::new(
+                        line_num,
+                        byte_to_char_col(line, byte_pos),
+                        line_num,
+                        byte_to_char_col(line, byte_pos + 8),
+                    ),
+                    message: "`requires True` is intentional in F* — it ensures the \
+                              caller's proof obligation is trivially satisfied. \
+                              Do not remove it."
+                        .to_string(),
+                    fix: None,
+                });
+            }
+        }
+
+        diagnostics
+    }
+}
+
+/// Check if a code line contains `requires True` (with optional parens).
+fn contains_requires_true(code: &str) -> bool {
+    // Match patterns: `requires True`, `(requires True)`, `requires (True)`
+    let Some(idx) = code.find("requires") else { return false };
+    let after = code[idx + 8..].trim_start();
+    let after = after.strip_prefix('(').unwrap_or(after);
+    let after = after.trim_start();
+    after.starts_with("True")
+}
+
+/// Check if nearby lines contain TODO/FIXME comments about removing requires True.
+fn nearby_has_removal_hint(lines: &[&str], line_idx: usize) -> bool {
+    let start = line_idx.saturating_sub(2);
+    let end = (line_idx + 3).min(lines.len());
+
+    let removal_keywords = ["TODO", "FIXME", "HACK", "remove", "redundant", "unnecessary"];
+
+    for j in start..end {
+        let line_lower = lines[j].to_lowercase();
+        // Check if line has both a removal keyword and mentions "requires" or "True"
+        if removal_keywords.iter().any(|kw| lines[j].contains(kw) || line_lower.contains(&kw.to_lowercase())) {
+            if line_lower.contains("requires") || line_lower.contains("true") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// ==========================================================================
+// FST043: TickVsExplicitRule
+// ==========================================================================
+
+/// FST043: Detect inconsistent implicit variable syntax in the same declaration.
+///
+/// F* supports two ways to introduce implicit type variables:
+/// - Tick syntax: `'a`, `'b` (auto-bound)
+/// - Explicit binders: `#a:Type`, `(#b:Type)`
+///
+/// Mixing both in one declaration is confusing and should be avoided.
+pub struct TickVsExplicitRule;
+
+impl TickVsExplicitRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for TickVsExplicitRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST043
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut block_depth: u32 = 0;
+        let lines: Vec<&str> = content.lines().collect();
+
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let prev_depth = block_depth;
+            block_depth = update_block_comment_depth(line, block_depth);
+
+            if line_in_block_comment(prev_depth, line) {
+                i += 1;
+                continue;
+            }
+
+            let trimmed = strip_line_comment(line).trim_start();
+
+            // Only check val and let declarations
+            let is_decl = trimmed.starts_with("val ")
+                || trimmed.starts_with("let ")
+                || trimmed.starts_with("let rec ");
+
+            if !is_decl {
+                i += 1;
+                continue;
+            }
+
+            // Collect the full signature
+            let sig = if trimmed.starts_with("val ") {
+                collect_val_signature(&lines, i)
+            } else {
+                // For let, take until =
+                let mut s = String::new();
+                for j in i..lines.len().min(i + 10) {
+                    let t = lines[j].trim();
+                    s.push(' ');
+                    s.push_str(t);
+                    if t.contains('=') {
+                        break;
+                    }
+                }
+                s
+            };
+
+            let has_tick = has_tick_variables(&sig);
+            let has_explicit = has_explicit_implicit_binders(&sig);
+
+            if has_tick && has_explicit {
+                let line_num = i + 1;
+                let col = line.find("val")
+                    .or_else(|| line.find("let"))
+                    .unwrap_or(0);
+                diagnostics.push(Diagnostic {
+                    rule: RuleCode::FST043,
+                    severity: DiagnosticSeverity::Warning,
+                    file: file.to_path_buf(),
+                    range: Range::new(
+                        line_num,
+                        byte_to_char_col(line, col),
+                        line_num,
+                        byte_to_char_col(line, col + trimmed.len().min(line.len())),
+                    ),
+                    message: "Inconsistent implicit syntax — mixing tick variables (`'a`) \
+                              with explicit `#` binders (`#a:Type`) in the same declaration. \
+                              Pick one style."
+                        .to_string(),
+                    fix: None,
+                });
+            }
+
+            i += 1;
+        }
+
+        diagnostics
+    }
+}
+
+/// Check if a signature contains tick variables (`'a`, `'b`, etc.).
+///
+/// Tick variables: `'` followed by a lowercase letter, not inside a string.
+fn has_tick_variables(sig: &str) -> bool {
+    let bytes = sig.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut in_string = false;
+
+    while i < len {
+        if in_string {
+            if bytes[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'\'' && i + 1 < len && bytes[i + 1].is_ascii_lowercase() {
+            // Make sure it's not part of an identifier (e.g., `x'a` continuation)
+            if i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_' {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Check if a signature contains explicit implicit binders (`#a`, `(#a:Type)`).
+fn has_explicit_implicit_binders(sig: &str) -> bool {
+    let bytes = sig.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut in_string = false;
+
+    while i < len {
+        if in_string {
+            if bytes[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'#' && i + 1 < len && bytes[i + 1].is_ascii_lowercase() {
+            // Check it's a binder position (preceded by whitespace, `(`, or start)
+            if i == 0 || bytes[i - 1].is_ascii_whitespace() || bytes[i - 1] == b'(' {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+// ==========================================================================
+// FST044: MissingDecreasesRule
+// ==========================================================================
+
+/// FST044: Detect `let rec` without a `decreases` clause.
+///
+/// Recursive functions should have explicit `decreases` clauses for clear
+/// termination proofs. F* can infer structural recursion in simple cases,
+/// but an explicit clause documents the termination argument.
+pub struct MissingDecreasesRule;
+
+impl MissingDecreasesRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for MissingDecreasesRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST044
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut block_depth: u32 = 0;
+        let lines: Vec<&str> = content.lines().collect();
+
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let prev_depth = block_depth;
+            block_depth = update_block_comment_depth(line, block_depth);
+
+            if line_in_block_comment(prev_depth, line) {
+                i += 1;
+                continue;
+            }
+
+            let trimmed = strip_line_comment(line).trim_start();
+
+            // Look for `let rec` definitions
+            if !trimmed.starts_with("let rec ") {
+                i += 1;
+                continue;
+            }
+
+            // Extract function name
+            let rest = &trimmed[8..]; // skip "let rec "
+            let func_name = rest
+                .split(|c: char| c == ':' || c == '(' || c == '#' || c.is_whitespace())
+                .next()
+                .unwrap_or("?");
+
+            if func_name.is_empty() || func_name == "?" {
+                i += 1;
+                continue;
+            }
+
+            // Collect the function signature + body
+            let body = collect_function_body(&lines, i);
+
+            // Check if the function actually calls itself
+            if !is_actually_recursive(func_name, &body) {
+                i += 1;
+                continue;
+            }
+
+            // Check for `decreases` clause
+            if body.contains("decreases") {
+                i += 1;
+                continue;
+            }
+
+            // Check for obvious structural recursion patterns that don't need decreases.
+            // If the function pattern-matches a parameter and recurses on a subterm,
+            // F* can infer the decreases clause. Still flag it as Info since explicit is better.
+            let line_num = i + 1;
+            let col = line.find("let rec").unwrap_or(0);
+            diagnostics.push(Diagnostic {
+                rule: RuleCode::FST044,
+                severity: DiagnosticSeverity::Info,
+                file: file.to_path_buf(),
+                range: Range::new(
+                    line_num,
+                    byte_to_char_col(line, col),
+                    line_num,
+                    byte_to_char_col(line, col + 7 + func_name.len() + 1),
+                ),
+                message: format!(
+                    "Recursive function `{}` has no `decreases` clause — \
+                     add one for explicit termination proof.",
+                    func_name
+                ),
+                fix: None,
+            });
+
+            i += 1;
+        }
+
+        diagnostics
+    }
+}
+
+/// Check if a function body actually contains a recursive call to `func_name`.
+fn is_actually_recursive(func_name: &str, body: &str) -> bool {
+    // Look for the function name after `=` in a call position.
+    // It must appear as a standalone token (not part of a larger identifier).
+    let name_len = func_name.len();
+    let bytes = body.as_bytes();
+    let name_bytes = func_name.as_bytes();
+    let mut found_equals = false;
+
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'=' && !found_equals {
+            // Check it's not == or =>
+            let next = if i + 1 < bytes.len() { bytes[i + 1] } else { b' ' };
+            if next != b'=' && next != b'>' {
+                found_equals = true;
+            }
+        }
+        if found_equals && i + name_len <= bytes.len() && &bytes[i..i + name_len] == name_bytes {
+            // Check word boundaries
+            let before_ok = i == 0
+                || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_' && bytes[i - 1] != b'\'';
+            let after_ok = i + name_len >= bytes.len()
+                || !bytes[i + name_len].is_ascii_alphanumeric()
+                    && bytes[i + name_len] != b'_'
+                    && bytes[i + name_len] != b'\'';
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+// ==========================================================================
+// Tests
+// ==========================================================================
+
+
+// ==========================================================================
+// FST032: UniverseHintRule
+// ==========================================================================
+
+/// FST032: Hint about universe annotations (`Type u#0` -> `Type0`, `Type u#1` -> `Type1`).
+pub struct UniverseHintRule;
+
+impl UniverseHintRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for UniverseHintRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST032
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut in_block_comment = false;
+
+        for (line_idx, line) in content.lines().enumerate() {
+            let (effective, still_in_block) = strip_comments_full(line, in_block_comment);
+            in_block_comment = still_in_block;
+
+            // Scan for `Type u#0` and `Type u#1` patterns.
+            let bytes = effective.as_bytes();
+            let mut i = 0;
+            while i + 8 <= bytes.len() {
+                // Look for "Type u#"
+                if &effective[i..i + 7] == "Type u#" {
+                    // Verify `Type` is a standalone word.
+                    let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                    if !before_ok {
+                        i += 1;
+                        continue;
+                    }
+
+                    let digit_start = i + 7;
+                    if digit_start < bytes.len() && bytes[digit_start] == b'0' {
+                        let after = digit_start + 1;
+                        let after_ok =
+                            after >= bytes.len() || !bytes[after].is_ascii_alphanumeric();
+                        if after_ok {
+                            let col = byte_to_char_col(line, i);
+                            diagnostics.push(Diagnostic {
+                                rule: RuleCode::FST032,
+                                severity: DiagnosticSeverity::Hint,
+                                file: file.to_path_buf(),
+                                range: Range::new(
+                                    line_idx + 1,
+                                    col,
+                                    line_idx + 1,
+                                    col + 8, // "Type u#0"
+                                ),
+                                message: "`Type u#0` can be written as `Type0` for clarity."
+                                    .to_string(),
+                                fix: None,
+                            });
+                        }
+                    } else if digit_start < bytes.len() && bytes[digit_start] == b'1' {
+                        let after = digit_start + 1;
+                        let after_ok =
+                            after >= bytes.len() || !bytes[after].is_ascii_alphanumeric();
+                        if after_ok {
+                            let col = byte_to_char_col(line, i);
+                            diagnostics.push(Diagnostic {
+                                rule: RuleCode::FST032,
+                                severity: DiagnosticSeverity::Hint,
+                                file: file.to_path_buf(),
+                                range: Range::new(
+                                    line_idx + 1,
+                                    col,
+                                    line_idx + 1,
+                                    col + 8, // "Type u#1"
+                                ),
+                                message: "`Type u#1` can be written as `Type1` for clarity."
+                                    .to_string(),
+                                fix: None,
+                            });
+                        }
+                    }
+                    i = digit_start + 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        diagnostics
+    }
+}
+
+// ==========================================================================
+// FST033: TacticSuggestionRule
+// ==========================================================================
+
+/// FST033: Suggest tactic-based proofs when z3rlimit is very high.
+///
+/// When `#push-options` or `#set-options` sets `z3rlimit` to >= 100, this
+/// hints that the proof might benefit from a tactic-based approach.
+pub struct TacticSuggestionRule;
+
+impl TacticSuggestionRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for TacticSuggestionRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST033
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut block_depth: u32 = 0;
+
+        for (line_idx, line) in content.lines().enumerate() {
+            block_depth = update_block_comment_depth(line, block_depth);
+            if block_depth > 0 {
+                continue;
+            }
+
+            let effective = strip_line_comment(line);
+            let trimmed = effective.trim();
+
+            // Match `#push-options` or `#set-options` containing z3rlimit.
+            if !(trimmed.starts_with("#push-options") || trimmed.starts_with("#set-options")) {
+                continue;
+            }
+
+            // Extract z3rlimit value.
+            if let Some(rlimit_pos) = trimmed.find("z3rlimit") {
+                let after = &trimmed[rlimit_pos + "z3rlimit".len()..];
+                // Skip whitespace and optional `_factor`.
+                let after = after.trim_start();
+                // Could be `z3rlimit N` or `z3rlimit_factor N` — only handle plain z3rlimit.
+                if after.starts_with('_') {
+                    // z3rlimit_factor — skip, different semantics.
+                    continue;
+                }
+                // Parse the numeric value.
+                let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(limit) = digits.parse::<u64>() {
+                    if limit >= 100 {
+                        let col = byte_to_char_col(
+                            line,
+                            line.find("z3rlimit").unwrap_or(0),
+                        );
+                        diagnostics.push(Diagnostic {
+                            rule: RuleCode::FST033,
+                            severity: DiagnosticSeverity::Hint,
+                            file: file.to_path_buf(),
+                            range: Range::new(line_idx + 1, col, line_idx + 1, col + 8),
+                            message: format!(
+                                "z3rlimit {} is high. Consider using tactics (`assert ... by`, \
+                                 `calc`, `norm`) for more robust proofs that don't depend on \
+                                 SMT heuristics.",
+                                limit
+                            ),
+                            fix: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        diagnostics
+    }
+}
+
+// ==========================================================================
+// FST045: NoeqVsUnopteqRule (FIXABLE)
+// ==========================================================================
+
+/// FST045: Suggest `unopteq` when `noeq` is used on a record with no function-typed fields.
+///
+/// `noeq` suppresses all equality. `unopteq` suppresses only auto-generated
+/// equality but still permits manually defining decidable equality later.
+pub struct NoeqVsUnopteqRule;
+
+impl NoeqVsUnopteqRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// Check if any field type in a record body contains a function arrow `->`.
+///
+/// Scans from the opening `{` to the closing `}` of the record body.
+/// Returns `true` if any field has a function type (contains `->`).
+fn record_has_function_fields(lines: &[&str], start_line: usize) -> bool {
+    let mut brace_depth: u32 = 0;
+    let mut found_open = false;
+
+    for i in start_line..lines.len() {
+        let effective = strip_line_comment(lines[i]);
+        for (j, b) in effective.bytes().enumerate() {
+            match b {
+                b'{' => {
+                    brace_depth += 1;
+                    found_open = true;
+                }
+                b'}' => {
+                    brace_depth = brace_depth.saturating_sub(1);
+                    if found_open && brace_depth == 0 {
+                        return false;
+                    }
+                }
+                b'-' if found_open && brace_depth > 0 => {
+                    if j + 1 < effective.len() && effective.as_bytes()[j + 1] == b'>' {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Stop searching after 50 lines to avoid runaway scans.
+        if i > start_line + 50 {
+            break;
+        }
+    }
+    false
+}
+
+impl Rule for NoeqVsUnopteqRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST045
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+        let mut block_depth: u32 = 0;
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            block_depth = update_block_comment_depth(line, block_depth);
+            if block_depth > 0 {
+                continue;
+            }
+
+            let effective = strip_line_comment(line);
+            let trimmed = effective.trim();
+
+            // Match `noeq type`.
+            if !trimmed.starts_with("noeq type ") {
+                continue;
+            }
+
+            // Check if any field has a function type.
+            if record_has_function_fields(&lines, line_idx) {
+                // Has function fields — `noeq` is appropriate.
+                continue;
+            }
+
+            // Find the byte position of `noeq` in the original line.
+            let noeq_pos = match line.find("noeq") {
+                Some(p) => p,
+                None => continue,
+            };
+            let col = byte_to_char_col(line, noeq_pos);
+
+            let fix = Fix {
+                message: "Replace `noeq` with `unopteq`".to_string(),
+                edits: vec![Edit {
+                    file: file.to_path_buf(),
+                    range: Range::new(line_idx + 1, col, line_idx + 1, col + 4), // "noeq" is 4 chars
+                    new_text: "unopteq".to_string(),
+                }],
+                confidence: FixConfidence::Medium,
+                unsafe_reason: None,
+                safety_level: FixSafetyLevel::Caution,
+                reversible: true,
+                requires_review: true,
+            };
+
+            diagnostics.push(Diagnostic {
+                rule: RuleCode::FST045,
+                severity: DiagnosticSeverity::Info,
+                file: file.to_path_buf(),
+                range: Range::new(line_idx + 1, col, line_idx + 1, col + 4),
+                message:
+                    "`noeq` suppresses all equality for this type. Since no fields have \
+                     function types, consider `unopteq` instead — it only suppresses \
+                     auto-generated equality, allowing you to define decidable equality manually."
+                        .to_string(),
+                fix: Some(fix),
+            });
+        }
+
+        diagnostics
+    }
+}
+
+// ==========================================================================
+// FST046: ErasableSuggestionRule
+// ==========================================================================
+
+/// FST046: Suggest `[@@ erasable]` for types where all fields are proof-only.
+///
+/// A type whose fields are all `prop`, `Type0`, `squash`, or `erased` is
+/// clearly proof-only and should be marked erasable so extraction removes it.
+pub struct ErasableSuggestionRule;
+
+impl ErasableSuggestionRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// Proof-only type keywords that indicate a field is not computationally relevant.
+const PROOF_ONLY_TYPES: &[&str] = &[
+    "prop", "Type0", "Type", "squash", "erased", "unit", "b2t",
+];
+
+/// Check if a field type is proof-only (contains only proof-related types).
+fn is_proof_only_field(field_type: &str) -> bool {
+    let trimmed = field_type.trim().trim_end_matches(';');
+    // The field type must contain at least one proof-only keyword
+    // and must NOT contain computational types.
+    PROOF_ONLY_TYPES.iter().any(|kw| {
+        let bytes = trimmed.as_bytes();
+        let kw_bytes = kw.as_bytes();
+        let kw_len = kw_bytes.len();
+        let mut i = 0;
+        while i + kw_len <= bytes.len() {
+            if &bytes[i..i + kw_len] == kw_bytes {
+                let before = i == 0 || !is_ident_char(bytes[i - 1]);
+                let after = i + kw_len >= bytes.len() || !is_ident_char(bytes[i + kw_len]);
+                if before && after {
+                    return true;
+                }
+            }
+            i += 1;
+        }
+        false
+    })
+}
+
+impl Rule for ErasableSuggestionRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST046
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+        let mut block_depth: u32 = 0;
+        let mut i = 0;
+
+        while i < lines.len() {
+            block_depth = update_block_comment_depth(lines[i], block_depth);
+            if block_depth > 0 {
+                i += 1;
+                continue;
+            }
+
+            let trimmed = strip_line_comment(lines[i]).trim();
+
+            // Match type declarations (possibly with `noeq` or `unopteq` prefix).
+            let type_keyword_pos = if trimmed.starts_with("type ") {
+                Some(0)
+            } else if trimmed.starts_with("noeq type ") {
+                Some(5)
+            } else if trimmed.starts_with("unopteq type ") {
+                Some(8)
+            } else {
+                None
+            };
+
+            if type_keyword_pos.is_none() {
+                i += 1;
+                continue;
+            }
+
+            // Check if it already has `[@@ erasable]` on preceding lines.
+            let mut has_erasable = false;
+            if i > 0 {
+                for k in (0..i).rev() {
+                    let prev = lines[k].trim();
+                    if prev.is_empty() {
+                        break;
+                    }
+                    if prev.contains("erasable") {
+                        has_erasable = true;
+                        break;
+                    }
+                    if !prev.starts_with("[@@") && !prev.starts_with("[@@@") {
+                        break;
+                    }
+                }
+            }
+            if has_erasable || trimmed.contains("erasable") {
+                i += 1;
+                continue;
+            }
+
+            // Find the record body `{ ... }` and check ALL fields.
+            let mut brace_depth: u32 = 0;
+            let mut found_open = false;
+            let mut all_fields_proof_only = true;
+            let mut has_fields = false;
+            let mut scan_end = i;
+
+            'outer: for k in i..lines.len().min(i + 50) {
+                let eff = strip_line_comment(lines[k]);
+                for (j, b) in eff.bytes().enumerate() {
+                    match b {
+                        b'{' => {
+                            brace_depth += 1;
+                            found_open = true;
+                        }
+                        b'}' => {
+                            brace_depth = brace_depth.saturating_sub(1);
+                            if found_open && brace_depth == 0 {
+                                scan_end = k;
+                                break 'outer;
+                            }
+                        }
+                        b':' if found_open && brace_depth == 1 => {
+                            // Found a field separator — the type follows the `:`.
+                            let field_type = &eff[j + 1..];
+                            has_fields = true;
+                            if !is_proof_only_field(field_type) {
+                                all_fields_proof_only = false;
+                                break 'outer;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if found_open && has_fields && all_fields_proof_only {
+                let col = byte_to_char_col(lines[i], lines[i].find("type").unwrap_or(0));
+                diagnostics.push(Diagnostic {
+                    rule: RuleCode::FST046,
+                    severity: DiagnosticSeverity::Hint,
+                    file: file.to_path_buf(),
+                    range: Range::new(i + 1, col, i + 1, col + 4),
+                    message:
+                        "All fields of this type are proof-only (`prop`, `Type0`, `squash`, \
+                         `erased`). Consider adding `[@@ erasable]` so extraction erases it."
+                            .to_string(),
+                    fix: None,
+                });
+            }
+
+            i = scan_end + 1;
+        }
+
+        diagnostics
+    }
+}
+
+// ==========================================================================
+// FST047: SumVsOrRule
+// ==========================================================================
+
+/// FST047: Detect `Prims.sum`/`Inl`/`Inr` in ghost/lemma contexts where `\/` is appropriate.
+pub struct SumVsOrRule;
+
+impl SumVsOrRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for SumVsOrRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST047
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut block_depth: u32 = 0;
+        let mut in_ghost_context = false;
+
+        for (line_idx, line) in content.lines().enumerate() {
+            block_depth = update_block_comment_depth(line, block_depth);
+            if block_depth > 0 {
+                continue;
+            }
+
+            let effective = strip_line_comment(line);
+            let trimmed = effective.trim();
+
+            // Track ghost/lemma context.
+            if trimmed.starts_with("val ") || trimmed.starts_with("let ") {
+                in_ghost_context = trimmed.contains("Lemma")
+                    || trimmed.contains("GTot")
+                    || trimmed.contains("Ghost");
+            }
+            // Also set context if the line itself mentions these effects.
+            if trimmed.contains("Lemma") || trimmed.contains("GTot") || trimmed.contains("Ghost") {
+                in_ghost_context = true;
+            }
+            // Reset on blank lines or new top-level declarations.
+            if trimmed.is_empty() {
+                in_ghost_context = false;
+            }
+
+            if !in_ghost_context {
+                continue;
+            }
+
+            // Check for `Prims.sum` usage.
+            if let Some(pos) = effective.find("Prims.sum") {
+                if is_word_at(effective, pos, "Prims.sum") {
+                    let col = byte_to_char_col(line, pos);
+                    diagnostics.push(Diagnostic {
+                        rule: RuleCode::FST047,
+                        severity: DiagnosticSeverity::Info,
+                        file: file.to_path_buf(),
+                        range: Range::new(line_idx + 1, col, line_idx + 1, col + 9),
+                        message:
+                            "`Prims.sum` is constructive disjunction (with `Inl`/`Inr`). \
+                             In a ghost/lemma context, propositional disjunction `\\/` is \
+                             usually more appropriate and proof-irrelevant."
+                                .to_string(),
+                        fix: None,
+                    });
+                }
+            }
+
+            // Check for standalone `sum` as a type (not `Prims.sum`).
+            if !effective.contains("Prims.sum") {
+                let bytes = effective.as_bytes();
+                let mut j = 0;
+                while j + 3 <= bytes.len() {
+                    if &effective[j..j + 3] == "sum" && is_word_at(effective, j, "sum") {
+                        // Verify it's in a type position (after `:` or in a type annotation).
+                        let before = effective[..j].trim_end();
+                        if before.ends_with(':') || before.ends_with("->") || before.ends_with('(')
+                        {
+                            let col = byte_to_char_col(line, j);
+                            diagnostics.push(Diagnostic {
+                                rule: RuleCode::FST047,
+                                severity: DiagnosticSeverity::Info,
+                                file: file.to_path_buf(),
+                                range: Range::new(line_idx + 1, col, line_idx + 1, col + 3),
+                                message:
+                                    "`sum` is constructive disjunction. In a ghost/lemma \
+                                     context, propositional `\\/` is usually more appropriate."
+                                        .to_string(),
+                                fix: None,
+                            });
+                            break;
+                        }
+                    }
+                    j += 1;
+                }
+            }
+
+            // Check for `Inl`/`Inr` constructors in ghost context.
+            for ctor in &["Inl", "Inr"] {
+                if let Some(pos) = effective.find(ctor) {
+                    if is_word_at(effective, pos, ctor) {
+                        let col = byte_to_char_col(line, pos);
+                        diagnostics.push(Diagnostic {
+                            rule: RuleCode::FST047,
+                            severity: DiagnosticSeverity::Info,
+                            file: file.to_path_buf(),
+                            range: Range::new(line_idx + 1, col, line_idx + 1, col + 3),
+                            message: format!(
+                                "`{}` is a constructor of `Prims.sum` (constructive disjunction). \
+                                 In a ghost/lemma context, consider using `\\/` (propositional \
+                                 disjunction) instead.",
+                                ctor
+                            ),
+                            fix: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        diagnostics
+    }
+}
+
+// ==========================================================================
+// FST048: MissingPluginRule
+// ==========================================================================
+
+/// FST048: Detect tactic definitions with `Tac` effect missing `[@@plugin]`.
+///
+/// The `[@@plugin]` attribute compiles tactics to native OCaml, providing
+/// 10-100x speedup for complex tactics.
+pub struct MissingPluginRule;
+
+impl MissingPluginRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for MissingPluginRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST048
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+        let mut block_depth: u32 = 0;
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            block_depth = update_block_comment_depth(line, block_depth);
+            if block_depth > 0 {
+                continue;
+            }
+
+            let effective = strip_line_comment(line);
+            let trimmed = effective.trim();
+
+            // Look for `let` definitions with `Tac` effect in the signature.
+            let is_let = trimmed.starts_with("let ")
+                || trimmed.starts_with("let rec ")
+                || trimmed.starts_with("and ");
+            if !is_let {
+                continue;
+            }
+
+            // Check if the signature (this line or next few lines) mentions `Tac`.
+            let mut has_tac = false;
+            let mut has_multi_step = false;
+            let scan_end = lines.len().min(line_idx + 30);
+
+            for k in line_idx..scan_end {
+                let raw_line = lines[k];
+                let kt = strip_line_comment(raw_line).trim();
+                if kt.is_empty() {
+                    break;
+                }
+                // Stop at new TOP-LEVEL declarations (not indented body `let ... in`).
+                if k > line_idx {
+                    let is_top_level = !raw_line.starts_with(' ') && !raw_line.starts_with('\t');
+                    if is_top_level
+                        && (kt.starts_with("val ") || kt.starts_with("let ")
+                            || kt.starts_with("type ") || kt.starts_with("open ")
+                            || kt.starts_with("module "))
+                    {
+                        break;
+                    }
+                }
+
+                // Check for Tac effect.
+                if !has_tac {
+                    let bytes = kt.as_bytes();
+                    let mut j = 0;
+                    while j + 3 <= bytes.len() {
+                        if &kt[j..j + 3] == "Tac" {
+                            let before = j == 0 || !is_ident_char(bytes[j - 1]);
+                            let after = j + 3 >= bytes.len() || !is_ident_char(bytes[j + 3]);
+                            if before && after {
+                                has_tac = true;
+                                break;
+                            }
+                        }
+                        j += 1;
+                    }
+                }
+
+                // Check for multi-step body (`;` or `let ... in`).
+                // Only count indicators in body lines (after the definition line).
+                if k > line_idx && has_tac {
+                    if kt.contains(';') || kt.contains("let ") || kt.contains("begin") {
+                        has_multi_step = true;
+                    }
+                }
+            }
+
+            if !has_tac || !has_multi_step {
+                continue;
+            }
+
+            // Check if `[@@plugin]` is already present on preceding attribute lines.
+            let mut has_plugin = false;
+            if line_idx > 0 {
+                for k in (0..line_idx).rev() {
+                    let prev = lines[k].trim();
+                    if prev.is_empty() {
+                        break;
+                    }
+                    if prev.contains("plugin") {
+                        has_plugin = true;
+                        break;
+                    }
+                    if !prev.starts_with("[@@") && !prev.starts_with("[@@@") {
+                        break;
+                    }
+                }
+            }
+            if trimmed.contains("plugin") {
+                has_plugin = true;
+            }
+
+            if has_plugin {
+                continue;
+            }
+
+            let col = byte_to_char_col(line, line.find("let").unwrap_or(0));
+            diagnostics.push(Diagnostic {
+                rule: RuleCode::FST048,
+                severity: DiagnosticSeverity::Info,
+                file: file.to_path_buf(),
+                range: Range::new(line_idx + 1, col, line_idx + 1, col + 3),
+                message:
+                    "Complex tactic definition missing `[@@plugin]`. Native compilation \
+                     via `[@@plugin]` can speed up tactic execution 10-100x."
+                        .to_string(),
+                fix: None,
+            });
+        }
+
+        diagnostics
+    }
+}
+
+// ==========================================================================
+// FST049: AutoClassificationRule
+// ==========================================================================
+
+/// FST049: Guidance on `[@@auto]` lemma usage.
+///
+/// Warns when `[@@auto]` is on a complex lemma without SMT patterns, which
+/// may cause the simplifier to slow down.
+pub struct AutoClassificationRule;
+
+impl AutoClassificationRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for AutoClassificationRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST049
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+        let mut block_depth: u32 = 0;
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            block_depth = update_block_comment_depth(line, block_depth);
+            if block_depth > 0 {
+                continue;
+            }
+
+            let trimmed = line.trim();
+
+            // Find `[@@auto]` or `[@@@auto]` attributes.
+            if !trimmed.contains("auto") || !trimmed.contains("[@@") {
+                continue;
+            }
+
+            // Verify `auto` is standalone in an attribute context.
+            let has_auto_attr = {
+                let mut found = false;
+                if let Some(bracket_pos) = trimmed.find("[@@") {
+                    let after_bracket = &trimmed[bracket_pos..];
+                    if let Some(auto_pos) = after_bracket.find("auto") {
+                        let abs = auto_pos;
+                        let bytes = after_bracket.as_bytes();
+                        let before = abs == 0 || !is_ident_char(bytes[abs - 1]);
+                        let after_end = abs + 4;
+                        let after = after_end >= bytes.len() || !is_ident_char(bytes[after_end]);
+                        if before && after {
+                            found = true;
+                        }
+                    }
+                }
+                found
+            };
+
+            if !has_auto_attr {
+                continue;
+            }
+
+            // Scan the following declaration for SMT patterns or complexity indicators.
+            let mut has_smt_pat = false;
+            let mut has_complex_body = false;
+            let scan_end = lines.len().min(line_idx + 20);
+
+            for k in (line_idx + 1)..scan_end {
+                let kt = lines[k].trim();
+                if kt.is_empty() {
+                    break;
+                }
+                if k > line_idx + 1
+                    && (kt.starts_with("[@@") || kt.starts_with("val ")
+                        || kt.starts_with("let rec ") || kt.starts_with("type ")
+                        || kt.starts_with("open "))
+                {
+                    break;
+                }
+
+                if kt.contains("SMTPat") || kt.contains("SMTPatOr") || kt.contains("{:pattern") {
+                    has_smt_pat = true;
+                }
+                // Complexity indicators: many parameters or complex structure.
+                if kt.contains("forall") || kt.contains("exists")
+                    || (kt.contains("->") && kt.matches("->").count() > 3)
+                {
+                    has_complex_body = true;
+                }
+            }
+
+            if has_complex_body && !has_smt_pat {
+                let col = byte_to_char_col(line, line.find("auto").unwrap_or(0));
+                diagnostics.push(Diagnostic {
+                    rule: RuleCode::FST049,
+                    severity: DiagnosticSeverity::Hint,
+                    file: file.to_path_buf(),
+                    range: Range::new(line_idx + 1, col, line_idx + 1, col + 4),
+                    message:
+                        "`[@@auto]` on a complex lemma without SMT patterns may cause \
+                         slowdowns. Add `[SMTPat ...]` to guide the solver, or verify that \
+                         the auto-instantiation is intentional."
+                            .to_string(),
+                    fix: None,
+                });
+            }
+        }
+
+        diagnostics
+    }
+}
+
+// ==========================================================================
+// FST050: SquashBridgeRule
+// ==========================================================================
+
+/// FST050: Suggest `give_proof`/`get_proof` from `FStar.Squash` for bridging
+/// propositional and computational contexts.
+pub struct SquashBridgeRule;
+
+impl SquashBridgeRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for SquashBridgeRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST050
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut in_block_comment = false;
+
+        for (line_idx, line) in content.lines().enumerate() {
+            let (effective, still_in_block) = strip_comments_full(line, in_block_comment);
+            in_block_comment = still_in_block;
+
+            // Detect `return_squash` calls — suggest `give_proof` instead.
+            if let Some(pos) = effective.find("return_squash") {
+                if is_word_at(&effective, pos, "return_squash") {
+                    let col = byte_to_char_col(line, pos);
+                    diagnostics.push(Diagnostic {
+                        rule: RuleCode::FST050,
+                        severity: DiagnosticSeverity::Hint,
+                        file: file.to_path_buf(),
+                        range: Range::new(line_idx + 1, col, line_idx + 1, col + 13),
+                        message:
+                            "`return_squash` can be replaced with the more readable \
+                             `FStar.Squash.give_proof` for constructing squashed proofs."
+                                .to_string(),
+                        fix: None,
+                    });
+                }
+            }
+
+            // Detect `Squash.join_squash` — suggest `get_proof`.
+            if let Some(pos) = effective.find("join_squash") {
+                if is_word_at(&effective, pos, "join_squash") {
+                    let col = byte_to_char_col(line, pos);
+                    diagnostics.push(Diagnostic {
+                        rule: RuleCode::FST050,
+                        severity: DiagnosticSeverity::Hint,
+                        file: file.to_path_buf(),
+                        range: Range::new(line_idx + 1, col, line_idx + 1, col + 11),
+                        message:
+                            "`join_squash` can be replaced with the more readable \
+                             `FStar.Squash.get_proof` for extracting squashed proofs."
+                                .to_string(),
+                        fix: None,
+                    });
+                }
+            }
+        }
+
+        diagnostics
+    }
+}
+
+// ==========================================================================
+// FST051: DoNotUnrefineRule
+// ==========================================================================
+
+/// FST051: Detect refined type aliases missing `[@@do_not_unrefine]`.
+///
+/// When `let nat = x:int{x >= 0}` is defined, the normalizer may unrefine it
+/// back to `int`. Adding `[@@do_not_unrefine]` preserves the refinement.
+pub struct DoNotUnrefineRule;
+
+impl DoNotUnrefineRule {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Rule for DoNotUnrefineRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST051
+    }
+
+    fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+        let mut block_depth: u32 = 0;
+
+        let mut i = 0;
+        while i < lines.len() {
+            block_depth = update_block_comment_depth(lines[i], block_depth);
+            if block_depth > 0 {
+                i += 1;
+                continue;
+            }
+
+            let effective = strip_line_comment(lines[i]);
+            let trimmed = effective.trim();
+
+            // Match `let NAME = ...` (simple let bindings, not `let rec`).
+            if !trimmed.starts_with("let ") || trimmed.starts_with("let rec ") {
+                i += 1;
+                continue;
+            }
+
+            // Check if the RHS contains a refinement type: `{` ... `|` ... `}` or `{` ... `}`.
+            // Collect the full definition (may span lines).
+            let mut def_text = String::new();
+            let def_start = i;
+            for k in i..lines.len().min(i + 10) {
+                let kt = strip_line_comment(lines[k]).trim();
+                if k > i
+                    && (kt.starts_with("val ") || kt.starts_with("let ")
+                        || kt.starts_with("type ") || kt.starts_with("open ")
+                        || kt.starts_with("module ") || kt.is_empty())
+                {
+                    break;
+                }
+                if !def_text.is_empty() {
+                    def_text.push(' ');
+                }
+                def_text.push_str(kt);
+            }
+
+            // Find `=` and check RHS for refinement.
+            if let Some(eq_pos) = def_text.find('=') {
+                let rhs = def_text[eq_pos + 1..].trim();
+
+                // Check for refinement patterns:
+                // - `x:t{P x}` or `(x:t{P x})`
+                // - `{x:t | P x}`
+                let has_refinement = rhs.contains('{') && rhs.contains('}')
+                    && (rhs.contains('|') || rhs.contains(':'));
+
+                if !has_refinement {
+                    i += 1;
+                    continue;
+                }
+
+                // Verify LHS is a simple identifier (no parameters).
+                let lhs = def_text["let ".len()..eq_pos].trim();
+                // Strip type annotation if present.
+                let lhs_name = lhs.split(':').next().unwrap_or(lhs).trim();
+                if lhs_name.contains(' ') || lhs_name.is_empty() {
+                    i += 1;
+                    continue;
+                }
+                // Must be an identifier.
+                if !lhs_name.bytes().all(|b| is_ident_char(b)) {
+                    i += 1;
+                    continue;
+                }
+
+                // Check if `do_not_unrefine` attribute already exists.
+                let mut has_attr = false;
+                if def_start > 0 {
+                    for k in (0..def_start).rev() {
+                        let prev = lines[k].trim();
+                        if prev.is_empty() {
+                            break;
+                        }
+                        if prev.contains("do_not_unrefine") {
+                            has_attr = true;
+                            break;
+                        }
+                        if !prev.starts_with("[@@") && !prev.starts_with("[@@@") {
+                            break;
+                        }
+                    }
+                }
+                if trimmed.contains("do_not_unrefine") {
+                    has_attr = true;
+                }
+
+                if !has_attr {
+                    let col = byte_to_char_col(
+                        lines[def_start],
+                        lines[def_start].find("let").unwrap_or(0),
+                    );
+                    diagnostics.push(Diagnostic {
+                        rule: RuleCode::FST051,
+                        severity: DiagnosticSeverity::Info,
+                        file: file.to_path_buf(),
+                        range: Range::new(
+                            def_start + 1,
+                            col,
+                            def_start + 1,
+                            col + 3 + 1 + lhs_name.len(),
+                        ),
+                        message: format!(
+                            "Refined type alias `{}` may be unrefined by the normalizer. \
+                             Add `[@@do_not_unrefine]` to preserve the refinement at all times.",
+                            lhs_name
+                        ),
+                        fix: None,
+                    });
+                }
+            }
+
+            i += 1;
+        }
+
+        diagnostics
+    }
+}
+
+// ==========================================================================
+// Tests
+// ==========================================================================
+
 
 // ==========================================================================
 // Tests
@@ -2572,5 +5938,1359 @@ let _ = assert (x == y)
 ";
         let diags = check_function_equality(content);
         assert!(diags.is_empty(), "Single-char variables should not trigger");
+    }
+
+    // --- Batch A tests (FST024, FST025, FST026, FST029, FST035, FST036, FST039, FST040) ---
+
+    // =====================================================================
+    // FST024: DecreasesBoundRule
+    // =====================================================================
+
+    fn check_decreases(content: &str) -> Vec<Diagnostic> {
+        let rule = DecreasesBoundRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    #[test]
+    fn test_decreases_unbound_name() {
+        let content = "\
+module Test
+
+let rec factorial (n: nat) : Tot nat (decreases m) =
+  if n = 0 then 1 else n * factorial (n - 1)
+";
+        let diags = check_decreases(content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST024);
+        assert!(diags[0].message.contains("m"));
+        assert!(diags[0].message.contains("not a parameter"));
+    }
+
+    #[test]
+    fn test_decreases_bound_name_ok() {
+        let content = "\
+module Test
+
+let rec factorial (n: nat) : Tot nat (decreases n) =
+  if n = 0 then 1 else n * factorial (n - 1)
+";
+        let diags = check_decreases(content);
+        assert!(diags.is_empty(), "Parameter `n` is bound, should not trigger");
+    }
+
+    #[test]
+    fn test_decreases_no_decreases_clause() {
+        let content = "\
+module Test
+
+let rec factorial (n: nat) : Tot nat =
+  if n = 0 then 1 else n * factorial (n - 1)
+";
+        let diags = check_decreases(content);
+        assert!(diags.is_empty(), "No decreases clause, should not trigger");
+    }
+
+    #[test]
+    fn test_decreases_with_builtin() {
+        let content = "\
+module Test
+
+let rec f (xs: list nat) : Tot nat (decreases (List.length xs)) =
+  match xs with
+  | [] -> 0
+  | _ :: tl -> 1 + f tl
+";
+        let diags = check_decreases(content);
+        // `List.length` is a builtin, `xs` is a parameter.
+        assert!(diags.is_empty(), "Known builtins in decreases should not trigger");
+    }
+
+    // =====================================================================
+    // FST025: AssumeTypeVsValRule
+    // =====================================================================
+
+    fn check_assume_type(content: &str) -> Vec<Diagnostic> {
+        let rule = AssumeTypeVsValRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    #[test]
+    fn test_assume_type_with_arrows() {
+        let content = "\
+module Test
+
+assume type process : int -> int -> bool
+";
+        let diags = check_assume_type(content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST025);
+        assert!(diags[0].message.contains("assume val"));
+    }
+
+    #[test]
+    fn test_assume_type_without_arrows() {
+        let content = "\
+module Test
+
+assume type abstract_state
+";
+        let diags = check_assume_type(content);
+        assert!(diags.is_empty(), "No arrows, valid assume type");
+    }
+
+    #[test]
+    fn test_assume_val_not_flagged() {
+        let content = "\
+module Test
+
+assume val process : int -> int -> bool
+";
+        let diags = check_assume_type(content);
+        assert!(diags.is_empty(), "assume val should never trigger this rule");
+    }
+
+    // =====================================================================
+    // FST026: RevealInTotRule
+    // =====================================================================
+
+    fn check_reveal_in_tot(content: &str) -> Vec<Diagnostic> {
+        let rule = RevealInTotRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    #[test]
+    fn test_reveal_in_tot_context() {
+        let content = "\
+module Test
+
+let f (x: erased nat) : Tot nat =
+  reveal x
+";
+        let diags = check_reveal_in_tot(content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST026);
+        assert_eq!(diags[0].severity, DiagnosticSeverity::Error);
+        assert!(diags[0].message.contains("GTot"));
+    }
+
+    #[test]
+    fn test_reveal_in_gtot_context_ok() {
+        let content = "\
+module Test
+
+let f (x: erased nat) : GTot nat =
+  reveal x
+";
+        let diags = check_reveal_in_tot(content);
+        assert!(diags.is_empty(), "reveal in GTot is fine");
+    }
+
+    #[test]
+    fn test_reveal_opaque_in_tot() {
+        let content = "\
+module Test
+
+let f (x: nat) : Tot nat =
+  reveal_opaque (`%my_def) x;
+  x + 1
+";
+        let diags = check_reveal_in_tot(content);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("reveal_opaque"));
+    }
+
+    #[test]
+    fn test_no_reveal_no_diagnostic() {
+        let content = "\
+module Test
+
+let f (x: nat) : Tot nat =
+  x + 1
+";
+        let diags = check_reveal_in_tot(content);
+        assert!(diags.is_empty());
+    }
+
+    // =====================================================================
+    // FST029: PatternDisjunctionRule
+    // =====================================================================
+
+    fn check_pattern_disj(content: &str) -> Vec<Diagnostic> {
+        let rule = PatternDisjunctionRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    #[test]
+    fn test_pattern_disjunction_detected() {
+        let content = r#"module Test
+
+val lemma1 : x:nat -> y:nat -> Lemma
+  (ensures (forall z. f x z == f z x))
+  {:pattern (f x y) \/ (f y x)}
+"#;
+        let diags = check_pattern_disj(content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST029);
+        assert!(diags[0].message.contains("disjunctive"));
+    }
+
+    #[test]
+    fn test_pattern_conjunction_ok() {
+        let content = "\
+module Test
+
+val lemma1 : x:nat -> y:nat -> Lemma
+  (ensures (forall z. f x z == f z x))
+  {:pattern (f x y); (f y x)}
+";
+        let diags = check_pattern_disj(content);
+        assert!(diags.is_empty(), "Semicolon-separated is conjunctive, should not trigger");
+    }
+
+    #[test]
+    fn test_pattern_no_pattern_block() {
+        let content = r#"module Test
+
+let x = a \/ b
+"#;
+        let diags = check_pattern_disj(content);
+        assert!(diags.is_empty(), "\\/ outside {{:pattern}} should not trigger");
+    }
+
+    // =====================================================================
+    // FST035: SimpCommGuardRule
+    // =====================================================================
+
+    fn check_simp_comm(content: &str) -> Vec<Diagnostic> {
+        let rule = SimpCommGuardRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    #[test]
+    fn test_simp_comm_without_guard() {
+        let content = "\
+module Test
+
+[@@simp_comm]
+val add_comm : a:nat -> b:nat -> Lemma (a + b == b + a)
+";
+        let diags = check_simp_comm(content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST035);
+        assert!(diags[0].message.contains("ordering guard"));
+    }
+
+    #[test]
+    fn test_simp_comm_with_guard() {
+        let content = "\
+module Test
+
+[@@simp_comm]
+val add_comm : a:nat -> b:nat -> Lemma
+  (requires (a <= b))
+  (ensures (a + b == b + a))
+";
+        let diags = check_simp_comm(content);
+        assert!(diags.is_empty(), "Has `<=` guard, should not trigger");
+    }
+
+    #[test]
+    fn test_no_simp_comm_attribute() {
+        let content = "\
+module Test
+
+[@@simp]
+val add_zero : a:nat -> Lemma (a + 0 == a)
+";
+        let diags = check_simp_comm(content);
+        assert!(diags.is_empty(), "simp (not simp_comm) should not trigger");
+    }
+
+    // =====================================================================
+    // FST036: DollarBinderRule
+    // =====================================================================
+
+    fn check_dollar_binder(content: &str) -> Vec<Diagnostic> {
+        let rule = DollarBinderRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    #[test]
+    fn test_dollar_binder_suggests_for_lemma_param() {
+        let content = "\
+module Test
+
+val apply_lemma : (#proof: nat -> Lemma True) -> nat -> unit
+";
+        let diags = check_dollar_binder(content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST036);
+        assert_eq!(diags[0].severity, DiagnosticSeverity::Hint);
+        assert!(diags[0].message.contains("$proof"));
+    }
+
+    #[test]
+    fn test_dollar_binder_no_higher_order() {
+        let content = "\
+module Test
+
+val f : (#n: nat) -> list nat -> nat
+";
+        let diags = check_dollar_binder(content);
+        assert!(diags.is_empty(), "Simple implicit param should not trigger");
+    }
+
+    #[test]
+    fn test_dollar_binder_tac_param() {
+        let content = "\
+module Test
+
+val run_tac : (#t: unit -> Tac nat) -> nat
+";
+        let diags = check_dollar_binder(content);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("$t"));
+    }
+
+    // =====================================================================
+    // FST039: UnfoldAliasRule
+    // =====================================================================
+
+    fn check_unfold_alias(content: &str) -> Vec<Diagnostic> {
+        let rule = UnfoldAliasRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    #[test]
+    fn test_unfold_alias_simple() {
+        let content = "\
+module Test
+
+let my_nat = nat
+";
+        let diags = check_unfold_alias(content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST039);
+        assert_eq!(diags[0].severity, DiagnosticSeverity::Info);
+        assert!(diags[0].fix.is_some());
+        let fix = diags[0].fix.as_ref().unwrap();
+        assert!(fix.edits[0].new_text.contains("[@@unfold]"));
+    }
+
+    #[test]
+    fn test_unfold_alias_qualified() {
+        let content = "\
+module Test
+
+let u32 = FStar.UInt32.t
+";
+        let diags = check_unfold_alias(content);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("u32"));
+    }
+
+    #[test]
+    fn test_unfold_alias_already_has_unfold() {
+        let content = "\
+module Test
+
+[@@unfold]
+let my_nat = nat
+";
+        let diags = check_unfold_alias(content);
+        assert!(diags.is_empty(), "Already has [@@unfold], should not trigger");
+    }
+
+    #[test]
+    fn test_unfold_alias_computation_rhs() {
+        let content = "\
+module Test
+
+let result = x + 1
+";
+        let diags = check_unfold_alias(content);
+        assert!(diags.is_empty(), "Computation RHS is not a simple alias");
+    }
+
+    #[test]
+    fn test_unfold_alias_function_def() {
+        let content = "\
+module Test
+
+let apply f x = f x
+";
+        let diags = check_unfold_alias(content);
+        assert!(diags.is_empty(), "Function with parameters is not a simple alias");
+    }
+
+    #[test]
+    fn test_unfold_alias_inline_for_extraction() {
+        let content = "\
+module Test
+
+[@@inline_for_extraction]
+let my_nat = nat
+";
+        let diags = check_unfold_alias(content);
+        assert!(diags.is_empty(), "inline_for_extraction serves same purpose");
+    }
+
+    // =====================================================================
+    // FST040: AttributeTargetRule
+    // =====================================================================
+
+    fn check_attr_target(content: &str) -> Vec<Diagnostic> {
+        let rule = AttributeTargetRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    #[test]
+    fn test_attr_triple_at_per_definition() {
+        let content = "\
+module Test
+
+[@@@inline_for_extraction]
+let f x = x + 1
+";
+        let diags = check_attr_target(content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST040);
+        assert!(diags[0].message.contains("[@@inline_for_extraction]"));
+    }
+
+    #[test]
+    fn test_attr_double_at_module_level() {
+        let content = "\
+module Test
+
+[@@expect_failure]
+let f x = x + 1
+";
+        let diags = check_attr_target(content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST040);
+        assert!(diags[0].message.contains("[@@@expect_failure]"));
+    }
+
+    #[test]
+    fn test_attr_correct_double_at() {
+        let content = "\
+module Test
+
+[@@inline_for_extraction]
+let f x = x + 1
+";
+        let diags = check_attr_target(content);
+        assert!(diags.is_empty(), "Correct usage should not trigger");
+    }
+
+    #[test]
+    fn test_attr_correct_triple_at() {
+        let content = "\
+module Test
+
+[@@@expect_failure]
+let f x = x + 1
+";
+        let diags = check_attr_target(content);
+        assert!(diags.is_empty(), "Correct usage should not trigger");
+    }
+
+    #[test]
+    fn test_attr_in_comment_ignored() {
+        let content = "\
+module Test
+
+(* [@@@inline_for_extraction] *)
+let f x = x + 1
+";
+        let diags = check_attr_target(content);
+        assert!(diags.is_empty(), "Attribute in comment should not trigger");
+    }
+
+    // --- Batch B tests (FST028, FST031, FST034, FST037, FST038, FST041, FST043, FST044) ---
+
+    fn check_fst028(content: &str) -> Vec<Diagnostic> {
+        let rule = StrictOnArgumentsRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    fn check_fst031(content: &str) -> Vec<Diagnostic> {
+        let rule = OpaqueWithoutRevealRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    fn check_fst034(content: &str) -> Vec<Diagnostic> {
+        let rule = SimpCandidateRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    fn check_fst037(content: &str) -> Vec<Diagnostic> {
+        let rule = TotVsGtotRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    fn check_fst038(content: &str) -> Vec<Diagnostic> {
+        let rule = IntroduceWithRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    fn check_fst041(content: &str) -> Vec<Diagnostic> {
+        let rule = RequiresTrueOkRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    fn check_fst043(content: &str) -> Vec<Diagnostic> {
+        let rule = TickVsExplicitRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    fn check_fst044(content: &str) -> Vec<Diagnostic> {
+        let rule = MissingDecreasesRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    // ---- FST028: StrictOnArgumentsRule ----
+
+    #[test]
+    fn fst028_triggers_on_match_implicit() {
+        let code = "\
+let my_func (#a:Type) (x: a) : a =
+  match a with
+  | Int -> x + 1
+  | _ -> x
+";
+        let diags = check_fst028(code);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST028);
+        assert!(diags[0].message.contains("strict_on_arguments"));
+    }
+
+    #[test]
+    fn fst028_no_trigger_with_attribute() {
+        let code = "\
+[@@strict_on_arguments [0]]
+let my_func (#a:Type) (x: a) : a =
+  match a with
+  | Int -> x + 1
+  | _ -> x
+";
+        let diags = check_fst028(code);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn fst028_no_trigger_no_match() {
+        let code = "\
+let my_func (#a:Type) (x: a) : a = x
+";
+        let diags = check_fst028(code);
+        assert_eq!(diags.len(), 0);
+    }
+
+    // ---- FST031: OpaqueWithoutRevealRule ----
+
+    #[test]
+    fn fst031_triggers_no_reveal() {
+        let code = "\
+[@@opaque_to_smt]
+let secret_value : nat = 42
+
+let use_it () = secret_value + 1
+";
+        let diags = check_fst031(code);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST031);
+        assert!(diags[0].message.contains("secret_value"));
+    }
+
+    #[test]
+    fn fst031_no_trigger_with_reveal() {
+        let code = "\
+[@@opaque_to_smt]
+let secret_value : nat = 42
+
+let use_it () =
+  reveal_opaque (`secret_value) ;
+  secret_value + 1
+";
+        let diags = check_fst031(code);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn fst031_no_trigger_with_norm_spec() {
+        let code = "\
+[@@opaque_to_smt]
+let helper : nat = 10
+
+let use_it () =
+  norm_spec [delta_only [helper]] ;
+  helper + 1
+";
+        let diags = check_fst031(code);
+        assert_eq!(diags.len(), 0);
+    }
+
+    // ---- FST034: SimpCandidateRule ----
+
+    #[test]
+    fn fst034_triggers_equality_lemma() {
+        let code = "\
+val add_zero : x:nat -> Lemma (ensures (x + 0 == x))
+";
+        let diags = check_fst034(code);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST034);
+        assert!(diags[0].message.contains("simp"));
+    }
+
+    #[test]
+    fn fst034_no_trigger_with_simp() {
+        let code = "\
+[@@simp]
+val add_zero : x:nat -> Lemma (ensures (x + 0 == x))
+";
+        let diags = check_fst034(code);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn fst034_no_trigger_non_equality() {
+        let code = "\
+val my_lemma : x:nat -> Lemma (ensures (x > 0 ==> x >= 1))
+";
+        let diags = check_fst034(code);
+        // ==> is not equality, and > is not =, so no trigger
+        assert_eq!(diags.len(), 0);
+    }
+
+    // ---- FST037: TotVsGtotRule ----
+
+    #[test]
+    fn fst037_triggers_erased_tot() {
+        let code = "\
+val bad_func : erased nat -> Tot nat
+";
+        let diags = check_fst037(code);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST037);
+        assert_eq!(diags[0].severity, DiagnosticSeverity::Error);
+    }
+
+    #[test]
+    fn fst037_no_trigger_erased_gtot() {
+        let code = "\
+val ok_func : erased nat -> GTot nat
+";
+        let diags = check_fst037(code);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn fst037_no_trigger_no_erased() {
+        let code = "\
+val normal_func : nat -> Tot nat
+";
+        let diags = check_fst037(code);
+        assert_eq!(diags.len(), 0);
+    }
+
+    // ---- FST038: IntroduceWithRule ----
+
+    #[test]
+    fn fst038_triggers_classical_forall_intro() {
+        let code = "\
+let proof () =
+  Classical.forall_intro (fun x -> helper x)
+";
+        let diags = check_fst038(code);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST038);
+        assert!(diags[0].message.contains("introduce forall"));
+    }
+
+    #[test]
+    fn fst038_no_trigger_no_classical() {
+        let code = "\
+let proof () =
+  introduce forall x. P x with (helper x)
+";
+        let diags = check_fst038(code);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn fst038_triggers_impl_intro() {
+        let code = "\
+let proof () =
+  Classical.impl_intro (fun _ -> ())
+";
+        let diags = check_fst038(code);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("introduce implies"));
+    }
+
+    // ---- FST041: RequiresTrueOkRule ----
+
+    #[test]
+    fn fst041_triggers_with_todo() {
+        let code = "\
+// TODO: remove requires True
+val my_func : x:nat -> Pure nat (requires True) (ensures fun r -> r > x)
+";
+        let diags = check_fst041(code);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST041);
+        assert!(diags[0].message.contains("intentional"));
+    }
+
+    #[test]
+    fn fst041_no_trigger_no_comment() {
+        let code = "\
+val my_func : x:nat -> Pure nat (requires True) (ensures fun r -> r > x)
+";
+        let diags = check_fst041(code);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn fst041_triggers_with_fixme() {
+        let code = "\
+val my_func : x:nat -> Pure nat (requires True) (ensures fun r -> r > x)
+// FIXME: redundant requires True
+";
+        let diags = check_fst041(code);
+        assert_eq!(diags.len(), 1);
+    }
+
+    // ---- FST043: TickVsExplicitRule ----
+
+    #[test]
+    fn fst043_triggers_mixed() {
+        let code = "\
+val my_func : #a:Type -> 'b -> a -> 'b
+";
+        let diags = check_fst043(code);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST043);
+        assert!(diags[0].message.contains("Inconsistent"));
+    }
+
+    #[test]
+    fn fst043_no_trigger_tick_only() {
+        let code = "\
+val my_func : 'a -> 'b -> 'a
+";
+        let diags = check_fst043(code);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn fst043_no_trigger_explicit_only() {
+        let code = "\
+val my_func : #a:Type -> #b:Type -> a -> b
+";
+        let diags = check_fst043(code);
+        assert_eq!(diags.len(), 0);
+    }
+
+    // ---- FST044: MissingDecreasesRule ----
+
+    #[test]
+    fn fst044_triggers_recursive_no_decreases() {
+        let code = "\
+let rec factorial (n:nat) : nat =
+  if n = 0 then 1
+  else n * factorial (n - 1)
+";
+        let diags = check_fst044(code);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST044);
+        assert!(diags[0].message.contains("factorial"));
+    }
+
+    #[test]
+    fn fst044_no_trigger_with_decreases() {
+        let code = "\
+let rec factorial (n:nat) : Tot nat (decreases n) =
+  if n = 0 then 1
+  else n * factorial (n - 1)
+";
+        let diags = check_fst044(code);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn fst044_no_trigger_not_recursive() {
+        let code = "\
+let rec not_really_recursive (n:nat) : nat =
+  n + 1
+";
+        let diags = check_fst044(code);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn fst044_no_trigger_in_comment() {
+        let code = "\
+(* let rec broken (n:nat) : nat =
+  broken (n - 1) *)
+let good (n:nat) : nat = n
+";
+        let diags = check_fst044(code);
+        assert_eq!(diags.len(), 0);
+    }
+
+    // --- Batch C tests (FST032, FST033, FST045, FST046, FST047, FST048, FST049, FST050, FST051) ---
+
+    // =====================================================================
+    // FST032: UniverseHintRule
+    // =====================================================================
+
+    fn check_universe(content: &str) -> Vec<Diagnostic> {
+        let rule = UniverseHintRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    #[test]
+    fn test_universe_u0_hint() {
+        let content = "\
+module Test
+
+val my_type : Type u#0
+";
+        let diags = check_universe(content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST032);
+        assert_eq!(diags[0].severity, DiagnosticSeverity::Hint);
+        assert!(diags[0].message.contains("Type0"));
+    }
+
+    #[test]
+    fn test_universe_u1_hint() {
+        let content = "\
+module Test
+
+val higher_type : Type u#1
+";
+        let diags = check_universe(content);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("Type1"));
+    }
+
+    #[test]
+    fn test_universe_no_trigger_type0() {
+        let content = "\
+module Test
+
+val my_type : Type0
+";
+        let diags = check_universe(content);
+        assert!(diags.is_empty(), "Already idiomatic Type0, should not trigger");
+    }
+
+    #[test]
+    fn test_universe_polymorphic_no_trigger() {
+        let content = "\
+module Test
+
+val my_type : Type u#a
+";
+        let diags = check_universe(content);
+        assert!(diags.is_empty(), "Polymorphic universe variable, should not trigger");
+    }
+
+    #[test]
+    fn test_universe_in_comment_ignored() {
+        let content = "\
+module Test
+
+(* Type u#0 is idiomatic *)
+val my_type : Type0
+";
+        let diags = check_universe(content);
+        assert!(diags.is_empty(), "Inside block comment, should not trigger");
+    }
+
+    // =====================================================================
+    // FST033: TacticSuggestionRule
+    // =====================================================================
+
+    fn check_tactic(content: &str) -> Vec<Diagnostic> {
+        let rule = TacticSuggestionRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    #[test]
+    fn test_tactic_high_z3rlimit() {
+        let content = "\
+module Test
+
+#push-options \"--z3rlimit 200\"
+let hard_lemma () : Lemma True = ()
+";
+        let diags = check_tactic(content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST033);
+        assert_eq!(diags[0].severity, DiagnosticSeverity::Hint);
+        assert!(diags[0].message.contains("200"));
+        assert!(diags[0].message.contains("tactics"));
+    }
+
+    #[test]
+    fn test_tactic_low_z3rlimit_no_trigger() {
+        let content = "\
+module Test
+
+#push-options \"--z3rlimit 50\"
+let easy_lemma () : Lemma True = ()
+";
+        let diags = check_tactic(content);
+        assert!(diags.is_empty(), "z3rlimit 50 is reasonable, should not trigger");
+    }
+
+    #[test]
+    fn test_tactic_set_options_high() {
+        let content = "\
+module Test
+
+#set-options \"--z3rlimit 500 --fuel 4\"
+";
+        let diags = check_tactic(content);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("500"));
+    }
+
+    #[test]
+    fn test_tactic_z3rlimit_factor_ignored() {
+        let content = "\
+module Test
+
+#push-options \"--z3rlimit_factor 100\"
+";
+        let diags = check_tactic(content);
+        assert!(diags.is_empty(), "z3rlimit_factor is different, should not trigger");
+    }
+
+    // =====================================================================
+    // FST045: NoeqVsUnopteqRule
+    // =====================================================================
+
+    fn check_noeq(content: &str) -> Vec<Diagnostic> {
+        let rule = NoeqVsUnopteqRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    #[test]
+    fn test_noeq_without_function_fields() {
+        let content = "\
+module Test
+
+noeq type my_record = {
+  x: nat;
+  y: int;
+  z: bool;
+}
+";
+        let diags = check_noeq(content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST045);
+        assert_eq!(diags[0].severity, DiagnosticSeverity::Info);
+        assert!(diags[0].message.contains("unopteq"));
+        assert!(diags[0].fix.is_some());
+        let fix = diags[0].fix.as_ref().unwrap();
+        assert_eq!(fix.edits[0].new_text, "unopteq");
+    }
+
+    #[test]
+    fn test_noeq_with_function_field() {
+        let content = "\
+module Test
+
+noeq type callback_record = {
+  handler: int -> int;
+  name: string;
+}
+";
+        let diags = check_noeq(content);
+        assert!(diags.is_empty(), "Has function field, noeq is appropriate");
+    }
+
+    #[test]
+    fn test_unopteq_already_used() {
+        let content = "\
+module Test
+
+unopteq type my_record = {
+  x: nat;
+  y: int;
+}
+";
+        let diags = check_noeq(content);
+        assert!(diags.is_empty(), "Already using unopteq, should not trigger");
+    }
+
+    // =====================================================================
+    // FST046: ErasableSuggestionRule
+    // =====================================================================
+
+    fn check_erasable(content: &str) -> Vec<Diagnostic> {
+        let rule = ErasableSuggestionRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    #[test]
+    fn test_erasable_all_proof_fields() {
+        let content = "\
+module Test
+
+type proof_bundle = {
+  p1: prop;
+  p2: squash nat;
+  p3: Type0;
+}
+";
+        let diags = check_erasable(content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST046);
+        assert_eq!(diags[0].severity, DiagnosticSeverity::Hint);
+        assert!(diags[0].message.contains("erasable"));
+    }
+
+    #[test]
+    fn test_erasable_has_computational_field() {
+        let content = "\
+module Test
+
+type data_record = {
+  value: nat;
+  count: int;
+}
+";
+        let diags = check_erasable(content);
+        assert!(diags.is_empty(), "Has computational fields, should not trigger");
+    }
+
+    #[test]
+    fn test_erasable_already_marked() {
+        let content = "\
+module Test
+
+[@@ erasable]
+type proof_bundle = {
+  p1: prop;
+  p2: squash nat;
+}
+";
+        let diags = check_erasable(content);
+        assert!(diags.is_empty(), "Already has [@@ erasable], should not trigger");
+    }
+
+    // =====================================================================
+    // FST047: SumVsOrRule
+    // =====================================================================
+
+    fn check_sum_vs_or(content: &str) -> Vec<Diagnostic> {
+        let rule = SumVsOrRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    #[test]
+    fn test_sum_in_lemma_context() {
+        let content = "\
+module Test
+
+val my_lemma : x:nat -> Lemma
+  (requires Prims.sum (x > 0) (x = 0))
+  (ensures True)
+";
+        let diags = check_sum_vs_or(content);
+        assert!(!diags.is_empty());
+        assert!(diags.iter().any(|d| d.rule == RuleCode::FST047));
+        assert!(diags.iter().any(|d| d.message.contains("constructive")));
+    }
+
+    #[test]
+    fn test_inl_in_ghost_context() {
+        let content = "\
+module Test
+
+let ghost_fn (x: nat) : GTot (sum bool bool) =
+  Inl true
+";
+        let diags = check_sum_vs_or(content);
+        assert!(!diags.is_empty());
+        assert!(diags.iter().any(|d| d.message.contains("Inl")));
+    }
+
+    #[test]
+    fn test_sum_in_computational_context() {
+        let content = "\
+module Test
+
+let f (x: sum int bool) : int =
+  match x with
+  | Inl n -> n
+  | Inr _ -> 0
+";
+        let diags = check_sum_vs_or(content);
+        assert!(diags.is_empty(), "sum in Tot context is fine");
+    }
+
+    // =====================================================================
+    // FST048: MissingPluginRule
+    // =====================================================================
+
+    fn check_plugin(content: &str) -> Vec<Diagnostic> {
+        let rule = MissingPluginRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    #[test]
+    fn test_missing_plugin_complex_tactic() {
+        let content = "\
+module Test
+
+let my_tactic () : Tac unit =
+  let g = cur_goal () in
+  let _ = intro () in
+  norm [];
+  trefl ()
+";
+        let diags = check_plugin(content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST048);
+        assert!(diags[0].message.contains("[@@plugin]"));
+    }
+
+    #[test]
+    fn test_plugin_already_present() {
+        let content = "\
+module Test
+
+[@@plugin]
+let my_tactic () : Tac unit =
+  let g = cur_goal () in
+  norm [];
+  trefl ()
+";
+        let diags = check_plugin(content);
+        assert!(diags.is_empty(), "Already has [@@plugin], should not trigger");
+    }
+
+    #[test]
+    fn test_simple_tactic_no_trigger() {
+        let content = "\
+module Test
+
+let simple_tac () : Tac unit =
+  trivial ()
+";
+        let diags = check_plugin(content);
+        assert!(diags.is_empty(), "Simple one-step tactic, should not trigger");
+    }
+
+    // =====================================================================
+    // FST049: AutoClassificationRule
+    // =====================================================================
+
+    fn check_auto(content: &str) -> Vec<Diagnostic> {
+        let rule = AutoClassificationRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    #[test]
+    fn test_auto_complex_no_pattern() {
+        let content = "\
+module Test
+
+[@@auto]
+val complex_lemma : x:nat -> y:nat -> z:nat -> w:nat -> Lemma
+  (forall a b c d. a + b + c + d == d + c + b + a)
+";
+        let diags = check_auto(content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST049);
+        assert!(diags[0].message.contains("slowdowns"));
+    }
+
+    #[test]
+    fn test_auto_with_smt_pattern() {
+        let content = "\
+module Test
+
+[@@auto]
+val simple_lemma : x:nat -> Lemma
+  (ensures x + 0 == x)
+  [SMTPat (x + 0)]
+";
+        let diags = check_auto(content);
+        assert!(diags.is_empty(), "Has SMTPat, auto is guided");
+    }
+
+    #[test]
+    fn test_no_auto_attribute() {
+        let content = "\
+module Test
+
+val regular_lemma : x:nat -> Lemma
+  (forall y. x + y == y + x)
+";
+        let diags = check_auto(content);
+        assert!(diags.is_empty(), "No [@@auto] attribute, should not trigger");
+    }
+
+    // =====================================================================
+    // FST050: SquashBridgeRule
+    // =====================================================================
+
+    fn check_squash(content: &str) -> Vec<Diagnostic> {
+        let rule = SquashBridgeRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    #[test]
+    fn test_return_squash_hint() {
+        let content = "\
+module Test
+
+let proof (x: nat) : squash (x >= 0) =
+  return_squash ()
+";
+        let diags = check_squash(content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST050);
+        assert!(diags[0].message.contains("give_proof"));
+    }
+
+    #[test]
+    fn test_join_squash_hint() {
+        let content = "\
+module Test
+
+let extract (s: squash (squash p)) : squash p =
+  join_squash s
+";
+        let diags = check_squash(content);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("get_proof"));
+    }
+
+    #[test]
+    fn test_no_squash_operations() {
+        let content = "\
+module Test
+
+let f (x: nat) : nat = x + 1
+";
+        let diags = check_squash(content);
+        assert!(diags.is_empty(), "No squash operations, should not trigger");
+    }
+
+    #[test]
+    fn test_squash_in_comment_ignored() {
+        let content = "\
+module Test
+
+(* Use return_squash to construct proofs *)
+let f (x: nat) : nat = x
+";
+        let diags = check_squash(content);
+        assert!(diags.is_empty(), "Inside block comment, should not trigger");
+    }
+
+    // =====================================================================
+    // FST051: DoNotUnrefineRule
+    // =====================================================================
+
+    fn check_unrefine(content: &str) -> Vec<Diagnostic> {
+        let rule = DoNotUnrefineRule::new();
+        let path = PathBuf::from("Test.fst");
+        rule.check(&path, content)
+    }
+
+    #[test]
+    fn test_refined_alias_missing_attr() {
+        let content = "\
+module Test
+
+let my_nat = x:int{x >= 0}
+";
+        let diags = check_unrefine(content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleCode::FST051);
+        assert!(diags[0].message.contains("do_not_unrefine"));
+    }
+
+    #[test]
+    fn test_refined_alias_with_attr() {
+        let content = "\
+module Test
+
+[@@do_not_unrefine]
+let my_nat = x:int{x >= 0}
+";
+        let diags = check_unrefine(content);
+        assert!(diags.is_empty(), "Already has the attribute, should not trigger");
+    }
+
+    #[test]
+    fn test_non_refined_alias() {
+        let content = "\
+module Test
+
+let my_int = int
+";
+        let diags = check_unrefine(content);
+        assert!(diags.is_empty(), "No refinement, should not trigger");
+    }
+
+    #[test]
+    fn test_refined_with_pipe_syntax() {
+        let content = "\
+module Test
+
+let pos = {x:int | x > 0}
+";
+        let diags = check_unrefine(content);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("pos"));
+    }
+
+    #[test]
+    fn test_function_not_alias() {
+        let content = "\
+module Test
+
+let f x = x + {v:int | v > 0}
+";
+        // f has parameter x, so LHS is not simple — should not trigger.
+        let diags = check_unrefine(content);
+        assert!(diags.is_empty(), "Function with params, not a type alias");
     }
 }

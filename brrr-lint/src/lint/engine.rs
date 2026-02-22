@@ -43,8 +43,17 @@ use super::spec_extractor::SpecExtractorRule;
 use super::test_generator::TestGeneratorRule;
 use super::unused_opens::UnusedOpensRule;
 use super::fstar_traps::{
-    FunctionEqualityRule, KeywordAsIdentifierRule, LemmaEnsuresAmbiguityRule,
-    MissingMulOpenRule, MissingNoeqRule, UnguardedForallRule, ValBinderArrowRule,
+    AssumeTypeVsValRule, AttributeTargetRule, AutoClassificationRule,
+    DecreasesBoundRule, DoNotUnrefineRule, DollarBinderRule,
+    ErasableSuggestionRule, FunctionEqualityRule, IntroduceWithRule,
+    KeywordAsIdentifierRule, LemmaEnsuresAmbiguityRule,
+    MissingDecreasesRule, MissingMulOpenRule, MissingNoeqRule, MissingPluginRule,
+    NoeqVsUnopteqRule, OpaqueWithoutRevealRule,
+    PatternDisjunctionRule, RequiresTrueOkRule, RevealInTotRule,
+    SimpCandidateRule, SimpCommGuardRule, SquashBridgeRule, StrictOnArgumentsRule,
+    SumVsOrRule, TacticSuggestionRule, TickVsExplicitRule,
+    TotVsGtotRule, UnfoldAliasRule, UnguardedForallRule, UniverseHintRule,
+    ValBinderArrowRule,
 };
 use super::z3_complexity::Z3ComplexityRule;
 
@@ -273,14 +282,89 @@ impl LintEngine {
         if config.is_rule_enabled(RuleCode::FST023) {
             rules.push(Box::new(UnguardedForallRule::new()));
         }
+        if config.is_rule_enabled(RuleCode::FST024) {
+            rules.push(Box::new(DecreasesBoundRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST025) {
+            rules.push(Box::new(AssumeTypeVsValRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST026) {
+            rules.push(Box::new(RevealInTotRule::new()));
+        }
         if config.is_rule_enabled(RuleCode::FST027) {
             rules.push(Box::new(MissingMulOpenRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST028) {
+            rules.push(Box::new(StrictOnArgumentsRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST029) {
+            rules.push(Box::new(PatternDisjunctionRule::new()));
         }
         if config.is_rule_enabled(RuleCode::FST030) {
             rules.push(Box::new(FunctionEqualityRule::new()));
         }
+        if config.is_rule_enabled(RuleCode::FST031) {
+            rules.push(Box::new(OpaqueWithoutRevealRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST032) {
+            rules.push(Box::new(UniverseHintRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST033) {
+            rules.push(Box::new(TacticSuggestionRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST034) {
+            rules.push(Box::new(SimpCandidateRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST035) {
+            rules.push(Box::new(SimpCommGuardRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST036) {
+            rules.push(Box::new(DollarBinderRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST037) {
+            rules.push(Box::new(TotVsGtotRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST038) {
+            rules.push(Box::new(IntroduceWithRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST039) {
+            rules.push(Box::new(UnfoldAliasRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST040) {
+            rules.push(Box::new(AttributeTargetRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST041) {
+            rules.push(Box::new(RequiresTrueOkRule::new()));
+        }
         if config.is_rule_enabled(RuleCode::FST042) {
             rules.push(Box::new(LemmaEnsuresAmbiguityRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST043) {
+            rules.push(Box::new(TickVsExplicitRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST044) {
+            rules.push(Box::new(MissingDecreasesRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST045) {
+            rules.push(Box::new(NoeqVsUnopteqRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST046) {
+            rules.push(Box::new(ErasableSuggestionRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST047) {
+            rules.push(Box::new(SumVsOrRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST048) {
+            rules.push(Box::new(MissingPluginRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST049) {
+            rules.push(Box::new(AutoClassificationRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST050) {
+            rules.push(Box::new(SquashBridgeRule::new()));
+        }
+        if config.is_rule_enabled(RuleCode::FST051) {
+            rules.push(Box::new(DoNotUnrefineRule::new()));
         }
 
         // Sort rules by cost: cheap regex rules first, pair rules last.
