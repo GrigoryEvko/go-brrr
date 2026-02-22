@@ -1,0 +1,107 @@
+[package]
+name = "brrr-lint"
+version = "0.1.0"
+edition = "2021"
+description = "A fast linter and language server for F* (FStar) with autofix capabilities"
+license = "Apache-2.0"
+repository = "https://github.com/grigorye/brrr-lint"
+homepage = "https://github.com/grigorye/brrr-lint"
+documentation = "https://github.com/grigorye/brrr-lint#readme"
+readme = "README.md"
+keywords = ["fstar", "linter", "lsp", "formal-verification", "static-analysis"]
+categories = ["development-tools", "command-line-utilities"]
+rust-version = "1.70"
+
+[[bin]]
+name = "brrr-lint"
+path = "src/main.rs"
+
+[dependencies]
+# LSP
+tower-lsp = "0.20"
+lsp-types = "0.97"
+
+# Async runtime
+tokio = { version = "1", features = ["full", "process", "sync", "time", "io-util", "fs"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Parallelism
+rayon = "1"
+
+# Utilities
+dashmap = "6"
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+async-trait = "0.1"
+which = "8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Config
+toml = "0.8"
+globset = "0.4"
+
+# Lint module
+lazy_static = "1"
+regex = "1"
+fancy-regex = "0.14"
+
+[dev-dependencies]
+tempfile = "3"
+libc = "0.2"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[test]]
+name = "fix_safety_tests"
+path = "tests/integration/fix_safety_tests.rs"
+
+[[test]]
+name = "fix_correctness_tests"
+path = "tests/integration/fix_correctness_tests.rs"
+
+[[test]]
+name = "cli_validation_tests"
+path = "tests/integration/cli_validation_tests.rs"
+
+[[test]]
+name = "real_fstar_tests"
+path = "tests/integration/real_fstar_tests.rs"
+
+[[bench]]
+name = "parser_bench"
+harness = false
+
+# =============================================================================
+# DO NOT TOUCH THIS PROFILE! Fast dev-release builds. Use release-crate for
+# publishing. LTO off + 16 codegen units = fast incremental recompiles.
+# =============================================================================
+[profile.release]
+opt-level = 2
+codegen-units = 4
+lto = false
+incremental = true
+
+# Full optimization for crates.io publishing only
+[profile.release-crate]
+inherits = "release"
+opt-level = 3
+codegen-units = 1
+lto = "fat"
+strip = true
+panic = "abort"
+incremental = false
+
+# Standalone package - not part of parent workspace
+[workspace]

@@ -1,0 +1,1352 @@
+================================================================================
+FST004: UNUSED OPEN STATEMENTS CHECKER - DETAILED SPECIFICATION
+================================================================================
+
+Version: 1.0
+Author: Bug Hunter Analysis
+Date: 2026-02-02
+
+================================================================================
+1. OVERVIEW
+================================================================================
+
+FST004 detects `open` statements in F* code that bring module contents into
+scope but are never actually used. Unused opens:
+- Clutter the namespace
+- Slow down compilation (F* must resolve names against more modules)
+- Can cause confusing error messages when names conflict
+- Indicate dead code or incomplete refactoring
+
+Severity: Warning (not error - may have false positives)
+Fixable: Yes (can automatically remove unused opens)
+
+================================================================================
+2. F* OPEN STATEMENT SYNTAX
+================================================================================
+
+F* supports several forms of open statements:
+
+2.1 BASIC OPEN (imports all public names)
+-----------------------------------------
+    open FStar.List.Tot
+    open FStar.HyperStack.ST
+    open Lib.IntTypes
+
+2.2 SELECTIVE IMPORT (imports specific names)
+---------------------------------------------
+    open FStar.Tactics.Typeclasses { solve }
+    open FStar.List.Tot { (@), unsnoc }
+    open FStar.Class.Eq.Raw { (=) as (=?) }  // with renaming
+
+2.3 EMPTY SELECTIVE IMPORT (typeclass scope only)
+-------------------------------------------------
+    open FStar.Stubs.Reflection.V2.Data {}
+    open FStar.Tactics.Canon.Lemmas {}  // brings lemmas into TC scope
+
+2.4 LOCAL OPEN (scoped to expression)
+-------------------------------------
+    let open FStar.Order in
+    let x = Lt in x
+
+2.5 RELATED CONSTRUCTS (NOT open but affect namespace)
+------------------------------------------------------
+    module M = FStar.List.Tot       // Module abbreviation
+    include FStar.List.Tot          // Re-exports all names
+    friend FStar.SizeT              // Access to private definitions
+
+================================================================================
+3. NAME RESOLUTION IN F*
+================================================================================
+
+3.1 RESOLUTION ORDER
+--------------------
+When F* encounters an unqualified identifier `foo`, it searches in this order:
+
+1. Local bindings (let, function parameters, pattern matches)
+2. Names from current module
+3. Names from opened modules (later opens shadow earlier ones)
+4. Names from included modules
+5. Prims module (always implicitly open)
+
+3.2 QUALIFIED VS UNQUALIFIED ACCESS
+-----------------------------------
+    open FStar.List.Tot
+
+    // These are equivalent after open:
+    let x = length [1;2;3]           // Unqualified (via open)
+    let y = FStar.List.Tot.length [1;2;3]  // Fully qualified
+
+    // Module abbreviation:
+    module L = FStar.List.Tot
+    let z = L.length [1;2;3]         // Via abbreviation
+
+3.3 OPERATOR OPENS
+------------------
+Some modules exist primarily to bring operators into scope:
+
+    open FStar.Mul   // Makes (*) mean multiplication instead of tuple
+    let x = 2 * 3    // Uses op_Star from FStar.Mul
+
+Common operator-providing modules:
+- FStar.Mul: op_Star (*)
+- FStar.HyperStack.ST: Various memory operations
+- Lib.IntTypes: Numeric operators (+!, -!, etc.)
+
+3.4 TYPECLASS SCOPE
+-------------------
+Empty selective imports bring typeclass instances into resolver scope
+without importing names:
+
+    open FStar.Tactics.Canon.Lemmas {}
+    // No names imported, but lemmas available to typeclass resolution
+
+================================================================================
+4. DETECTION ALGORITHM
+================================================================================
+
+4.1 HIGH-LEVEL APPROACH
+-----------------------
+
+For each file:
+1. Parse and collect all open statements with their positions
+2. Build a usage map tracking which module prefixes are used
+3. For each open, determine if identifiers from that module are used
+4. Report opens with no detected usage
+
+4.2 OPEN STATEMENT COLLECTION
+-----------------------------
+
+struct OpenStatement {
+    module_path: String,           // "FStar.List.Tot"
+    selective_names: Option<Vec<SelectiveImport>>,  // None = import all
+    line_number: usize,
+    start_col: usize,
+    end_col: usize,
+    is_local: bool,                // let open ... in
+    scope_end_line: Option<usize>, // For local opens
+}
+
+struct SelectiveImport {
+    name: String,      // "solve" or "(=)"
+    alias: Option<String>,  // "(=?)" in `(=) as (=?)`
+}
+
+4.3 USAGE DETECTION STRATEGIES
+------------------------------
+
+Strategy A: Module Prefix Detection
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Track qualified uses of module names and abbreviations:
+
+    module L = FStar.List.Tot
+    open FStar.HyperStack.ST
+
+    let x = L.length xs       // L is used (FStar.List.Tot)
+    let h = ST.get ()         // ST used qualified (not via open)
+
+Strategy B: Known Module Exports
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Maintain a database of commonly used modules and their exports:
+
+    FStar.Mul:
+      - op_Star
+
+    FStar.List.Tot.Base:
+      - length, hd, tl, nth, rev, append, map, fold_left, ...
+
+    FStar.HyperStack.ST:
+      - Stack, ST, get, recall, push_frame, pop_frame, ...
+
+    Lib.IntTypes:
+      - uint8, uint16, uint32, uint64, int8, int16, ...
+      - u8, u16, u32, u64, i8, i16, i32, i64
+      - v, uint_v, int_v, ...
+
+Strategy C: Identifier Similarity Heuristic
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When module exports are unknown, use naming heuristics:
+
+    open Hacl.Bignum.Definitions
+
+    // Look for identifiers containing:
+    // - Module name parts: "bignum", "definitions"
+    // - Common patterns: types starting with uppercase
+    // - Function names that could come from this module
+
+Strategy D: Operator Detection
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Special handling for operator-exporting modules:
+
+    open FStar.Mul
+    let x = 2 * 3     // `*` operator used
+
+Detect operators: *, +, -, /, %, <, >, <=, >=, =, <>, etc.
+Map to known operator-exporting modules.
+
+Strategy E: Typeclass Instance Detection
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Empty imports {} are used for typeclass scope:
+
+    open FStar.Tactics.Typeclasses { solve }
+
+    instance ord_int : ord int = {
+       super = solve;  // 'solve' is the typeclass resolver
+       cmp = compare_int;
+    }
+
+Mark empty {} imports as "possibly used for typeclasses" with low
+confidence for reporting.
+
+4.4 SHADOWING HANDLING
+----------------------
+
+Later opens shadow earlier ones:
+
+    open FStar.List.Tot.Base    // Line 3
+    open FStar.List.Tot         // Line 4 - shadows Base
+
+    let x = length xs           // Uses FStar.List.Tot, not Base
+
+Algorithm:
+1. Process opens in reverse order (last to first)
+2. When a name is found used, attribute to most recent open
+3. Earlier opens with shadowed names are marked as potentially unused
+
+EDGE CASE: Selective imports don't shadow everything:
+
+    open FStar.List.Tot.Base                    // exports: length, hd, tl, ...
+    open FStar.List.Tot.Properties { rev_mem }  // exports only rev_mem
+
+    let x = length xs    // Still from Base (not shadowed)
+    let y = rev_mem xs   // From Properties
+
+4.5 LOCAL OPEN SCOPING
+----------------------
+
+    let f x =
+      let open FStar.Order in   // Scope starts here
+      match cmp x 0 with
+      | Lt -> -1
+      | Eq -> 0
+      | Gt -> 1                  // Scope ends with 'in' expression
+
+    // FStar.Order not in scope here
+    let y = ...
+
+Track scope boundaries for local opens to avoid false positives.
+
+================================================================================
+5. KNOWN MODULE DATABASE
+================================================================================
+
+5.1 WELL-KNOWN MODULES AND EXPORTS
+----------------------------------
+
+// Core F* modules
+FStar.Mul: [op_Star]
+FStar.Preorder: [preorder, reflexive, transitive, ...]
+FStar.Squash: [squash, return_squash, bind_squash, ...]
+FStar.Classical: [forall_intro, exists_intro, move_requires, ...]
+FStar.Calc: [calc, calc_init, calc_step, calc_finish, ...]
+
+// Pervasives/Prims (always in scope - don't count as "open" usage)
+Prims: [int, nat, bool, string, list, option, ...]
+
+// List operations
+FStar.List.Tot.Base: [
+    length, hd, tl, nth, index,
+    rev, append, (@),
+    map, mapi, mapT,
+    fold_left, fold_right,
+    filter, find, mem, memP,
+    for_all, existsb,
+    sortWith, partition,
+    ...
+]
+FStar.List.Tot: [includes FStar.List.Tot.Base + Properties]
+
+// Sequence operations
+FStar.Seq.Base: [
+    seq, empty, length, index,
+    create, init, append, slice,
+    upd, equal, ...
+]
+FStar.Seq: [includes Base + Properties]
+
+// Memory/Effects
+FStar.HyperStack: [mem, reference, ...]
+FStar.HyperStack.ST: [
+    Stack, ST,
+    get, put,
+    push_frame, pop_frame,
+    recall, witness_region,
+    ...
+]
+
+// Low-level buffers
+Lib.Buffer: [
+    buffer, lbuffer,
+    live, modifies, loc,
+    create, alloca, sub,
+    index, upd,
+    ...
+]
+Lib.IntTypes: [
+    uint8, uint16, uint32, uint64,
+    int8, int16, int32, int64,
+    size_t, pub_uint8, sec_uint32,
+    u8, u16, u32, u64,
+    i8, i16, i32, i64,
+    v, uint_v, int_v,
+    (+!), (-!), (*!), (/!),
+    ...
+]
+
+// Tactics
+FStar.Tactics.V2: [tactic, Tac, ...]
+FStar.Tactics.Typeclasses: [solve, tcresolve, ...]
+
+// Reflection
+FStar.Reflection.V2: [term, binder, ...]
+
+5.2 MODULE EXPORT INFERENCE
+---------------------------
+
+When a module is not in the known database, infer exports:
+
+1. If .fsti exists, parse it for val/type/let declarations
+2. Use module name as prefix hint (e.g., Hacl.Bignum.* -> bignum-related)
+3. Look for qualified uses elsewhere in codebase
+
+================================================================================
+6. FALSE POSITIVE MITIGATION
+================================================================================
+
+6.1 CONSERVATIVE HANDLING
+-------------------------
+
+The following opens should NOT be flagged as unused:
+
+A) Empty selective imports (typeclass scope):
+   open FStar.Tactics.BV.Lemmas {}
+   -> Mark as "typeclass scope, cannot verify usage"
+
+B) Opens followed immediately by include:
+   open FStar.List.Tot
+   include FStar.List.Tot.Properties
+   -> The open may be needed for the include
+
+C) Opens in interface files (.fsti):
+   -> May be needed by implementation or clients
+
+D) Opens with #[must_use] or similar attributes (future):
+   -> Respect explicit annotations
+
+6.2 CONFIDENCE LEVELS
+---------------------
+
+Report unused opens with confidence levels:
+
+HIGH CONFIDENCE (definitely unused):
+- Selective import where all imported names are unused
+- Module that exports known functions, none of which appear
+
+MEDIUM CONFIDENCE (likely unused):
+- Basic open of module not in known database
+- No identifiers seem to match module name pattern
+
+LOW CONFIDENCE (possibly unused):
+- Empty selective import (typeclass scope)
+- Opens in .fsti files
+- Opens followed by friend/include of related module
+
+================================================================================
+7. AUTOFIX GENERATION
+================================================================================
+
+7.1 SIMPLE REMOVAL
+------------------
+
+For unused opens on a single line:
+
+Before:
+    open FStar.List.Tot
+    open FStar.Mul           // <- UNUSED
+    open FStar.HyperStack
+
+After:
+    open FStar.List.Tot
+    open FStar.HyperStack
+
+Fix:
+    Edit {
+        range: Range(line 2, col 1, line 3, col 1),
+        new_text: ""
+    }
+
+7.2 PARTIAL SELECTIVE IMPORT CLEANUP
+------------------------------------
+
+For selective imports with some unused names:
+
+Before:
+    open FStar.List.Tot { length, rev, fold_left }
+                           ^^^   ^^^ unused
+
+After:
+    open FStar.List.Tot { length }
+
+This is more complex and should be a separate fix option.
+
+7.3 FIX SAFETY
+--------------
+
+Before applying fix:
+1. Verify the file hasn't changed since analysis
+2. Check for other modifications in the same region
+3. Preserve trailing newlines/formatting
+
+================================================================================
+8. EDGE CASES AND GOTCHAS
+================================================================================
+
+8.1 MUTUAL MODULE DEPENDENCIES
+------------------------------
+
+    // File A.fst
+    open B
+    let f x = B.g x    // Uses qualified, but open needed for types?
+
+Some opens are needed for type resolution even if all uses are qualified.
+Be conservative.
+
+8.2 OPERATOR PRECEDENCE AND PARSING
+-----------------------------------
+
+    open FStar.Mul
+    let x = (1, 2)   // Is this tuple or multiplication?
+    let y = 1 * 2    // This is multiplication
+
+The `*` in `(1, 2)` is tuple, not multiplication. Only infix `*` is from Mul.
+
+8.3 INCLUDE INTERACTIONS
+------------------------
+
+    include FStar.List.Tot
+    open FStar.List.Tot.Base   // Redundant? Base is included via include
+
+Include re-exports everything. Opens after include of same module are redundant.
+
+8.4 FRIEND DECLARATIONS
+-----------------------
+
+    friend FStar.SizeT
+    open FStar.SizeT    // May be needed alongside friend
+
+Friend gives access to private definitions. Open is still needed for
+public interface. Don't flag open as unused if friend of same module exists.
+
+8.5 MODULE ABBREVIATION CONFUSION
+---------------------------------
+
+    module L = FStar.List.Tot
+    open FStar.List.Tot
+
+    let x = L.length xs    // Uses abbreviation, not open
+    let y = length xs      // Uses open
+
+If all uses are via abbreviation, the open is unused.
+
+================================================================================
+9. RUST IMPLEMENTATION OUTLINE
+================================================================================
+
+9.1 DATA STRUCTURES
+-------------------
+
+```rust
+// src/lint/unused_opens.rs
+
+use std::collections::{HashMap, HashSet};
+use regex::Regex;
+use lazy_static::lazy_static;
+
+/// Represents an open statement in F* code
+#[derive(Debug, Clone)]
+pub struct OpenStatement {
+    /// Full module path (e.g., "FStar.List.Tot")
+    pub module_path: String,
+    /// Selective imports, if any. None means import all.
+    pub selective: Option<Vec<SelectiveImport>>,
+    /// Line number (1-indexed)
+    pub line: usize,
+    /// Start column (1-indexed)
+    pub start_col: usize,
+    /// End column (1-indexed)
+    pub end_col: usize,
+    /// Is this a local open (let open ... in)?
+    pub is_local: bool,
+    /// For local opens, the line where scope ends
+    pub scope_end: Option<usize>,
+    /// The full text of the open statement
+    pub text: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SelectiveImport {
+    /// Original name from module
+    pub name: String,
+    /// Alias if renamed (e.g., `(=) as (=?)`)
+    pub alias: Option<String>,
+}
+
+/// Confidence level for unused open detection
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confidence {
+    High,
+    Medium,
+    Low,
+}
+
+/// Result of analyzing an open statement
+#[derive(Debug)]
+pub struct OpenAnalysis {
+    pub open_stmt: OpenStatement,
+    pub is_used: bool,
+    pub confidence: Confidence,
+    pub reason: String,
+    pub used_identifiers: Vec<String>,
+}
+
+/// Known module exports database
+pub struct ModuleExports {
+    /// Map from module path to set of exported names
+    exports: HashMap<String, HashSet<String>>,
+}
+
+impl ModuleExports {
+    pub fn new() -> Self {
+        let mut exports = HashMap::new();
+
+        // FStar.Mul - multiplication operator
+        exports.insert("FStar.Mul".into(),
+            ["op_Star"].iter().map(|s| s.to_string()).collect());
+
+        // FStar.List.Tot.Base - list operations
+        exports.insert("FStar.List.Tot.Base".into(), [
+            "length", "hd", "tl", "nth", "index",
+            "rev", "append", "op_At", // (@)
+            "map", "mapi", "mapT",
+            "fold_left", "fold_right", "fold_left2",
+            "filter", "find", "mem", "memP",
+            "for_all", "for_all2", "existsb",
+            "sortWith", "partition", "unzip",
+            "flatten", "concatMap", "collect",
+            "isEmpty", "noRepeats", "strict_prefix_of",
+        ].iter().map(|s| s.to_string()).collect());
+
+        // ... more modules ...
+
+        Self { exports }
+    }
+
+    pub fn get_exports(&self, module_path: &str) -> Option<&HashSet<String>> {
+        // Try exact match first
+        if let Some(exports) = self.exports.get(module_path) {
+            return Some(exports);
+        }
+        // Try parent module (FStar.List.Tot includes FStar.List.Tot.Base)
+        // ...
+        None
+    }
+}
+```
+
+9.2 PARSING OPEN STATEMENTS
+---------------------------
+
+```rust
+lazy_static! {
+    // open Module.Path
+    static ref OPEN_BASIC: Regex = Regex::new(
+        r"^open\s+([A-Z][\w.]*)"
+    ).unwrap();
+
+    // open Module.Path { name1, name2 }
+    static ref OPEN_SELECTIVE: Regex = Regex::new(
+        r"^open\s+([A-Z][\w.]*)\s*\{([^}]*)\}"
+    ).unwrap();
+
+    // let open Module.Path in
+    static ref OPEN_LOCAL: Regex = Regex::new(
+        r"let\s+open\s+([A-Z][\w.]*)\s+in"
+    ).unwrap();
+
+    // Selective import item: name or (op) as alias
+    static ref SELECTIVE_ITEM: Regex = Regex::new(
+        r"(\([^)]+\)|[\w']+)(?:\s+as\s+(\([^)]+\)|[\w']+))?"
+    ).unwrap();
+}
+
+/// Parse all open statements from file content
+pub fn parse_opens(content: &str) -> Vec<OpenStatement> {
+    let mut opens = Vec::new();
+
+    for (line_idx, line) in content.lines().enumerate() {
+        let line_num = line_idx + 1;
+        let trimmed = line.trim();
+
+        // Skip if inside comment (need comment tracking)
+        // ...
+
+        // Check for local open first (more specific)
+        if let Some(caps) = OPEN_LOCAL.captures(trimmed) {
+            let module_path = caps.get(1).unwrap().as_str().to_string();
+            let start_col = line.find("let open").unwrap_or(0) + 1;
+
+            opens.push(OpenStatement {
+                module_path,
+                selective: None,
+                line: line_num,
+                start_col,
+                end_col: start_col + trimmed.len(),
+                is_local: true,
+                scope_end: find_scope_end(content, line_idx),
+                text: line.to_string(),
+            });
+            continue;
+        }
+
+        // Check for selective open
+        if let Some(caps) = OPEN_SELECTIVE.captures(trimmed) {
+            let module_path = caps.get(1).unwrap().as_str().to_string();
+            let imports_str = caps.get(2).unwrap().as_str();
+            let selective = parse_selective_imports(imports_str);
+
+            opens.push(OpenStatement {
+                module_path,
+                selective: Some(selective),
+                line: line_num,
+                start_col: 1,
+                end_col: trimmed.len(),
+                is_local: false,
+                scope_end: None,
+                text: line.to_string(),
+            });
+            continue;
+        }
+
+        // Check for basic open
+        if let Some(caps) = OPEN_BASIC.captures(trimmed) {
+            let module_path = caps.get(1).unwrap().as_str().to_string();
+
+            opens.push(OpenStatement {
+                module_path,
+                selective: None,
+                line: line_num,
+                start_col: 1,
+                end_col: trimmed.len(),
+                is_local: false,
+                scope_end: None,
+                text: line.to_string(),
+            });
+        }
+    }
+
+    opens
+}
+
+fn parse_selective_imports(imports_str: &str) -> Vec<SelectiveImport> {
+    let mut imports = Vec::new();
+
+    for item in imports_str.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+
+        if let Some(caps) = SELECTIVE_ITEM.captures(item) {
+            let name = caps.get(1).map(|m| m.as_str().to_string())
+                .unwrap_or_default();
+            let alias = caps.get(2).map(|m| m.as_str().to_string());
+
+            imports.push(SelectiveImport { name, alias });
+        }
+    }
+
+    imports
+}
+```
+
+9.3 USAGE DETECTION
+-------------------
+
+```rust
+/// Analyze usage of opened modules
+pub fn analyze_opens(
+    content: &str,
+    opens: &[OpenStatement],
+    module_exports: &ModuleExports,
+) -> Vec<OpenAnalysis> {
+    let mut results = Vec::new();
+
+    // Extract all identifiers used in the file
+    let used_idents = extract_all_identifiers(content);
+
+    // Extract qualified module uses (L.foo, FStar.List.Tot.foo)
+    let qualified_uses = extract_qualified_uses(content);
+
+    // Extract operator uses
+    let operator_uses = extract_operator_uses(content);
+
+    // Process each open in reverse order (for shadowing)
+    for open in opens.iter().rev() {
+        let analysis = analyze_single_open(
+            open,
+            &used_idents,
+            &qualified_uses,
+            &operator_uses,
+            module_exports,
+        );
+        results.push(analysis);
+    }
+
+    // Reverse to get original order
+    results.reverse();
+    results
+}
+
+fn analyze_single_open(
+    open: &OpenStatement,
+    used_idents: &HashSet<String>,
+    qualified_uses: &HashMap<String, Vec<String>>,
+    operator_uses: &HashSet<String>,
+    module_exports: &ModuleExports,
+) -> OpenAnalysis {
+    // Handle empty selective import (typeclass scope)
+    if let Some(ref selective) = open.selective {
+        if selective.is_empty() {
+            return OpenAnalysis {
+                open_stmt: open.clone(),
+                is_used: true,  // Assume used for typeclass scope
+                confidence: Confidence::Low,
+                reason: "Empty import used for typeclass scope".into(),
+                used_identifiers: vec![],
+            };
+        }
+
+        // Check each selective import
+        let mut used_names = Vec::new();
+        for import in selective {
+            let check_name = import.alias.as_ref()
+                .unwrap_or(&import.name);
+            if used_idents.contains(check_name) {
+                used_names.push(check_name.clone());
+            }
+        }
+
+        let is_used = !used_names.is_empty();
+        return OpenAnalysis {
+            open_stmt: open.clone(),
+            is_used,
+            confidence: if is_used { Confidence::High } else { Confidence::High },
+            reason: if is_used {
+                format!("Uses: {}", used_names.join(", "))
+            } else {
+                "No imported names used".into()
+            },
+            used_identifiers: used_names,
+        };
+    }
+
+    // Check for operator modules
+    if is_operator_module(&open.module_path) {
+        let ops = get_module_operators(&open.module_path);
+        for op in ops {
+            if operator_uses.contains(&op) {
+                return OpenAnalysis {
+                    open_stmt: open.clone(),
+                    is_used: true,
+                    confidence: Confidence::High,
+                    reason: format!("Operator '{}' used", op),
+                    used_identifiers: vec![op],
+                };
+            }
+        }
+    }
+
+    // Check known module exports
+    if let Some(exports) = module_exports.get_exports(&open.module_path) {
+        let mut used_names = Vec::new();
+        for export in exports {
+            if used_idents.contains(export) {
+                used_names.push(export.clone());
+            }
+        }
+
+        let is_used = !used_names.is_empty();
+        return OpenAnalysis {
+            open_stmt: open.clone(),
+            is_used,
+            confidence: if is_used { Confidence::High } else { Confidence::High },
+            reason: if is_used {
+                format!("Uses: {} of {} known exports",
+                    used_names.len(), exports.len())
+            } else {
+                format!("None of {} known exports used", exports.len())
+            },
+            used_identifiers: used_names,
+        };
+    }
+
+    // Unknown module - use heuristics
+    let (is_used, confidence, reason) = heuristic_check(
+        &open.module_path,
+        used_idents,
+        qualified_uses,
+    );
+
+    OpenAnalysis {
+        open_stmt: open.clone(),
+        is_used,
+        confidence,
+        reason,
+        used_identifiers: vec![],
+    }
+}
+
+fn is_operator_module(module_path: &str) -> bool {
+    matches!(module_path,
+        "FStar.Mul" |
+        "Lib.IntTypes" |
+        "FStar.UInt" |
+        "FStar.Int"
+    )
+}
+
+fn get_module_operators(module_path: &str) -> Vec<String> {
+    match module_path {
+        "FStar.Mul" => vec!["*".into()],
+        "Lib.IntTypes" => vec![
+            "+!".into(), "-!".into(), "*!".into(), "/!".into(),
+            "%.".into(), "^.".into(), "&.".into(), "|.".into(),
+        ],
+        _ => vec![],
+    }
+}
+
+fn extract_operator_uses(content: &str) -> HashSet<String> {
+    let mut ops = HashSet::new();
+
+    // Look for infix multiplication (not tuple)
+    // Pattern: digit/ident followed by * followed by digit/ident
+    let mul_pattern = Regex::new(r"[\w)]\s*\*\s*[\w(]").unwrap();
+    if mul_pattern.is_match(content) {
+        ops.insert("*".into());
+    }
+
+    // Look for Lib.IntTypes operators
+    for op in &["+!", "-!", "*!", "/!", "%.", "^.", "&.", "|."] {
+        if content.contains(op) {
+            ops.insert(op.to_string());
+        }
+    }
+
+    ops
+}
+
+fn heuristic_check(
+    module_path: &str,
+    used_idents: &HashSet<String>,
+    qualified_uses: &HashMap<String, Vec<String>>,
+) -> (bool, Confidence, String) {
+    // Check if module is used qualified
+    if qualified_uses.contains_key(module_path) {
+        return (
+            false,
+            Confidence::High,
+            "Module used qualified, open may be redundant".into(),
+        );
+    }
+
+    // Check module abbreviations
+    let last_component = module_path.split('.').last().unwrap_or(module_path);
+    for (abbrev, _) in qualified_uses {
+        if abbrev.len() <= 3 && !abbrev.contains('.') {
+            // Could be abbreviation for this module
+            return (
+                true,
+                Confidence::Low,
+                format!("May be aliased as '{}'", abbrev),
+            );
+        }
+    }
+
+    // Check for identifiers matching module name pattern
+    let module_words: Vec<&str> = last_component
+        .split(|c: char| c.is_uppercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    for ident in used_idents {
+        let ident_lower = ident.to_lowercase();
+        for word in &module_words {
+            if ident_lower.contains(&word.to_lowercase()) {
+                return (
+                    true,
+                    Confidence::Medium,
+                    format!("Identifier '{}' may be from this module", ident),
+                );
+            }
+        }
+    }
+
+    (
+        false,
+        Confidence::Medium,
+        "No apparent usage detected".into(),
+    )
+}
+```
+
+9.4 RULE IMPLEMENTATION
+-----------------------
+
+```rust
+// src/lint/unused_opens.rs (continued)
+
+use crate::lint::rules::{Rule, RuleCode, Diagnostic, DiagnosticSeverity,
+                         Fix, Edit, Range};
+
+pub struct UnusedOpensRule {
+    module_exports: ModuleExports,
+    min_confidence: Confidence,
+}
+
+impl UnusedOpensRule {
+    pub fn new() -> Self {
+        Self {
+            module_exports: ModuleExports::new(),
+            min_confidence: Confidence::Medium,
+        }
+    }
+
+    pub fn with_min_confidence(mut self, confidence: Confidence) -> Self {
+        self.min_confidence = confidence;
+        self
+    }
+}
+
+impl Rule for UnusedOpensRule {
+    fn code(&self) -> RuleCode {
+        RuleCode::FST004
+    }
+
+    fn check(&self, file: &PathBuf, content: &str) -> Vec<Diagnostic> {
+        let opens = parse_opens(content);
+        let analyses = analyze_opens(content, &opens, &self.module_exports);
+
+        let mut diagnostics = Vec::new();
+
+        for analysis in analyses {
+            if !analysis.is_used && analysis.confidence >= self.min_confidence {
+                let open = &analysis.open_stmt;
+
+                // Generate fix
+                let fix = generate_removal_fix(file, open, content);
+
+                diagnostics.push(Diagnostic {
+                    rule: RuleCode::FST004,
+                    severity: DiagnosticSeverity::Warning,
+                    file: file.clone(),
+                    range: Range::new(
+                        open.line,
+                        open.start_col,
+                        open.line,
+                        open.end_col,
+                    ),
+                    message: format!(
+                        "Unused open: `{}`. {}",
+                        open.module_path,
+                        analysis.reason
+                    ),
+                    fix: Some(fix),
+                });
+            }
+        }
+
+        diagnostics
+    }
+}
+
+fn generate_removal_fix(
+    file: &PathBuf,
+    open: &OpenStatement,
+    content: &str,
+) -> Fix {
+    let lines: Vec<&str> = content.lines().collect();
+
+    // Check if next line is blank (remove it too for clean formatting)
+    let end_line = if open.line < lines.len()
+        && lines[open.line].trim().is_empty()
+    {
+        open.line + 1
+    } else {
+        open.line
+    };
+
+    Fix {
+        message: format!("Remove unused open `{}`", open.module_path),
+        edits: vec![Edit {
+            file: file.clone(),
+            range: Range::new(open.line, 1, end_line + 1, 1),
+            new_text: String::new(),
+        }],
+    }
+}
+```
+
+9.5 INTEGRATION WITH ENGINE
+---------------------------
+
+```rust
+// In src/lint/rules.rs, add:
+
+pub enum RuleCode {
+    FST001,
+    FST002,
+    FST003,
+    FST004,  // NEW: Unused opens
+}
+
+impl RuleCode {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_uppercase().as_str() {
+            "FST001" => Some(RuleCode::FST001),
+            "FST002" => Some(RuleCode::FST002),
+            "FST003" => Some(RuleCode::FST003),
+            "FST004" => Some(RuleCode::FST004),
+            _ => None,
+        }
+    }
+
+    pub fn all() -> &'static [RuleCode] {
+        &[RuleCode::FST001, RuleCode::FST002, RuleCode::FST003,
+          RuleCode::FST004]
+    }
+
+    pub fn is_fixable(&self) -> bool {
+        matches!(self,
+            RuleCode::FST001 | RuleCode::FST002 | RuleCode::FST004)
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            RuleCode::FST001 => "duplicate-types",
+            RuleCode::FST002 => "interface-order",
+            RuleCode::FST003 => "comment-syntax",
+            RuleCode::FST004 => "unused-opens",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            // ... existing ...
+            RuleCode::FST004 => {
+                "Detects `open` statements that bring module contents into \
+                 scope but are never used. Unused opens clutter namespace \
+                 and can slow compilation."
+            }
+        }
+    }
+}
+
+// In src/lint/engine.rs, add to LintEngine::new():
+
+if config.is_rule_enabled(RuleCode::FST004) {
+    rules.push(Box::new(UnusedOpensRule::new()));
+}
+```
+
+================================================================================
+10. TESTING STRATEGY
+================================================================================
+
+10.1 UNIT TEST CASES
+--------------------
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_basic_open() {
+        let content = "open FStar.List.Tot\n";
+        let opens = parse_opens(content);
+        assert_eq!(opens.len(), 1);
+        assert_eq!(opens[0].module_path, "FStar.List.Tot");
+        assert!(opens[0].selective.is_none());
+    }
+
+    #[test]
+    fn test_parse_selective_open() {
+        let content = "open FStar.List.Tot { length, rev }\n";
+        let opens = parse_opens(content);
+        assert_eq!(opens.len(), 1);
+        assert!(opens[0].selective.is_some());
+        let selective = opens[0].selective.as_ref().unwrap();
+        assert_eq!(selective.len(), 2);
+        assert_eq!(selective[0].name, "length");
+        assert_eq!(selective[1].name, "rev");
+    }
+
+    #[test]
+    fn test_parse_selective_with_alias() {
+        let content = "open FStar.Class.Eq.Raw { (=) as (=?) }\n";
+        let opens = parse_opens(content);
+        let selective = opens[0].selective.as_ref().unwrap();
+        assert_eq!(selective[0].name, "(=)");
+        assert_eq!(selective[0].alias.as_ref().unwrap(), "(=?)");
+    }
+
+    #[test]
+    fn test_unused_open_detected() {
+        let content = r#"
+module Test
+open FStar.List.Tot
+open FStar.Mul
+
+let x = [1;2;3]
+"#;
+        let opens = parse_opens(content);
+        let exports = ModuleExports::new();
+        let analyses = analyze_opens(content, &opens, &exports);
+
+        // FStar.List.Tot should be detected as unused (no list funcs used)
+        // FStar.Mul should be detected as unused (no multiplication)
+        assert!(!analyses[0].is_used || !analyses[1].is_used);
+    }
+
+    #[test]
+    fn test_used_open_not_flagged() {
+        let content = r#"
+module Test
+open FStar.List.Tot
+
+let x = length [1;2;3]
+"#;
+        let opens = parse_opens(content);
+        let exports = ModuleExports::new();
+        let analyses = analyze_opens(content, &opens, &exports);
+
+        assert!(analyses[0].is_used);
+    }
+
+    #[test]
+    fn test_operator_module_detection() {
+        let content = r#"
+module Test
+open FStar.Mul
+
+let x = 2 * 3
+"#;
+        let opens = parse_opens(content);
+        let exports = ModuleExports::new();
+        let analyses = analyze_opens(content, &opens, &exports);
+
+        assert!(analyses[0].is_used);
+    }
+
+    #[test]
+    fn test_empty_selective_not_flagged() {
+        let content = r#"
+module Test
+open FStar.Tactics.BV.Lemmas {}
+
+val foo : int -> int
+"#;
+        let opens = parse_opens(content);
+        let exports = ModuleExports::new();
+        let analyses = analyze_opens(content, &opens, &exports);
+
+        // Should not flag as unused (typeclass scope)
+        assert!(analyses[0].is_used ||
+                analyses[0].confidence == Confidence::Low);
+    }
+
+    #[test]
+    fn test_local_open_scope() {
+        let content = r#"
+module Test
+
+let f x =
+  let open FStar.Order in
+  match cmp x 0 with
+  | Lt -> -1
+  | Eq -> 0
+  | Gt -> 1
+
+let g x = x + 1
+"#;
+        let opens = parse_opens(content);
+        assert_eq!(opens[0].is_local, true);
+        // Local open should track scope
+    }
+}
+```
+
+10.2 INTEGRATION TESTS
+----------------------
+
+Test against real F* files from ulib and hacl-star:
+- Verify no false positives on known-good code
+- Check that genuine unused opens are detected
+- Validate fix generation produces valid F* code
+
+10.3 EDGE CASE TESTS
+--------------------
+
+- Multiple opens of same module
+- Opens with include of same module
+- Opens with friend of same module
+- Shadowing between opens
+- Local opens within nested expressions
+- Opens in .fsti files vs .fst files
+
+================================================================================
+11. FUTURE ENHANCEMENTS
+================================================================================
+
+11.1 LSP INTEGRATION
+--------------------
+
+- Integrate with F* compiler to get accurate module exports
+- Use type information to verify identifier origins
+- Provide real-time unused open warnings in IDE
+
+11.2 CROSS-FILE ANALYSIS
+------------------------
+
+- Track module exports across project
+- Build dependency graph
+- Detect transitively unused opens
+
+11.3 CONFIGURATION OPTIONS
+--------------------------
+
+- Allow users to suppress warnings for specific modules
+- Configure confidence threshold
+- Add per-file/per-line suppression comments
+
+11.4 SMARTER HEURISTICS
+-----------------------
+
+- Learn from project patterns
+- Use machine learning for module export inference
+- Analyze .fsti files to build export database
+
+================================================================================
+12. EXAMPLES
+================================================================================
+
+12.1 UNUSED OPEN - BASIC
+------------------------
+
+INPUT:
+```fstar
+module Example
+
+open FStar.List.Tot
+open FStar.Mul         // UNUSED - no multiplication in file
+open FStar.HyperStack
+
+let x = length [1;2;3]
+```
+
+OUTPUT:
+```
+Example.fst:4:1: warning[FST004]: Unused open: `FStar.Mul`.
+                                  None of 1 known exports used.
+  |
+4 | open FStar.Mul
+  | ^^^^^^^^^^^^^^
+  = help: Remove this open statement
+
+Found 1 issue (1 warning, 0 errors)
+```
+
+12.2 UNUSED SELECTIVE IMPORT
+----------------------------
+
+INPUT:
+```fstar
+module Example
+
+open FStar.List.Tot { length, rev, fold_left }
+
+let x = length [1;2;3]
+// Note: rev and fold_left never used
+```
+
+OUTPUT:
+```
+Example.fst:3:1: warning[FST004]: Unused imports in open: `FStar.List.Tot`.
+                                  Only 'length' used of { length, rev, fold_left }.
+  |
+3 | open FStar.List.Tot { length, rev, fold_left }
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: Consider `open FStar.List.Tot { length }`
+
+Found 1 issue (1 warning, 0 errors)
+```
+
+12.3 QUALIFIED USE MAKES OPEN REDUNDANT
+---------------------------------------
+
+INPUT:
+```fstar
+module Example
+
+open FStar.List.Tot
+
+let x = FStar.List.Tot.length [1;2;3]  // Qualified use
+let y = FStar.List.Tot.rev [1;2;3]     // Qualified use
+```
+
+OUTPUT:
+```
+Example.fst:3:1: warning[FST004]: Unused open: `FStar.List.Tot`.
+                                  Module used qualified, open may be redundant.
+  |
+3 | open FStar.List.Tot
+  | ^^^^^^^^^^^^^^^^^^^
+  = help: Remove this open if all uses are qualified
+
+Found 1 issue (1 warning, 0 errors)
+```
+
+12.4 NO WARNINGS - ALL OPENS USED
+---------------------------------
+
+INPUT:
+```fstar
+module Example
+
+open FStar.List.Tot
+open FStar.Mul
+
+let x = length [1;2;3]
+let y = 2 * 3
+```
+
+OUTPUT:
+```
+All checks passed!
+
+Found 0 issues
+```
+
+================================================================================
+END OF SPECIFICATION
+================================================================================

@@ -1,0 +1,1839 @@
+================================================================================
+FST016: F* VERIFICATION PERFORMANCE PROFILER - DETAILED SPECIFICATION
+================================================================================
+
+Version: 1.0
+Author: Bug Hunter Analysis
+Date: 2026-02-03
+
+================================================================================
+1. OVERVIEW
+================================================================================
+
+FST016 is a comprehensive verification performance profiler for F* that:
+- Measures verification time at function, lemma, and query granularities
+- Identifies bottlenecks in typechecking and SMT solving
+- Correlates slow verification with code patterns
+- Suggests concrete optimizations based on detected patterns
+- Integrates with Z3's built-in profiling and statistics
+
+Unlike lint rules that detect code issues, FST016 is a diagnostic/analysis tool
+that helps developers understand and optimize their proof development workflow.
+
+Severity: Informational (performance hints, not errors)
+Fixable: Partially (can suggest fuel/ifuel hints, proof splitting strategies)
+
+================================================================================
+2. F* VERIFICATION PIPELINE ANALYSIS
+================================================================================
+
+2.1 VERIFICATION PHASES
+-----------------------
+
+The F* verification process consists of several measurable phases:
+
+PHASE 1: PARSING AND DESUGARING
+    Source code -> AST
+    Typically fast (<100ms for most files)
+    Measured by: FStarC.Parser timing
+
+PHASE 2: TYPECHECKING
+    AST -> Typed AST with VCs
+    Includes:
+    - Type inference
+    - Refinement checking
+    - Effect checking
+    - Universe solving
+    Measured by: FStarC.TypeChecker.Tc timing
+
+PHASE 3: SMT ENCODING
+    Typed terms -> SMT-LIB2 assertions
+    Includes:
+    - Term encoding
+    - Fuel instrumentation
+    - Context preparation
+    Measured by: FStarC.SMTEncoding.Encode timing
+
+PHASE 4: SMT SOLVING
+    SMT queries -> sat/unsat results
+    Includes:
+    - Z3 query execution
+    - Hint replay
+    - Quake testing (if enabled)
+    Measured by: FStarC.SMTEncoding.Z3 timing
+
+PHASE 5: POST-PROCESSING
+    Includes:
+    - Hint recording
+    - Error reporting
+    - Statistics collection
+    Measured by: FStarC.SMTEncoding.Solver timing
+
+2.2 EXISTING TIMING INFRASTRUCTURE
+----------------------------------
+
+F* already provides several timing/profiling options:
+
+--query_stats
+    Outputs per-query timing information
+    Format: "(file:line) Query-stats (name, index) tag in N milliseconds
+             with fuel F and ifuel I and rlimit R (used rlimit U)"
+
+--print_z3_statistics
+    Outputs Z3 statistics including:
+    - rlimit-count (resource limit units consumed)
+    - memory usage
+    - num-conflicts
+    - num-quantifier-instantiations
+
+--hint_info
+    Outputs hint-related information:
+    - Cache hits/misses
+    - Hint validity
+    - Module names in unsat cores
+
+--profile
+    Enables general profiling with custom profile keys
+
+2.3 Z3 STATISTICS AVAILABLE
+---------------------------
+
+From FStarC.SMTEncoding.Z3.fst, z3result contains:
+
+type z3result = {
+    z3result_status      : z3status;      // UNSAT/SAT/UNKNOWN/TIMEOUT/KILLED
+    z3result_time        : int;           // Wall-clock milliseconds
+    z3result_initial_statistics : z3statistics;  // Before query
+    z3result_statistics  : z3statistics;  // After query
+    z3result_query_hash  : option string; // For hint caching
+    z3result_log_file    : option string; // SMT2 log file
+}
+
+Z3 statistics map (parsed from get-statistics output):
+- rlimit-count: Resource limit units consumed
+- max-memory: Peak memory usage
+- memory: Current memory usage
+- num-allocs: Memory allocations
+- conflicts: CDCL conflicts
+- decisions: Branching decisions
+- propagations: Unit propagations
+- quant-instantiations: Quantifier instantiation count
+- binary-propagations: Binary clause propagations
+- restarts: Search restarts
+
+================================================================================
+3. PROFILER DATA MODEL
+================================================================================
+
+3.1 CORE DATA STRUCTURES
+------------------------
+
+```rust
+use std::collections::{HashMap, BTreeMap};
+use std::time::{Duration, Instant};
+
+/// Unique identifier for a verification unit
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct VerificationUnit {
+    pub module_name: String,
+    pub definition_name: String,
+    pub definition_kind: DefinitionKind,
+    pub line: usize,
+    pub query_index: u32,
+}
+
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+pub enum DefinitionKind {
+    Let,           // let binding
+    LetRec,        // recursive let binding
+    Val,           // value declaration
+    Type,          // type definition
+    Inductive,     // inductive type
+    Lemma,         // lemma (with Lemma effect)
+    Effect,        // effect definition
+    Tactic,        // tactic definition
+    Instance,      // typeclass instance
+    SubLemma,      // split query sub-goal
+}
+
+/// Timing breakdown for a single verification
+#[derive(Debug, Clone, Default)]
+pub struct VerificationTiming {
+    // Phase timings (all in milliseconds)
+    pub typechecking_ms: u64,
+    pub encoding_ms: u64,
+    pub smt_solving_ms: u64,
+    pub hint_lookup_ms: u64,
+    pub total_ms: u64,
+
+    // SMT details
+    pub z3_rlimit_used: u64,
+    pub z3_rlimit_max: u64,
+    pub z3_memory_bytes: u64,
+    pub z3_conflicts: u64,
+    pub z3_quant_instantiations: u64,
+    pub z3_decisions: u64,
+
+    // Query details
+    pub num_queries: u32,
+    pub num_retries: u32,
+    pub num_splits: u32,
+    pub used_hint: bool,
+    pub hint_cache_hit: bool,
+
+    // Fuel settings
+    pub fuel: u32,
+    pub ifuel: u32,
+    pub rlimit_factor: u32,
+}
+
+/// Aggregated statistics for a module
+#[derive(Debug, Clone, Default)]
+pub struct ModuleStatistics {
+    pub module_name: String,
+    pub file_path: String,
+    pub total_verification_time_ms: u64,
+    pub total_definitions: u32,
+    pub total_queries: u32,
+
+    // Per-definition breakdown
+    pub definitions: Vec<DefinitionStatistics>,
+
+    // Summary statistics
+    pub slowest_definition: Option<String>,
+    pub slowest_definition_time_ms: u64,
+    pub average_query_time_ms: f64,
+    pub median_query_time_ms: u64,
+    pub p95_query_time_ms: u64,
+    pub p99_query_time_ms: u64,
+
+    // Resource usage
+    pub total_rlimit_used: u64,
+    pub total_quant_instantiations: u64,
+    pub peak_memory_bytes: u64,
+
+    // Problem indicators
+    pub timeout_count: u32,
+    pub high_fuel_count: u32,      // queries requiring fuel > initial
+    pub high_ifuel_count: u32,     // queries requiring ifuel > initial
+    pub hint_miss_count: u32,
+    pub flaky_query_count: u32,    // queries that sometimes fail
+}
+
+/// Statistics for a single definition
+#[derive(Debug, Clone)]
+pub struct DefinitionStatistics {
+    pub unit: VerificationUnit,
+    pub timing: VerificationTiming,
+    pub source_snippet: String,
+    pub detected_patterns: Vec<CodePattern>,
+    pub optimization_suggestions: Vec<OptimizationSuggestion>,
+}
+
+/// Patterns that correlate with slow verification
+#[derive(Debug, Clone)]
+pub enum CodePattern {
+    // Quantifier patterns
+    NestedQuantifiers { depth: u32 },
+    UnboundedQuantifier { variable: String },
+    MissingPattern { quantifier_loc: usize },
+    ExpensivePattern { pattern: String, instantiation_count: u64 },
+
+    // Proof patterns
+    LargeProofTerm { size: u32 },
+    DeepInduction { depth: u32 },
+    ComplexRefinement { num_conjuncts: u32 },
+    NonLinearArithmetic,
+    RecursiveLemmaCall { depth: u32 },
+
+    // Type patterns
+    HigherOrderUnification,
+    ImplicitArgumentInference { count: u32 },
+    UniversePolymorphism { level: u32 },
+    DependentPatternMatch,
+
+    // SMT patterns
+    HighFuelRequired { fuel: u32 },
+    HighIFuelRequired { ifuel: u32 },
+    LargeContext { num_assertions: u32 },
+    QuantifierMatching { time_fraction: f64 },
+    ArithmeticHeavy,
+    BitvectorHeavy,
+
+    // Resource patterns
+    RlimitExhaustion { used_fraction: f64 },
+    MemoryPressure { peak_mb: u64 },
+    QueryTimeout,
+}
+
+/// Concrete optimization suggestion
+#[derive(Debug, Clone)]
+pub struct OptimizationSuggestion {
+    pub priority: Priority,
+    pub category: OptimizationCategory,
+    pub description: String,
+    pub code_action: Option<CodeAction>,
+    pub expected_improvement: String,
+    pub related_pattern: CodePattern,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Priority {
+    Critical,  // Must fix - causes timeouts
+    High,      // Significant improvement possible
+    Medium,    // Moderate improvement possible
+    Low,       // Minor optimization
+    Info,      // Informational only
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum OptimizationCategory {
+    FuelHints,      // Add/adjust fuel/ifuel
+    ProofSplitting, // Split large proofs
+    PatternHints,   // Add SMT patterns
+    LemmaExtraction,// Extract helper lemmas
+    Caching,        // Enable/improve caching
+    QuakeConfig,    // Use --quake for flaky proofs
+    RlimitTuning,   // Adjust rlimit settings
+    ContextPruning, // Enable context pruning
+    ModuleStructure,// Reorganize module
+}
+
+#[derive(Debug, Clone)]
+pub struct CodeAction {
+    pub title: String,
+    pub edits: Vec<TextEdit>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TextEdit {
+    pub range: Range,
+    pub new_text: String,
+}
+```
+
+3.2 PROFILER CONFIGURATION
+--------------------------
+
+```rust
+/// Configuration for the verification profiler
+#[derive(Debug, Clone)]
+pub struct ProfilerConfig {
+    // Thresholds for flagging slow verification
+    pub slow_query_threshold_ms: u64,           // Default: 1000
+    pub slow_definition_threshold_ms: u64,      // Default: 5000
+    pub slow_module_threshold_ms: u64,          // Default: 60000
+
+    // Resource thresholds
+    pub high_rlimit_fraction: f64,              // Default: 0.8
+    pub high_memory_mb: u64,                    // Default: 1024
+    pub high_quant_instantiations: u64,         // Default: 100000
+
+    // Fuel thresholds
+    pub high_fuel_threshold: u32,               // Default: 4
+    pub high_ifuel_threshold: u32,              // Default: 2
+
+    // Pattern detection sensitivity
+    pub quantifier_depth_warning: u32,          // Default: 3
+    pub proof_size_warning: u32,                // Default: 1000
+    pub context_size_warning: u32,              // Default: 5000
+
+    // Output options
+    pub output_format: OutputFormat,
+    pub include_source_snippets: bool,
+    pub max_suggestions_per_definition: usize,  // Default: 5
+    pub min_suggestion_priority: Priority,
+
+    // Comparison options
+    pub compare_with_baseline: Option<String>,  // Path to baseline profile
+    pub regression_threshold_percent: f64,      // Default: 10.0
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum OutputFormat {
+    Text,       // Human-readable text
+    Json,       // Machine-readable JSON
+    Markdown,   // Markdown report
+    Html,       // HTML report with visualizations
+    Flamegraph, // Flamegraph SVG
+}
+
+impl Default for ProfilerConfig {
+    fn default() -> Self {
+        Self {
+            slow_query_threshold_ms: 1000,
+            slow_definition_threshold_ms: 5000,
+            slow_module_threshold_ms: 60000,
+            high_rlimit_fraction: 0.8,
+            high_memory_mb: 1024,
+            high_quant_instantiations: 100000,
+            high_fuel_threshold: 4,
+            high_ifuel_threshold: 2,
+            quantifier_depth_warning: 3,
+            proof_size_warning: 1000,
+            context_size_warning: 5000,
+            output_format: OutputFormat::Text,
+            include_source_snippets: true,
+            max_suggestions_per_definition: 5,
+            min_suggestion_priority: Priority::Medium,
+            compare_with_baseline: None,
+            regression_threshold_percent: 10.0,
+        }
+    }
+}
+```
+
+================================================================================
+4. DATA COLLECTION METHODOLOGY
+================================================================================
+
+4.1 COLLECTING TIMING DATA FROM F*
+----------------------------------
+
+FST016 collects data through multiple channels:
+
+CHANNEL A: Query Stats Parser
+-----------------------------
+Parse output from --query_stats:
+
+```rust
+lazy_static! {
+    // Pattern: (file:line) Query-stats (name, index) status in N ms ...
+    static ref QUERY_STATS_RE: Regex = Regex::new(
+        r"\(([^)]+)\)\s+Query-stats\s+\(([^,]+),\s*(\d+)\)\s+(\w+)(?:\s+\(with hint\))?\s+in\s+(\d+)\s+milliseconds\s+with\s+fuel\s+(\d+)\s+and\s+ifuel\s+(\d+)\s+and\s+rlimit\s+(\d+)\s+\(used\s+rlimit\s+([\d.]+)\)"
+    ).unwrap();
+}
+
+pub fn parse_query_stats(line: &str) -> Option<QueryStatEntry> {
+    if let Some(caps) = QUERY_STATS_RE.captures(line) {
+        let location = caps.get(1)?.as_str();
+        let name = caps.get(2)?.as_str().to_string();
+        let index: u32 = caps.get(3)?.as_str().parse().ok()?;
+        let status = caps.get(4)?.as_str();
+        let time_ms: u64 = caps.get(5)?.as_str().parse().ok()?;
+        let fuel: u32 = caps.get(6)?.as_str().parse().ok()?;
+        let ifuel: u32 = caps.get(7)?.as_str().parse().ok()?;
+        let rlimit: u64 = caps.get(8)?.as_str().parse().ok()?;
+        let used_rlimit: f64 = caps.get(9)?.as_str().parse().ok()?;
+
+        Some(QueryStatEntry {
+            location: location.to_string(),
+            name,
+            index,
+            succeeded: status == "succeeded",
+            time_ms,
+            fuel,
+            ifuel,
+            rlimit,
+            used_rlimit: (used_rlimit * 1_000_000.0) as u64, // Convert to actual units
+        })
+    } else {
+        None
+    }
+}
+```
+
+CHANNEL B: Z3 Statistics Parser
+-------------------------------
+Parse output from --print_z3_statistics:
+
+```rust
+pub fn parse_z3_statistics(lines: &[String]) -> Z3Statistics {
+    let mut stats = Z3Statistics::default();
+
+    for line in lines {
+        if line.contains("rlimit-count") {
+            stats.rlimit_count = extract_stat_value(line, "rlimit-count");
+        } else if line.contains("max-memory") {
+            stats.max_memory = extract_stat_value(line, "max-memory");
+        } else if line.contains("quant-instantiations") {
+            stats.quant_instantiations = extract_stat_value(line, "quant-instantiations");
+        } else if line.contains("conflicts") && !line.contains("theory") {
+            stats.conflicts = extract_stat_value(line, "conflicts");
+        } else if line.contains("decisions") {
+            stats.decisions = extract_stat_value(line, "decisions");
+        }
+        // ... more statistics
+    }
+
+    stats
+}
+
+fn extract_stat_value(line: &str, key: &str) -> u64 {
+    // Pattern: key value or :key value
+    let pattern = format!(r"(?:^|[:\s]){}[=:\s]+(\d+(?:\.\d+)?)", regex::escape(key));
+    let re = Regex::new(&pattern).unwrap();
+    re.captures(line)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse().ok())
+        .unwrap_or(0)
+}
+```
+
+CHANNEL C: Hint Info Parser
+---------------------------
+Parse hint-related information:
+
+```rust
+pub fn parse_hint_info(line: &str) -> Option<HintInfoEntry> {
+    // Patterns for hint information
+    if line.contains("using hints") {
+        Some(HintInfoEntry::UsingHints)
+    } else if line.contains("digest is valid") {
+        Some(HintInfoEntry::DigestValid)
+    } else if line.contains("digest is invalid") {
+        Some(HintInfoEntry::DigestInvalid)
+    } else if line.contains("fstar_cache_hit") {
+        Some(HintInfoEntry::CacheHit)
+    } else if line.contains("Creating new z3proc") {
+        Some(HintInfoEntry::Z3Restart)
+    } else {
+        None
+    }
+}
+```
+
+CHANNEL D: SMT2 Log Analysis
+----------------------------
+When --log_queries is enabled, analyze generated .smt2 files:
+
+```rust
+pub fn analyze_smt2_log(path: &Path) -> Smt2Analysis {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+
+    let num_assertions = content.matches("(assert").count();
+    let num_check_sats = content.matches("(check-sat)").count();
+    let num_quantifiers = content.matches("(forall").count() +
+                          content.matches("(exists").count();
+
+    // Detect pattern usage
+    let has_patterns = content.contains(":pattern");
+
+    // Detect arithmetic
+    let has_nonlinear = content.contains("(* ") || content.contains("(div ");
+
+    // Estimate context size
+    let context_size_bytes = content.len();
+
+    Smt2Analysis {
+        num_assertions,
+        num_check_sats,
+        num_quantifiers,
+        has_patterns,
+        has_nonlinear,
+        context_size_bytes,
+    }
+}
+```
+
+4.2 CORRELATING WITH SOURCE CODE
+--------------------------------
+
+To correlate timing data with source patterns, analyze the F* source:
+
+```rust
+/// Extract code patterns from F* source
+pub fn analyze_source_patterns(
+    content: &str,
+    definition_name: &str,
+    definition_line: usize,
+) -> Vec<CodePattern> {
+    let mut patterns = Vec::new();
+
+    // Find the definition body
+    let body = extract_definition_body(content, definition_name, definition_line);
+
+    // Check for nested quantifiers
+    let quantifier_depth = count_nested_quantifiers(&body);
+    if quantifier_depth >= 2 {
+        patterns.push(CodePattern::NestedQuantifiers {
+            depth: quantifier_depth
+        });
+    }
+
+    // Check for missing patterns
+    if has_unbounded_quantifier(&body) {
+        patterns.push(CodePattern::UnboundedQuantifier {
+            variable: find_unbounded_variable(&body),
+        });
+    }
+
+    // Check proof size
+    let proof_size = estimate_proof_size(&body);
+    if proof_size > 500 {
+        patterns.push(CodePattern::LargeProofTerm { size: proof_size });
+    }
+
+    // Check for complex refinements
+    let refinement_conjuncts = count_refinement_conjuncts(&body);
+    if refinement_conjuncts > 5 {
+        patterns.push(CodePattern::ComplexRefinement {
+            num_conjuncts: refinement_conjuncts
+        });
+    }
+
+    // Check for recursive lemma calls (induction depth)
+    let induction_depth = detect_induction_depth(&body, definition_name);
+    if induction_depth > 2 {
+        patterns.push(CodePattern::DeepInduction { depth: induction_depth });
+    }
+
+    // Check for non-linear arithmetic
+    if contains_nonlinear_arithmetic(&body) {
+        patterns.push(CodePattern::NonLinearArithmetic);
+    }
+
+    patterns
+}
+
+fn count_nested_quantifiers(body: &str) -> u32 {
+    let mut max_depth = 0;
+    let mut current_depth = 0;
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        // Count forall/exists patterns
+        if trimmed.starts_with("forall") || trimmed.contains(" forall ") ||
+           trimmed.starts_with("exists") || trimmed.contains(" exists ") {
+            current_depth += 1;
+            max_depth = max_depth.max(current_depth);
+        }
+        // Heuristic for closing
+        if trimmed.ends_with("->") || trimmed.contains("==>") {
+            // Likely ending a quantifier scope
+        }
+    }
+
+    max_depth
+}
+
+fn has_unbounded_quantifier(body: &str) -> bool {
+    // Look for forall/exists without clear bounds
+    let unbounded_patterns = [
+        r"forall\s+\([^:]+:\s*nat\)",      // nat without upper bound
+        r"forall\s+\([^:]+:\s*int\)",      // unbounded int
+        r"forall\s+\([^:]+:\s*seq\s+",     // unbounded sequence
+    ];
+
+    unbounded_patterns.iter().any(|p| {
+        Regex::new(p).unwrap().is_match(body)
+    })
+}
+
+fn contains_nonlinear_arithmetic(body: &str) -> bool {
+    // Detect multiplication/division of variables
+    // This is a heuristic - proper detection needs AST analysis
+    let patterns = [
+        r"\*\s*[a-z_]+",       // * followed by variable
+        r"[a-z_]+\s*\*",       // variable followed by *
+        r"/\s*[a-z_]+",        // / followed by variable
+        r"[a-z_]+\s*/",        // variable followed by /
+        r"pow2\s+[a-z_]+",     // pow2 of variable
+    ];
+
+    patterns.iter().any(|p| {
+        Regex::new(p).unwrap().is_match(body)
+    })
+}
+```
+
+================================================================================
+5. BOTTLENECK IDENTIFICATION
+================================================================================
+
+5.1 SLOW PROOF DETECTION
+------------------------
+
+```rust
+/// Identify slow proofs and categorize the bottleneck
+pub fn identify_bottleneck(stats: &DefinitionStatistics) -> BottleneckAnalysis {
+    let timing = &stats.timing;
+
+    // Calculate phase percentages
+    let total = timing.total_ms.max(1) as f64;
+    let tc_pct = timing.typechecking_ms as f64 / total * 100.0;
+    let enc_pct = timing.encoding_ms as f64 / total * 100.0;
+    let smt_pct = timing.smt_solving_ms as f64 / total * 100.0;
+
+    let primary_bottleneck = if tc_pct > 50.0 {
+        BottleneckType::Typechecking
+    } else if enc_pct > 30.0 {
+        BottleneckType::Encoding
+    } else if smt_pct > 70.0 {
+        // Further analyze SMT bottleneck
+        analyze_smt_bottleneck(timing)
+    } else {
+        BottleneckType::Mixed
+    };
+
+    BottleneckAnalysis {
+        primary: primary_bottleneck,
+        phase_breakdown: PhaseBreakdown {
+            typechecking_pct: tc_pct,
+            encoding_pct: enc_pct,
+            smt_solving_pct: smt_pct,
+        },
+        severity: calculate_severity(timing),
+        contributing_factors: identify_contributing_factors(stats),
+    }
+}
+
+fn analyze_smt_bottleneck(timing: &VerificationTiming) -> BottleneckType {
+    // Check if rlimit exhaustion
+    let rlimit_fraction = timing.z3_rlimit_used as f64 /
+                          timing.z3_rlimit_max.max(1) as f64;
+
+    if rlimit_fraction > 0.9 {
+        return BottleneckType::SmtRlimitExhaustion;
+    }
+
+    // Check if quantifier instantiation heavy
+    if timing.z3_quant_instantiations > 50000 {
+        return BottleneckType::SmtQuantifierInstantiation;
+    }
+
+    // Check if high conflict count (search space exploration)
+    if timing.z3_conflicts > 10000 {
+        return BottleneckType::SmtSearchSpace;
+    }
+
+    BottleneckType::SmtGeneral
+}
+
+#[derive(Debug, Clone)]
+pub enum BottleneckType {
+    Typechecking,
+    TypeInference,
+    RefinementChecking,
+    Encoding,
+    SmtGeneral,
+    SmtRlimitExhaustion,
+    SmtQuantifierInstantiation,
+    SmtSearchSpace,
+    SmtArithmetic,
+    SmtBitvector,
+    Mixed,
+}
+
+fn identify_contributing_factors(stats: &DefinitionStatistics) -> Vec<ContributingFactor> {
+    let mut factors = Vec::new();
+    let timing = &stats.timing;
+
+    // High fuel requirement
+    if timing.fuel > 2 {
+        factors.push(ContributingFactor {
+            factor_type: FactorType::HighFuel,
+            impact: Impact::High,
+            detail: format!("Requires fuel={}, indicating deep recursion unfolding",
+                          timing.fuel),
+        });
+    }
+
+    // High ifuel requirement
+    if timing.ifuel > 1 {
+        factors.push(ContributingFactor {
+            factor_type: FactorType::HighIFuel,
+            impact: Impact::Medium,
+            detail: format!("Requires ifuel={}, indicating inversion/unfolding needs",
+                          timing.ifuel),
+        });
+    }
+
+    // Multiple retries
+    if timing.num_retries > 0 {
+        factors.push(ContributingFactor {
+            factor_type: FactorType::Retries,
+            impact: Impact::Medium,
+            detail: format!("Query required {} retries before succeeding",
+                          timing.num_retries),
+        });
+    }
+
+    // Query splitting
+    if timing.num_splits > 0 {
+        factors.push(ContributingFactor {
+            factor_type: FactorType::QuerySplitting,
+            impact: Impact::Low,
+            detail: format!("Query was split into {} sub-queries",
+                          timing.num_splits),
+        });
+    }
+
+    // Hint miss
+    if !timing.hint_cache_hit && timing.used_hint {
+        factors.push(ContributingFactor {
+            factor_type: FactorType::HintMiss,
+            impact: Impact::Low,
+            detail: "Hint was stale or didn't apply".to_string(),
+        });
+    }
+
+    // Detected code patterns
+    for pattern in &stats.detected_patterns {
+        factors.push(ContributingFactor {
+            factor_type: FactorType::CodePattern(pattern.clone()),
+            impact: pattern_impact(pattern),
+            detail: format_pattern_detail(pattern),
+        });
+    }
+
+    factors
+}
+```
+
+5.2 TIMEOUT PATTERN DETECTION
+-----------------------------
+
+```rust
+/// Detect patterns that commonly lead to timeouts
+pub fn detect_timeout_patterns(
+    history: &[QueryStatEntry],
+    source: &str,
+) -> Vec<TimeoutPattern> {
+    let mut patterns = Vec::new();
+
+    // Find timed-out queries
+    let timeouts: Vec<_> = history.iter()
+        .filter(|q| !q.succeeded && q.time_ms > 10000)
+        .collect();
+
+    for timeout in timeouts {
+        // Get source context
+        let context = get_source_context(source, &timeout.name, timeout.location.parse().ok());
+
+        // Check for known timeout patterns
+        if let Some(pattern) = identify_timeout_cause(&context, timeout) {
+            patterns.push(pattern);
+        }
+    }
+
+    patterns
+}
+
+fn identify_timeout_cause(context: &str, query: &QueryStatEntry) -> Option<TimeoutPattern> {
+    // Check for quantifier explosion
+    if context.matches("forall").count() > 3 {
+        return Some(TimeoutPattern::QuantifierExplosion {
+            query_name: query.name.clone(),
+            quantifier_count: context.matches("forall").count(),
+        });
+    }
+
+    // Check for missing induction hypothesis
+    if context.contains("let rec") && !context.contains("decreases") {
+        return Some(TimeoutPattern::MissingDecreases {
+            query_name: query.name.clone(),
+            function_name: extract_function_name(context),
+        });
+    }
+
+    // Check for unbounded recursion fuel
+    if query.fuel >= 8 {
+        return Some(TimeoutPattern::FuelExplosion {
+            query_name: query.name.clone(),
+            fuel_used: query.fuel,
+        });
+    }
+
+    // Check for large context
+    if query.rlimit > 500 && query.used_rlimit > (query.rlimit as f64 * 0.95) as u64 {
+        return Some(TimeoutPattern::ContextOverload {
+            query_name: query.name.clone(),
+            rlimit_used_pct: (query.used_rlimit as f64 / query.rlimit as f64) * 100.0,
+        });
+    }
+
+    None
+}
+
+#[derive(Debug, Clone)]
+pub enum TimeoutPattern {
+    QuantifierExplosion { query_name: String, quantifier_count: usize },
+    MissingDecreases { query_name: String, function_name: String },
+    FuelExplosion { query_name: String, fuel_used: u32 },
+    ContextOverload { query_name: String, rlimit_used_pct: f64 },
+    NonLinearArithmetic { query_name: String },
+    UnboundedInduction { query_name: String, variable: String },
+}
+```
+
+5.3 FLAKY QUERY DETECTION
+-------------------------
+
+```rust
+/// Detect queries that sometimes succeed and sometimes fail
+pub fn detect_flaky_queries(
+    history: &[VerificationRun],
+) -> Vec<FlakyQuery> {
+    let mut query_results: HashMap<String, Vec<bool>> = HashMap::new();
+
+    // Group results by query identifier
+    for run in history {
+        for query in &run.queries {
+            let key = format!("{}:{}", query.name, query.index);
+            query_results.entry(key)
+                .or_insert_with(Vec::new)
+                .push(query.succeeded);
+        }
+    }
+
+    // Find queries with mixed results
+    let mut flaky = Vec::new();
+    for (key, results) in query_results {
+        if results.len() >= 3 {
+            let successes = results.iter().filter(|&&r| r).count();
+            let total = results.len();
+
+            if successes > 0 && successes < total {
+                let (name, index) = key.split_once(':').unwrap();
+                flaky.push(FlakyQuery {
+                    name: name.to_string(),
+                    index: index.parse().unwrap_or(0),
+                    success_rate: successes as f64 / total as f64,
+                    total_runs: total,
+                    recommendation: if successes as f64 / total as f64 < 0.5 {
+                        "Consider using --quake to detect and fix instability"
+                    } else {
+                        "Query is mostly stable but occasionally fails"
+                    }.to_string(),
+                });
+            }
+        }
+    }
+
+    flaky.sort_by(|a, b| a.success_rate.partial_cmp(&b.success_rate).unwrap());
+    flaky
+}
+
+#[derive(Debug, Clone)]
+pub struct FlakyQuery {
+    pub name: String,
+    pub index: u32,
+    pub success_rate: f64,
+    pub total_runs: usize,
+    pub recommendation: String,
+}
+```
+
+================================================================================
+6. OPTIMIZATION SUGGESTIONS
+================================================================================
+
+6.1 FUEL/IFUEL HINT GENERATION
+------------------------------
+
+```rust
+/// Generate fuel/ifuel hint suggestions
+pub fn suggest_fuel_hints(stats: &DefinitionStatistics) -> Vec<OptimizationSuggestion> {
+    let mut suggestions = Vec::new();
+    let timing = &stats.timing;
+
+    // If high fuel was required, suggest explicit annotation
+    if timing.fuel > 2 {
+        let optimal_fuel = calculate_optimal_fuel(stats);
+
+        suggestions.push(OptimizationSuggestion {
+            priority: Priority::High,
+            category: OptimizationCategory::FuelHints,
+            description: format!(
+                "Add explicit fuel hint to avoid fuel search. \
+                 Current: requires fuel={}",
+                timing.fuel
+            ),
+            code_action: Some(CodeAction {
+                title: format!("Add #[fuel {}] attribute", optimal_fuel),
+                edits: vec![TextEdit {
+                    range: Range::new(stats.unit.line, 0, stats.unit.line, 0),
+                    new_text: format!("#[fuel {}]\n", optimal_fuel),
+                }],
+            }),
+            expected_improvement: format!(
+                "Skip fuel search, saving ~{} ms per verification",
+                estimate_fuel_search_time(timing.fuel)
+            ),
+            related_pattern: CodePattern::HighFuelRequired { fuel: timing.fuel },
+        });
+    }
+
+    // If high ifuel was required
+    if timing.ifuel > 1 {
+        suggestions.push(OptimizationSuggestion {
+            priority: Priority::Medium,
+            category: OptimizationCategory::FuelHints,
+            description: format!(
+                "Add explicit ifuel hint. Current: requires ifuel={}",
+                timing.ifuel
+            ),
+            code_action: Some(CodeAction {
+                title: format!("Add #[ifuel {}] attribute", timing.ifuel),
+                edits: vec![TextEdit {
+                    range: Range::new(stats.unit.line, 0, stats.unit.line, 0),
+                    new_text: format!("#[ifuel {}]\n", timing.ifuel),
+                }],
+            }),
+            expected_improvement: "Avoid ifuel escalation during verification".to_string(),
+            related_pattern: CodePattern::HighIFuelRequired { ifuel: timing.ifuel },
+        });
+    }
+
+    suggestions
+}
+
+fn calculate_optimal_fuel(stats: &DefinitionStatistics) -> u32 {
+    // Use the minimum fuel that worked, with a small margin
+    let required = stats.timing.fuel;
+
+    // If retries were needed, add 1 to be safe
+    if stats.timing.num_retries > 0 {
+        required + 1
+    } else {
+        required
+    }
+}
+
+fn estimate_fuel_search_time(max_fuel: u32) -> u64 {
+    // Rough estimate: each fuel level try takes ~500ms
+    // F* tries initial_fuel, then steps up
+    let steps = max_fuel.saturating_sub(1);
+    steps as u64 * 500
+}
+```
+
+6.2 PROOF SPLITTING SUGGESTIONS
+-------------------------------
+
+```rust
+/// Suggest splitting large proofs into smaller lemmas
+pub fn suggest_proof_splitting(stats: &DefinitionStatistics) -> Vec<OptimizationSuggestion> {
+    let mut suggestions = Vec::new();
+
+    // Check for large proof term
+    for pattern in &stats.detected_patterns {
+        if let CodePattern::LargeProofTerm { size } = pattern {
+            if *size > 500 {
+                suggestions.push(OptimizationSuggestion {
+                    priority: Priority::High,
+                    category: OptimizationCategory::ProofSplitting,
+                    description: format!(
+                        "Large proof term ({} nodes). Consider splitting into helper lemmas.",
+                        size
+                    ),
+                    code_action: None, // Complex refactoring needed
+                    expected_improvement: format!(
+                        "Could reduce verification time by 50-80% by splitting into {} sub-lemmas",
+                        estimate_split_count(*size)
+                    ),
+                    related_pattern: pattern.clone(),
+                });
+            }
+        }
+    }
+
+    // Check for many queries in single definition
+    if stats.timing.num_queries > 5 {
+        suggestions.push(OptimizationSuggestion {
+            priority: Priority::Medium,
+            category: OptimizationCategory::ProofSplitting,
+            description: format!(
+                "Definition generates {} queries. Consider using --split_queries always \
+                 or manually splitting the proof.",
+                stats.timing.num_queries
+            ),
+            code_action: None,
+            expected_improvement: "Better error localization and potential parallelization".to_string(),
+            related_pattern: CodePattern::LargeProofTerm {
+                size: stats.timing.num_queries * 100
+            },
+        });
+    }
+
+    suggestions
+}
+
+fn estimate_split_count(proof_size: u32) -> u32 {
+    // Heuristic: aim for ~100-200 node sub-proofs
+    (proof_size / 150).max(2)
+}
+```
+
+6.3 QUAKE CONFIGURATION SUGGESTIONS
+-----------------------------------
+
+```rust
+/// Suggest --quake for flaky proofs
+pub fn suggest_quake_config(
+    stats: &DefinitionStatistics,
+    flaky_queries: &[FlakyQuery],
+) -> Vec<OptimizationSuggestion> {
+    let mut suggestions = Vec::new();
+
+    // Check if any queries for this definition are flaky
+    let flaky_for_def: Vec<_> = flaky_queries.iter()
+        .filter(|q| q.name == stats.unit.definition_name)
+        .collect();
+
+    if !flaky_for_def.is_empty() {
+        let avg_success_rate = flaky_for_def.iter()
+            .map(|q| q.success_rate)
+            .sum::<f64>() / flaky_for_def.len() as f64;
+
+        let quake_hi = if avg_success_rate < 0.5 { 10 } else { 5 };
+        let quake_lo = (quake_hi as f64 * avg_success_rate).ceil() as u32;
+
+        suggestions.push(OptimizationSuggestion {
+            priority: Priority::High,
+            category: OptimizationCategory::QuakeConfig,
+            description: format!(
+                "Definition has {} flaky queries (avg success rate: {:.1}%). \
+                 Use --quake to ensure proof stability.",
+                flaky_for_def.len(),
+                avg_success_rate * 100.0
+            ),
+            code_action: Some(CodeAction {
+                title: format!("Add --quake {}/{} to CI", quake_lo, quake_hi),
+                edits: vec![], // This is a command-line option
+            }),
+            expected_improvement: format!(
+                "Detect and fix non-deterministic proofs. \
+                 Current success rate: {:.1}%",
+                avg_success_rate * 100.0
+            ),
+            related_pattern: CodePattern::QueryTimeout,
+        });
+    }
+
+    suggestions
+}
+```
+
+6.4 CACHING SUGGESTIONS
+-----------------------
+
+```rust
+/// Suggest caching improvements
+pub fn suggest_caching(stats: &DefinitionStatistics) -> Vec<OptimizationSuggestion> {
+    let mut suggestions = Vec::new();
+    let timing = &stats.timing;
+
+    // If hint was not used but could have been
+    if !timing.used_hint && timing.total_ms > 2000 {
+        suggestions.push(OptimizationSuggestion {
+            priority: Priority::Medium,
+            category: OptimizationCategory::Caching,
+            description: "No hint used for slow proof. Consider recording hints with --record_hints".to_string(),
+            code_action: None,
+            expected_improvement: format!(
+                "Could reduce verification time from {}ms to <100ms on subsequent runs",
+                timing.total_ms
+            ),
+            related_pattern: CodePattern::HighFuelRequired { fuel: timing.fuel },
+        });
+    }
+
+    // If hint was stale
+    if timing.used_hint && !timing.hint_cache_hit && timing.total_ms > 1000 {
+        suggestions.push(OptimizationSuggestion {
+            priority: Priority::Low,
+            category: OptimizationCategory::Caching,
+            description: "Hint was stale. Re-record hints after proof changes.".to_string(),
+            code_action: None,
+            expected_improvement: "Fresh hints provide better cache hit rate".to_string(),
+            related_pattern: CodePattern::HighFuelRequired { fuel: timing.fuel },
+        });
+    }
+
+    suggestions
+}
+```
+
+6.5 CONTEXT PRUNING SUGGESTIONS
+-------------------------------
+
+```rust
+/// Suggest context pruning for large contexts
+pub fn suggest_context_pruning(
+    stats: &DefinitionStatistics,
+    smt_analysis: Option<&Smt2Analysis>,
+) -> Vec<OptimizationSuggestion> {
+    let mut suggestions = Vec::new();
+
+    if let Some(smt) = smt_analysis {
+        if smt.num_assertions > 3000 {
+            suggestions.push(OptimizationSuggestion {
+                priority: Priority::High,
+                category: OptimizationCategory::ContextPruning,
+                description: format!(
+                    "Large SMT context ({} assertions). Enable context pruning with \
+                     --ext context_pruning",
+                    smt.num_assertions
+                ),
+                code_action: None,
+                expected_improvement: format!(
+                    "Could reduce context size by 50-80%, improving Z3 solving time"
+                ),
+                related_pattern: CodePattern::LargeContext {
+                    num_assertions: smt.num_assertions as u32
+                },
+            });
+        }
+    }
+
+    suggestions
+}
+```
+
+================================================================================
+7. Z3 PROFILING INTEGRATION
+================================================================================
+
+7.1 Z3 BUILT-IN PROFILING OPTIONS
+---------------------------------
+
+Z3 provides several profiling options that can be enabled:
+
+```
+smt.qi.profile=true       Enable quantifier instantiation profiling
+smt.qi.profile_freq=1000  Profile frequency
+trace=true                Enable tracing
+```
+
+To enable via F* command line:
+```bash
+fstar --z3cliopt 'smt.qi.profile=true'
+```
+
+7.2 PARSING Z3 PROFILE OUTPUT
+-----------------------------
+
+```rust
+/// Parse Z3 quantifier instantiation profile
+pub fn parse_z3_qi_profile(output: &str) -> QIProfile {
+    let mut quantifiers: Vec<QuantifierProfile> = Vec::new();
+
+    // Z3 QI profile format:
+    // [quantifier] <name> :num-instances <N> :max-generation <G> :cost <C>
+    let qi_pattern = Regex::new(
+        r"\[quantifier\]\s+(\S+)\s+:num-instances\s+(\d+)\s+:max-generation\s+(\d+)"
+    ).unwrap();
+
+    for caps in qi_pattern.captures_iter(output) {
+        let name = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let instances: u64 = caps.get(2)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
+        let max_gen: u32 = caps.get(3)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
+
+        quantifiers.push(QuantifierProfile {
+            name,
+            instances,
+            max_generation: max_gen,
+            pattern: extract_pattern(&name),
+        });
+    }
+
+    // Sort by instance count descending
+    quantifiers.sort_by(|a, b| b.instances.cmp(&a.instances));
+
+    QIProfile {
+        quantifiers,
+        total_instantiations: quantifiers.iter().map(|q| q.instances).sum(),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct QIProfile {
+    pub quantifiers: Vec<QuantifierProfile>,
+    pub total_instantiations: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct QuantifierProfile {
+    pub name: String,
+    pub instances: u64,
+    pub max_generation: u32,
+    pub pattern: Option<String>,
+}
+```
+
+7.3 IDENTIFYING EXPENSIVE QUANTIFIERS
+-------------------------------------
+
+```rust
+/// Identify quantifiers that cause the most instantiations
+pub fn identify_expensive_quantifiers(
+    qi_profile: &QIProfile,
+    threshold_fraction: f64,
+) -> Vec<ExpensiveQuantifier> {
+    let total = qi_profile.total_instantiations as f64;
+
+    qi_profile.quantifiers.iter()
+        .filter(|q| q.instances as f64 / total > threshold_fraction)
+        .map(|q| ExpensiveQuantifier {
+            name: q.name.clone(),
+            instances: q.instances,
+            fraction: q.instances as f64 / total,
+            suggestion: generate_quantifier_suggestion(q),
+        })
+        .collect()
+}
+
+fn generate_quantifier_suggestion(q: &QuantifierProfile) -> String {
+    if q.max_generation > 10 {
+        format!(
+            "Quantifier reaches high generation ({}). Consider adding more restrictive \
+             triggers or fuel bounds.",
+            q.max_generation
+        )
+    } else if q.pattern.is_none() {
+        "Quantifier has no explicit pattern. Add :pattern annotations to control instantiation.".to_string()
+    } else {
+        format!(
+            "High instantiation count ({}). Review if pattern is too permissive.",
+            q.instances
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ExpensiveQuantifier {
+    pub name: String,
+    pub instances: u64,
+    pub fraction: f64,
+    pub suggestion: String,
+}
+```
+
+================================================================================
+8. REPORT GENERATION
+================================================================================
+
+8.1 TEXT REPORT FORMAT
+----------------------
+
+```rust
+pub fn generate_text_report(
+    module_stats: &ModuleStatistics,
+    config: &ProfilerConfig,
+) -> String {
+    let mut report = String::new();
+
+    // Header
+    report.push_str(&format!(
+        "================================================================================\n\
+         F* VERIFICATION PERFORMANCE REPORT\n\
+         ================================================================================\n\n\
+         Module: {}\n\
+         File: {}\n\
+         Total Time: {} ms\n\
+         Definitions: {}\n\
+         Queries: {}\n\n",
+        module_stats.module_name,
+        module_stats.file_path,
+        module_stats.total_verification_time_ms,
+        module_stats.total_definitions,
+        module_stats.total_queries,
+    ));
+
+    // Summary statistics
+    report.push_str("SUMMARY STATISTICS\n");
+    report.push_str("-".repeat(80).as_str());
+    report.push_str("\n");
+    report.push_str(&format!(
+        "  Slowest Definition: {} ({} ms)\n\
+         Average Query Time: {:.1} ms\n\
+         Median Query Time: {} ms\n\
+         95th Percentile: {} ms\n\
+         99th Percentile: {} ms\n\n\
+         Total rlimit Used: {}\n\
+         Total QI Count: {}\n\
+         Peak Memory: {} MB\n\n\
+         Timeouts: {}\n\
+         High Fuel Queries: {}\n\
+         High IFuel Queries: {}\n\
+         Hint Misses: {}\n\
+         Flaky Queries: {}\n\n",
+        module_stats.slowest_definition.as_deref().unwrap_or("N/A"),
+        module_stats.slowest_definition_time_ms,
+        module_stats.average_query_time_ms,
+        module_stats.median_query_time_ms,
+        module_stats.p95_query_time_ms,
+        module_stats.p99_query_time_ms,
+        module_stats.total_rlimit_used,
+        module_stats.total_quant_instantiations,
+        module_stats.peak_memory_bytes / (1024 * 1024),
+        module_stats.timeout_count,
+        module_stats.high_fuel_count,
+        module_stats.high_ifuel_count,
+        module_stats.hint_miss_count,
+        module_stats.flaky_query_count,
+    ));
+
+    // Slow definitions
+    report.push_str("SLOW DEFINITIONS (> {} ms)\n", config.slow_definition_threshold_ms);
+    report.push_str("-".repeat(80).as_str());
+    report.push_str("\n\n");
+
+    let slow_defs: Vec<_> = module_stats.definitions.iter()
+        .filter(|d| d.timing.total_ms > config.slow_definition_threshold_ms)
+        .collect();
+
+    for def in slow_defs {
+        report.push_str(&format!(
+            "{} (line {})\n\
+             Kind: {:?}\n\
+             Total Time: {} ms (TC: {} ms, Enc: {} ms, SMT: {} ms)\n\
+             Fuel: {}, IFuel: {}, Queries: {}\n",
+            def.unit.definition_name,
+            def.unit.line,
+            def.unit.definition_kind,
+            def.timing.total_ms,
+            def.timing.typechecking_ms,
+            def.timing.encoding_ms,
+            def.timing.smt_solving_ms,
+            def.timing.fuel,
+            def.timing.ifuel,
+            def.timing.num_queries,
+        ));
+
+        // Detected patterns
+        if !def.detected_patterns.is_empty() {
+            report.push_str("  Detected Patterns:\n");
+            for pattern in &def.detected_patterns {
+                report.push_str(&format!("    - {}\n", format_pattern(pattern)));
+            }
+        }
+
+        // Optimization suggestions
+        if !def.optimization_suggestions.is_empty() {
+            report.push_str("  Optimization Suggestions:\n");
+            for suggestion in def.optimization_suggestions.iter()
+                .filter(|s| s.priority >= config.min_suggestion_priority)
+                .take(config.max_suggestions_per_definition)
+            {
+                report.push_str(&format!(
+                    "    [{:?}] {}\n\
+                     Expected Improvement: {}\n",
+                    suggestion.priority,
+                    suggestion.description,
+                    suggestion.expected_improvement,
+                ));
+            }
+        }
+
+        report.push_str("\n");
+    }
+
+    report
+}
+
+fn format_pattern(pattern: &CodePattern) -> String {
+    match pattern {
+        CodePattern::NestedQuantifiers { depth } =>
+            format!("Nested quantifiers (depth: {})", depth),
+        CodePattern::UnboundedQuantifier { variable } =>
+            format!("Unbounded quantifier on '{}'", variable),
+        CodePattern::LargeProofTerm { size } =>
+            format!("Large proof term ({} nodes)", size),
+        CodePattern::HighFuelRequired { fuel } =>
+            format!("High fuel required (fuel={})", fuel),
+        CodePattern::NonLinearArithmetic =>
+            "Non-linear arithmetic detected".to_string(),
+        CodePattern::LargeContext { num_assertions } =>
+            format!("Large SMT context ({} assertions)", num_assertions),
+        // ... more patterns
+        _ => format!("{:?}", pattern),
+    }
+}
+```
+
+8.2 JSON REPORT FORMAT
+----------------------
+
+```rust
+pub fn generate_json_report(
+    module_stats: &ModuleStatistics,
+) -> serde_json::Value {
+    serde_json::json!({
+        "module": module_stats.module_name,
+        "file": module_stats.file_path,
+        "summary": {
+            "total_time_ms": module_stats.total_verification_time_ms,
+            "total_definitions": module_stats.total_definitions,
+            "total_queries": module_stats.total_queries,
+            "average_query_time_ms": module_stats.average_query_time_ms,
+            "median_query_time_ms": module_stats.median_query_time_ms,
+            "p95_query_time_ms": module_stats.p95_query_time_ms,
+            "p99_query_time_ms": module_stats.p99_query_time_ms,
+        },
+        "resource_usage": {
+            "total_rlimit": module_stats.total_rlimit_used,
+            "total_quant_instantiations": module_stats.total_quant_instantiations,
+            "peak_memory_mb": module_stats.peak_memory_bytes / (1024 * 1024),
+        },
+        "problems": {
+            "timeouts": module_stats.timeout_count,
+            "high_fuel": module_stats.high_fuel_count,
+            "high_ifuel": module_stats.high_ifuel_count,
+            "hint_misses": module_stats.hint_miss_count,
+            "flaky_queries": module_stats.flaky_query_count,
+        },
+        "definitions": module_stats.definitions.iter().map(|d| {
+            serde_json::json!({
+                "name": d.unit.definition_name,
+                "line": d.unit.line,
+                "kind": format!("{:?}", d.unit.definition_kind),
+                "timing": {
+                    "total_ms": d.timing.total_ms,
+                    "typechecking_ms": d.timing.typechecking_ms,
+                    "encoding_ms": d.timing.encoding_ms,
+                    "smt_solving_ms": d.timing.smt_solving_ms,
+                },
+                "fuel": d.timing.fuel,
+                "ifuel": d.timing.ifuel,
+                "queries": d.timing.num_queries,
+                "patterns": d.detected_patterns.iter()
+                    .map(|p| format!("{:?}", p))
+                    .collect::<Vec<_>>(),
+                "suggestions": d.optimization_suggestions.iter()
+                    .map(|s| serde_json::json!({
+                        "priority": format!("{:?}", s.priority),
+                        "category": format!("{:?}", s.category),
+                        "description": s.description,
+                        "expected_improvement": s.expected_improvement,
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+```
+
+================================================================================
+9. LSP INTEGRATION
+================================================================================
+
+9.1 DIAGNOSTICS PROVIDER
+------------------------
+
+```rust
+use tower_lsp::lsp_types::*;
+
+/// Provide performance diagnostics to the LSP client
+pub fn provide_performance_diagnostics(
+    module_stats: &ModuleStatistics,
+    config: &ProfilerConfig,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    for def in &module_stats.definitions {
+        // Slow definition warning
+        if def.timing.total_ms > config.slow_definition_threshold_ms {
+            diagnostics.push(Diagnostic {
+                range: lsp_range(def.unit.line, 0, def.unit.line, 100),
+                severity: Some(DiagnosticSeverity::INFORMATION),
+                code: Some(NumberOrString::String("FST016".to_string())),
+                source: Some("fstar-profiler".to_string()),
+                message: format!(
+                    "Slow verification: {} ms (TC: {}, Enc: {}, SMT: {})",
+                    def.timing.total_ms,
+                    def.timing.typechecking_ms,
+                    def.timing.encoding_ms,
+                    def.timing.smt_solving_ms,
+                ),
+                related_information: Some(
+                    def.optimization_suggestions.iter()
+                        .take(3)
+                        .map(|s| DiagnosticRelatedInformation {
+                            location: Location {
+                                uri: Url::from_file_path(&module_stats.file_path).unwrap(),
+                                range: lsp_range(def.unit.line, 0, def.unit.line, 1),
+                            },
+                            message: s.description.clone(),
+                        })
+                        .collect()
+                ),
+                tags: None,
+                data: None,
+            });
+        }
+
+        // Pattern-specific warnings
+        for pattern in &def.detected_patterns {
+            if let Some(diag) = pattern_to_diagnostic(pattern, def, config) {
+                diagnostics.push(diag);
+            }
+        }
+    }
+
+    diagnostics
+}
+
+fn pattern_to_diagnostic(
+    pattern: &CodePattern,
+    def: &DefinitionStatistics,
+    config: &ProfilerConfig,
+) -> Option<Diagnostic> {
+    match pattern {
+        CodePattern::HighFuelRequired { fuel } if *fuel > config.high_fuel_threshold => {
+            Some(Diagnostic {
+                range: lsp_range(def.unit.line, 0, def.unit.line, 100),
+                severity: Some(DiagnosticSeverity::HINT),
+                code: Some(NumberOrString::String("FST016-fuel".to_string())),
+                source: Some("fstar-profiler".to_string()),
+                message: format!(
+                    "High fuel required ({}). Consider adding #[fuel {}] annotation.",
+                    fuel, fuel
+                ),
+                related_information: None,
+                tags: None,
+                data: None,
+            })
+        }
+        CodePattern::NestedQuantifiers { depth } if *depth >= config.quantifier_depth_warning => {
+            Some(Diagnostic {
+                range: lsp_range(def.unit.line, 0, def.unit.line, 100),
+                severity: Some(DiagnosticSeverity::WARNING),
+                code: Some(NumberOrString::String("FST016-quantifier".to_string())),
+                source: Some("fstar-profiler".to_string()),
+                message: format!(
+                    "Deeply nested quantifiers (depth: {}). May cause slow verification.",
+                    depth
+                ),
+                related_information: None,
+                tags: None,
+                data: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn lsp_range(line: usize, start_col: usize, end_line: usize, end_col: usize) -> Range {
+    Range {
+        start: Position {
+            line: (line.saturating_sub(1)) as u32,
+            character: start_col as u32,
+        },
+        end: Position {
+            line: (end_line.saturating_sub(1)) as u32,
+            character: end_col as u32,
+        },
+    }
+}
+```
+
+9.2 CODE LENS PROVIDER
+----------------------
+
+```rust
+/// Provide code lenses showing verification time
+pub fn provide_performance_code_lenses(
+    module_stats: &ModuleStatistics,
+) -> Vec<CodeLens> {
+    module_stats.definitions.iter()
+        .map(|def| {
+            let time_str = if def.timing.total_ms > 1000 {
+                format!("{:.1}s", def.timing.total_ms as f64 / 1000.0)
+            } else {
+                format!("{}ms", def.timing.total_ms)
+            };
+
+            CodeLens {
+                range: lsp_range(def.unit.line, 0, def.unit.line, 1),
+                command: Some(Command {
+                    title: format!("Verified in {}", time_str),
+                    command: "fstar.showProfileDetails".to_string(),
+                    arguments: Some(vec![
+                        serde_json::to_value(&def.unit.definition_name).unwrap(),
+                    ]),
+                }),
+                data: None,
+            }
+        })
+        .collect()
+}
+```
+
+================================================================================
+10. TESTING STRATEGY
+================================================================================
+
+10.1 UNIT TESTS
+---------------
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_query_stats() {
+        let line = "(FStar.List.Tot.fst:123)\tQuery-stats (lemma_length, 0)\t\
+                    succeeded in 1234 milliseconds with fuel 2 and ifuel 1 \
+                    and rlimit 20 (used rlimit 15.5)";
+
+        let entry = parse_query_stats(line).unwrap();
+        assert_eq!(entry.name, "lemma_length");
+        assert_eq!(entry.index, 0);
+        assert_eq!(entry.time_ms, 1234);
+        assert_eq!(entry.fuel, 2);
+        assert_eq!(entry.ifuel, 1);
+        assert!(entry.succeeded);
+    }
+
+    #[test]
+    fn test_detect_nested_quantifiers() {
+        let body = r#"
+            forall x. x > 0 ==>
+              forall y. y > x ==>
+                forall z. z > y ==>
+                  x + y + z > 0
+        "#;
+
+        let depth = count_nested_quantifiers(body);
+        assert_eq!(depth, 3);
+    }
+
+    #[test]
+    fn test_identify_bottleneck_smt_heavy() {
+        let stats = DefinitionStatistics {
+            timing: VerificationTiming {
+                total_ms: 10000,
+                typechecking_ms: 500,
+                encoding_ms: 500,
+                smt_solving_ms: 9000,
+                z3_rlimit_used: 900000,
+                z3_rlimit_max: 1000000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let analysis = identify_bottleneck(&stats);
+        assert!(matches!(
+            analysis.primary,
+            BottleneckType::SmtRlimitExhaustion | BottleneckType::SmtGeneral
+        ));
+    }
+
+    #[test]
+    fn test_fuel_suggestion_generation() {
+        let stats = DefinitionStatistics {
+            timing: VerificationTiming {
+                fuel: 4,
+                ifuel: 1,
+                total_ms: 5000,
+                ..Default::default()
+            },
+            unit: VerificationUnit {
+                line: 42,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let suggestions = suggest_fuel_hints(&stats);
+        assert!(!suggestions.is_empty());
+        assert!(suggestions[0].code_action.is_some());
+    }
+}
+```
+
+10.2 INTEGRATION TESTS
+----------------------
+
+Test against real F* files:
+
+```rust
+#[test]
+fn test_profile_real_module() {
+    // Run F* with profiling enabled
+    let output = Command::new("fstar.exe")
+        .args(&[
+            "--query_stats",
+            "--print_z3_statistics",
+            "tests/fixtures/SlowModule.fst",
+        ])
+        .output()
+        .expect("Failed to run F*");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Parse and analyze
+    let stats = parse_fstar_output(&stdout);
+
+    // Verify we detect known slow definitions
+    assert!(stats.definitions.iter()
+        .any(|d| d.unit.definition_name == "slow_lemma"));
+
+    // Verify we generate appropriate suggestions
+    let slow_def = stats.definitions.iter()
+        .find(|d| d.unit.definition_name == "slow_lemma")
+        .unwrap();
+    assert!(!slow_def.optimization_suggestions.is_empty());
+}
+```
+
+================================================================================
+11. COMMAND-LINE INTERFACE
+================================================================================
+
+```
+fstar-profiler [OPTIONS] <FILE>...
+
+OPTIONS:
+    --threshold <MS>         Slow query threshold in milliseconds [default: 1000]
+    --format <FORMAT>        Output format: text, json, markdown, html [default: text]
+    --output <FILE>          Write report to file instead of stdout
+    --baseline <FILE>        Compare against baseline profile for regression detection
+    --regression <PERCENT>   Regression threshold percentage [default: 10]
+    --include-hints          Include optimization suggestions in report
+    --min-priority <LEVEL>   Minimum suggestion priority: critical, high, medium, low [default: medium]
+    --z3-profile             Enable Z3 quantifier profiling
+    --save-smt               Save SMT2 logs for analysis
+    --watch                  Watch mode: re-profile on file changes
+
+EXAMPLES:
+    # Profile a single file
+    fstar-profiler MyModule.fst
+
+    # Profile with JSON output and baseline comparison
+    fstar-profiler --format json --baseline baseline.json --output report.json MyModule.fst
+
+    # Profile with Z3 quantifier analysis
+    fstar-profiler --z3-profile --save-smt MyModule.fst
+
+    # Watch mode for interactive development
+    fstar-profiler --watch --threshold 500 src/*.fst
+```
+
+================================================================================
+12. FUTURE ENHANCEMENTS
+================================================================================
+
+12.1 PLANNED FEATURES
+---------------------
+
+- Flamegraph visualization of verification time breakdown
+- Integration with CI systems for automated regression detection
+- Machine learning-based pattern recognition for optimization suggestions
+- Interactive HTML report with drill-down capabilities
+- Comparison mode for A/B testing proof strategies
+- Integration with F* IDE plugins (VS Code, Emacs)
+- Distributed profiling for parallel verification
+- Historical trend analysis and prediction
+
+12.2 RESEARCH DIRECTIONS
+------------------------
+
+- Automatic proof repair based on detected patterns
+- Intelligent fuel/ifuel inference
+- Query similarity analysis for proof reuse
+- Formal verification of profiler correctness
+- Integration with proof assistants beyond F*
+
+================================================================================
+END OF SPECIFICATION
+================================================================================
