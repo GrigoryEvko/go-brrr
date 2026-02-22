@@ -941,19 +941,133 @@ impl Rule for LemmaEnsuresAmbiguityRule {
     fn check(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
         let mut block_comment_depth: u32 = 0;
+        let mut in_record_type = false;
+        let mut record_brace_depth: u32 = 0;
+        // Track constructor-style type defs: `| Ctor : field1 -> ... -> T`.
+        // In these, `Lemma (P)` is a field type, not a return effect.
+        let mut in_ctor_type = false;
+        // Track whether we're inside a val/let declaration (multi-line aware).
+        let mut in_val_decl = false;
 
         for (line_idx, line) in content.lines().enumerate() {
-            // Track block comment depth across lines.
             block_comment_depth = update_block_comment_depth(line, block_comment_depth);
-
-            // Skip lines entirely within block comments.
-            // (Simplified: if depth was >0 before and still >0, skip.)
             if block_comment_depth > 0 && !line.contains("*)") {
                 continue;
             }
 
-            // Scan for `Lemma` followed by `(` on this line.
-            if let Some(diag) = scan_line_for_lemma_ambiguity(file, line, line_idx + 1) {
+            let stripped = strip_line_comment(line);
+            let trimmed = stripped.trim();
+
+            // --- Track record type blocks ---
+            // Inside `noeq type ... = { field: x -> Lemma (P); ... }`,
+            // `Lemma (P)` is a type annotation where the semantics are clear
+            // to the author. Suppress entirely.
+            if !in_record_type
+                && (trimmed.starts_with("type ") || trimmed.starts_with("noeq type ")
+                    || trimmed.starts_with("and "))
+                && trimmed.contains('=')
+                && stripped.contains('{')
+            {
+                in_record_type = true;
+                record_brace_depth = 0;
+            }
+
+            if in_record_type {
+                for &b in stripped.as_bytes() {
+                    if b == b'{' {
+                        record_brace_depth += 1;
+                    } else if b == b'}' {
+                        record_brace_depth = record_brace_depth.saturating_sub(1);
+                        if record_brace_depth == 0 {
+                            in_record_type = false;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // --- Track constructor-style type definitions ---
+            // `| Ctor : field -> field -> ... -> T` — fields here use `Lemma (P)` intentionally.
+            // Enter on `| Name :` pattern, exit on blank line, new top-level decl, or `| Name :` again.
+            if trimmed.starts_with("| ") && (trimmed.contains(" : ") || trimmed.ends_with(" :")) {
+                // Constructor field definition line.
+                in_ctor_type = true;
+            } else if in_ctor_type {
+                // Stay in ctor mode for continuation lines (indented, start with `->` or contain `->`)
+                if !trimmed.is_empty()
+                    && !trimmed.starts_with("let ")
+                    && !trimmed.starts_with("val ")
+                    && !trimmed.starts_with("type ")
+                    && !trimmed.starts_with("noeq type ")
+                    && !trimmed.starts_with("open ")
+                    && !trimmed.starts_with("module ")
+                    && !trimmed.starts_with("| ") // new constructor ends previous
+                {
+                    // Continuation of constructor fields — still in_ctor_type.
+                } else {
+                    in_ctor_type = false;
+                    // Re-check if this line starts a new constructor.
+                    if trimmed.starts_with("| ") && (trimmed.contains(" : ") || trimmed.ends_with(" :")) {
+                        in_ctor_type = true;
+                    }
+                }
+            }
+
+            if in_ctor_type {
+                // Inside constructor fields: Lemma (P) is a field type annotation.
+                // Don't flag — this is intentional.
+                // But still scan for Lemma at the top-level (after the final `-> T`).
+                // We'll let it through and rely on the paren-depth heuristic below.
+            }
+
+            // --- Track val/let declaration context for severity ---
+            if trimmed.starts_with("val ") || trimmed.starts_with("let ")
+                || trimmed.starts_with("let rec ") || trimmed.starts_with("and ")
+            {
+                in_val_decl = true;
+            }
+            // A new top-level declaration or blank line ends the val context.
+            if trimmed.is_empty()
+                || trimmed.starts_with("type ")
+                || trimmed.starts_with("noeq type ")
+                || trimmed.starts_with("open ")
+                || trimmed.starts_with("module ")
+                || trimmed.starts_with("include ")
+            {
+                in_val_decl = false;
+            }
+
+            if let Some(mut diag) = scan_line_for_lemma_ambiguity(file, line, line_idx + 1) {
+                // --- Context-dependent severity ---
+                // If `Lemma (P)` appears inside a nested function type in a binder
+                // (not a val/let return type), downgrade to Hint. These are typically
+                // intentional type annotations where the author knows the semantics.
+                if let Some(lemma_pos) = stripped.find("Lemma") {
+                    let before_lemma = &stripped[..lemma_pos];
+
+                    // Heuristic: count unclosed parens before `Lemma`.
+                    // If paren depth > 0, `Lemma` is nested inside a parenthesized expression,
+                    // likely a binder type like `(f: x:a -> Lemma (P))`.
+                    let mut paren_depth: i32 = 0;
+                    for &b in before_lemma.as_bytes() {
+                        if b == b'(' { paren_depth += 1; }
+                        if b == b')' { paren_depth -= 1; }
+                    }
+
+                    if in_ctor_type {
+                        // Inside a constructor field definition — intentional type annotation.
+                        diag.severity = DiagnosticSeverity::Hint;
+                    } else if paren_depth > 0 {
+                        // Nested inside parens — likely a binder type annotation.
+                        diag.severity = DiagnosticSeverity::Hint;
+                    } else if !in_val_decl && before_lemma.contains("->") {
+                        // Not in a val/let context but has `->` before — ambiguous,
+                        // could be a continuation line or a nested type. Downgrade to Info.
+                        diag.severity = DiagnosticSeverity::Info;
+                    }
+                    // else: top-level val/let return type — keep as Warning.
+                }
+
                 diagnostics.push(diag);
             }
         }
@@ -1250,7 +1364,8 @@ impl Rule for KeywordAsIdentifierRule {
                     if after_kw < effective.len() {
                         let next_ch = effective.as_bytes()[after_kw];
                         if next_ch == b':' || (next_ch == b' ' && effective[after_kw..].trim_start().starts_with(':')) {
-                            let col = byte_to_char_col(line, line.find(&effective[abs_pos..abs_pos + paren_kw.len()]).unwrap_or(0));
+                            let snippet = effective.get(abs_pos..abs_pos + paren_kw.len()).unwrap_or(&paren_kw);
+                            let col = byte_to_char_col(line, line.find(snippet).unwrap_or(0));
                             diagnostics.push(Diagnostic {
                                 rule: RuleCode::FST021,
                                 severity: DiagnosticSeverity::Warning,
@@ -1731,7 +1846,26 @@ impl Rule for FunctionEqualityRule {
 
                     // Both must be bare lowercase identifiers (no digits, no
                     // parens, no application).
+                    // ALSO verify they are truly standalone: if the token before lhs_token
+                    // is also an identifier, then lhs_token is actually the last argument
+                    // of a function application (e.g., `fold cm a b expr1 == ...`).
                     if is_bare_function_ident(lhs_token) && is_bare_function_ident(rhs_token) {
+                        // Check LHS is truly bare: the token before lhs_raw must not be an ident.
+                        let before_lhs = before[..before.len() - lhs_raw.len()].trim_end();
+                        let prev_tok = last_token(before_lhs);
+                        let prev_stripped = prev_tok.trim_start_matches('(').trim_end_matches(')');
+                        if is_fstar_ident(prev_stripped) && !["assert", "assert_norm", "assume", "ensures", "requires", "forall", "exists", "fun"].contains(&prev_stripped) {
+                            search_from = abs_eq + eq_op.len();
+                            continue;
+                        }
+                        // Check RHS is truly bare: the token after rhs_raw must not be an ident.
+                        let after_rhs = after[rhs_raw.len()..].trim_start();
+                        let next_tok = first_token(after_rhs);
+                        let next_stripped = next_tok.trim_start_matches('(').trim_end_matches(')');
+                        if is_fstar_ident(next_stripped) && ![")", "]", "}", ";", "in", "then", "else", "with", "and", "end", ""].contains(&next_stripped) {
+                            search_from = abs_eq + eq_op.len();
+                            continue;
+                        }
                         // Extra guard: skip if LHS == RHS (reflexivity, common pattern).
                         if lhs_token != rhs_token {
                             let byte_pos = line.find(trimmed).unwrap_or(0) + abs_eq;
@@ -1929,7 +2063,7 @@ fn is_word_at(line: &str, pos: usize, keyword: &str) -> bool {
     if pos + kw_len > bytes.len() {
         return false;
     }
-    if &line[pos..pos + kw_len] != keyword {
+    if &bytes[pos..pos + kw_len] != keyword.as_bytes() {
         return false;
     }
     let before_ok = pos == 0 || !is_ident_char(bytes[pos - 1]);
@@ -2446,7 +2580,8 @@ impl Rule for PatternDisjunctionRule {
                 if block.contains(r"\/") {
                     let disj_offset = block.find(r"\/").unwrap_or(0);
                     let disj_abs = abs_pos + disj_offset;
-                    let col = byte_to_char_col(line, line.find(&effective[disj_abs..disj_abs + 2]).unwrap_or(disj_abs));
+                    let snippet = effective.get(disj_abs..disj_abs + 2).unwrap_or(r"\/");
+                    let col = byte_to_char_col(line, line.find(snippet).unwrap_or(disj_abs));
 
                     diagnostics.push(Diagnostic {
                         rule: RuleCode::FST029,
@@ -2675,9 +2810,10 @@ impl Rule for DollarBinderRule {
                                 || type_body.contains("-> GTot ");
 
                             if is_higher_order {
+                                let snippet = trimmed.get(paren_start..paren_start + 2).unwrap_or("($");
                                 let col = byte_to_char_col(
                                     line,
-                                    line.find(&trimmed[paren_start..paren_start + 2]).unwrap_or(0),
+                                    line.find(snippet).unwrap_or(0),
                                 );
                                 diagnostics.push(Diagnostic {
                                     rule: RuleCode::FST036,
@@ -4045,14 +4181,67 @@ impl Rule for MissingDecreasesRule {
                 continue;
             }
 
-            // Check for obvious structural recursion patterns that don't need decreases.
-            // If the function pattern-matches a parameter and recurses on a subterm,
-            // F* can infer the decreases clause. Still flag it as Info since explicit is better.
+            // Detect structural recursion patterns.
+            // If the function matches on one of its parameters AND the recursive call
+            // passes a subterm from that match, F* can infer the decreasing measure.
+            // Severity depends on confidence:
+            //  - match on a parameter + recursive call with subterm → suppress (FP)
+            //  - match present but can't confirm parameter match → Hint (likely structural)
+            //  - no match at all → Info (user should add decreases)
+            let has_match = body.contains("match ") && body.contains(" with");
+            if has_match {
+                // Extract parameter names from the function signature (between func_name and `=`).
+                let sig_start = body.find(func_name).unwrap_or(0) + func_name.len();
+                let sig_end = body.find(" =").or_else(|| body.find("\n=")).unwrap_or(body.len());
+                let sig = if sig_start < sig_end { &body[sig_start..sig_end] } else { "" };
+
+                // Collect parameter names (words after `(` or `#(` that look like identifiers).
+                let mut params: Vec<&str> = Vec::new();
+                for word in sig.split_whitespace() {
+                    let w = word.trim_start_matches('(').trim_start_matches('#')
+                        .trim_end_matches(')').trim_end_matches(':');
+                    if !w.is_empty() && w.bytes().next().map_or(false, |b| b.is_ascii_lowercase() || b == b'_')
+                        && w.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'\'')
+                    {
+                        params.push(w);
+                    }
+                }
+
+                // Check if any `match X` has X as one of the parameters.
+                let body_after_eq = body.get(sig_end..).unwrap_or("");
+                let mut matches_param = false;
+                let mut search = 0;
+                while let Some(m) = body_after_eq[search..].find("match ") {
+                    let mstart = search + m + 6;
+                    let match_target = body_after_eq[mstart..].split_whitespace().next().unwrap_or("");
+                    if params.contains(&match_target) {
+                        matches_param = true;
+                        break;
+                    }
+                    search = mstart;
+                }
+
+                if matches_param {
+                    // High confidence: matching on a parameter → F* infers decreases.
+                    // Suppress entirely — this is the standard F* pattern.
+                    i += 1;
+                    continue;
+                }
+                // match present but not on a parameter → still likely structural, but less certain.
+                // Emit as Hint.
+            }
+
+            let severity = if has_match {
+                DiagnosticSeverity::Hint
+            } else {
+                DiagnosticSeverity::Info
+            };
+
             let line_num = i + 1;
             let col = line.find("let rec").unwrap_or(0);
             diagnostics.push(Diagnostic {
                 rule: RuleCode::FST044,
-                severity: DiagnosticSeverity::Info,
+                severity,
                 file: file.to_path_buf(),
                 range: Range::new(
                     line_num,
@@ -4146,7 +4335,7 @@ impl Rule for UniverseHintRule {
             let mut i = 0;
             while i + 8 <= bytes.len() {
                 // Look for "Type u#"
-                if &effective[i..i + 7] == "Type u#" {
+                if &bytes[i..i + 7] == b"Type u#" {
                     // Verify `Type` is a standalone word.
                     let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
                     if !before_ok {
@@ -4647,7 +4836,7 @@ impl Rule for SumVsOrRule {
                 let bytes = effective.as_bytes();
                 let mut j = 0;
                 while j + 3 <= bytes.len() {
-                    if &effective[j..j + 3] == "sum" && is_word_at(effective, j, "sum") {
+                    if &bytes[j..j + 3] == b"sum" && is_word_at(effective, j, "sum") {
                         // Verify it's in a type position (after `:` or in a type annotation).
                         let before = effective[..j].trim_end();
                         if before.ends_with(':') || before.ends_with("->") || before.ends_with('(')
@@ -4769,7 +4958,7 @@ impl Rule for MissingPluginRule {
                     let bytes = kt.as_bytes();
                     let mut j = 0;
                     while j + 3 <= bytes.len() {
-                        if &kt[j..j + 3] == "Tac" {
+                        if &bytes[j..j + 3] == b"Tac" {
                             let before = j == 0 || !is_ident_char(bytes[j - 1]);
                             let after = j + 3 >= bytes.len() || !is_ident_char(bytes[j + 3]);
                             if before && after {
@@ -4822,7 +5011,7 @@ impl Rule for MissingPluginRule {
             let col = byte_to_char_col(line, line.find("let").unwrap_or(0));
             diagnostics.push(Diagnostic {
                 rule: RuleCode::FST048,
-                severity: DiagnosticSeverity::Info,
+                severity: DiagnosticSeverity::Hint,
                 file: file.to_path_buf(),
                 range: Range::new(line_idx + 1, col, line_idx + 1, col + 3),
                 message:
