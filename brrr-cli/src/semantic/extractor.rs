@@ -18,7 +18,12 @@ use walkdir::WalkDir;
 
 use crate::ast::{AstExtractor, ClassInfo, FunctionInfo};
 use crate::callgraph::{self, CallGraph, FunctionRef};
+// NOTE: CfgBuilder/DfgBuilder retained for enrich_cfg_summary/enrich_dfg_summary
+// which are currently unused (removed from hot path for perf) but may be
+// re-enabled for on-demand analysis in the future.
+#[allow(unused_imports)]
 use crate::cfg::{CfgBuilder, EdgeType};
+#[allow(unused_imports)]
 use crate::dfg::DfgBuilder;
 use crate::error::{BrrrError, Result};
 use crate::lang::LanguageRegistry;
@@ -385,12 +390,29 @@ pub fn enrich_unit(unit: &mut EmbeddingUnit) {
         unit.complexity = detect_code_complexity(&unit.code);
         unit.token_count = count_tokens(&unit.code);
 
-        // Compute CFG and DFG summaries for functions and methods only
-        // (classes and chunks don't need individual CFG/DFG analysis)
-        if matches!(unit.kind, UnitKind::Function | UnitKind::Method) {
-            enrich_cfg_summary(unit);
-            enrich_dfg_summary(unit);
-        }
+        // NOTE: CFG/DFG summaries are intentionally NOT computed here.
+        //
+        // Previously, enrich_unit called CfgBuilder::extract_from_source and
+        // DfgBuilder::extract_from_source for every function/method. Each call
+        // creates a brand-new tree-sitter parser, parses the source, compiles a
+        // fresh query, and builds a graph -- costing ~2-10ms per function.
+        //
+        // For large codebases like PyTorch (100K+ functions across 18K files),
+        // this caused an effective hang: all rayon worker threads got stuck
+        // processing monster files with 500-1000+ functions, each taking
+        // 10-30+ seconds (500 functions * 2 analyses * ~5ms = 5s minimum).
+        // The last ~28 files (one per rayon thread) dominated total runtime,
+        // turning a 10-second extraction into a 60+ second apparent deadlock.
+        //
+        // The CFG/DFG summaries were never included in build_embedding_text()
+        // and thus contributed zero value to semantic search embeddings. They
+        // were serialized to metadata.json but never read back. Removing them
+        // from the hot path eliminates the performance cliff with no functional
+        // impact on search quality.
+        //
+        // If CFG/DFG summaries become needed in the future, they should be
+        // computed lazily (on-demand) or via a dedicated `brrr cfg`/`brrr dfg`
+        // command, not as part of batch semantic indexing.
     } else {
         unit.semantic_tags.clear();
         unit.complexity = CodeComplexity::empty();
@@ -404,6 +426,11 @@ pub fn enrich_unit(unit: &mut EmbeddingUnit) {
 /// - Cyclomatic complexity
 /// - Block count
 /// - Branch count (true/false edges)
+///
+/// NOTE: This is NOT called from enrich_unit() due to performance impact
+/// (creates a new tree-sitter parser per call). Retained for potential
+/// future on-demand use.
+#[allow(dead_code)]
 fn enrich_cfg_summary(unit: &mut EmbeddingUnit) {
     // Skip if we already have a summary (e.g., from parent propagation)
     if !unit.cfg_summary.is_empty() {
@@ -435,6 +462,11 @@ fn enrich_cfg_summary(unit: &mut EmbeddingUnit) {
 /// Extracts data flow graph and summarizes:
 /// - Variable count
 /// - Def-use chain count
+///
+/// NOTE: This is NOT called from enrich_unit() due to performance impact
+/// (creates a new tree-sitter parser per call). Retained for potential
+/// future on-demand use.
+#[allow(dead_code)]
 fn enrich_dfg_summary(unit: &mut EmbeddingUnit) {
     // Skip if we already have a summary (e.g., from parent propagation)
     if !unit.dfg_summary.is_empty() {
@@ -2260,8 +2292,13 @@ fn test() {
     }
 
     #[test]
-    fn test_enrich_unit_cfg_summary() {
-        // Test that CFG summary is computed for a simple Python function
+    fn test_enrich_unit_skips_cfg_dfg() {
+        // CFG/DFG summaries are intentionally NOT computed during enrich_unit.
+        // They were removed because:
+        // 1. They are never included in build_embedding_text() (zero search value)
+        // 2. Computing them for every function creates a new tree-sitter parser
+        //    each time, causing catastrophic slowdown on large codebases
+        //    (e.g., PyTorch with 100K+ functions took 60+ seconds vs ~10s without)
         let mut unit = EmbeddingUnit::new(
             "test.py",
             "simple_func",
@@ -2273,106 +2310,18 @@ fn test() {
 
         enrich_unit(&mut unit);
 
-        // CFG summary should be populated for functions
-        assert!(
-            !unit.cfg_summary.is_empty(),
-            "Expected CFG summary to be computed for function"
-        );
-        assert!(
-            unit.cfg_summary.contains("complexity:"),
-            "Expected complexity in CFG summary: {}",
-            unit.cfg_summary
-        );
-        assert!(
-            unit.cfg_summary.contains("blocks:"),
-            "Expected blocks in CFG summary: {}",
-            unit.cfg_summary
-        );
-        assert!(
-            unit.cfg_summary.contains("branches:"),
-            "Expected branches in CFG summary: {}",
-            unit.cfg_summary
-        );
-    }
+        // Verify enrichment still works for the fields that matter
+        assert!(unit.token_count > 0, "Token count should be computed");
+        // Note: semantic_tags may be empty for simple code without matching patterns
 
-    #[test]
-    fn test_enrich_unit_dfg_summary() {
-        // Test that DFG summary is computed for a Python function
-        let mut unit = EmbeddingUnit::new(
-            "test.py",
-            "example_func",
-            UnitKind::Function,
-            "def example_func(x, y):\n    z = x + y\n    return z",
-            1,
-            "python",
-        );
-
-        enrich_unit(&mut unit);
-
-        // DFG summary should be populated for functions
-        assert!(
-            !unit.dfg_summary.is_empty(),
-            "Expected DFG summary to be computed for function"
-        );
-        assert!(
-            unit.dfg_summary.contains("vars:"),
-            "Expected vars in DFG summary: {}",
-            unit.dfg_summary
-        );
-        assert!(
-            unit.dfg_summary.contains("def-use chains:"),
-            "Expected def-use chains in DFG summary: {}",
-            unit.dfg_summary
-        );
-    }
-
-    #[test]
-    fn test_enrich_unit_skips_cfg_dfg_for_class() {
-        // Test that CFG/DFG summaries are NOT computed for class units
-        let mut unit = EmbeddingUnit::new(
-            "test.py",
-            "MyClass",
-            UnitKind::Class,
-            "class MyClass:\n    def method(self):\n        pass",
-            1,
-            "python",
-        );
-
-        enrich_unit(&mut unit);
-
-        // Class units should not have CFG/DFG summaries
+        // CFG/DFG summaries should remain empty (not computed in hot path)
         assert!(
             unit.cfg_summary.is_empty(),
-            "Expected no CFG summary for class units"
+            "CFG summary should not be computed in enrich_unit (perf fix)"
         );
         assert!(
             unit.dfg_summary.is_empty(),
-            "Expected no DFG summary for class units"
-        );
-    }
-
-    #[test]
-    fn test_enrich_unit_cfg_dfg_for_rust() {
-        // Test that CFG/DFG works for Rust code as well
-        let mut unit = EmbeddingUnit::new(
-            "test.rs",
-            "process",
-            UnitKind::Function,
-            "fn process(x: i32) -> i32 {\n    if x > 0 {\n        x * 2\n    } else {\n        0\n    }\n}",
-            1,
-            "rust",
-        );
-
-        enrich_unit(&mut unit);
-
-        // Both summaries should be computed for Rust functions
-        assert!(
-            !unit.cfg_summary.is_empty(),
-            "Expected CFG summary for Rust function"
-        );
-        assert!(
-            !unit.dfg_summary.is_empty(),
-            "Expected DFG summary for Rust function"
+            "DFG summary should not be computed in enrich_unit (perf fix)"
         );
     }
 
@@ -2392,7 +2341,7 @@ fn test() {
 
         enrich_unit(&mut unit);
 
-        // Existing summaries should be preserved
+        // Existing summaries should be preserved (enrich_unit doesn't touch them)
         assert_eq!(unit.cfg_summary, "existing:cfg");
         assert_eq!(unit.dfg_summary, "existing:dfg");
     }

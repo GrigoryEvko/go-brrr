@@ -436,6 +436,16 @@ struct LanguageFilter<'a> {
     registry: &'a LanguageRegistry,
 }
 
+/// Check if two language names are C/C++ compatible.
+/// Headers (.h) are shared between C and C++ — filtering for one should include the other.
+#[inline]
+fn is_c_cpp_compatible(detected: &str, target: &str) -> bool {
+    matches!(
+        (detected, target),
+        ("c", "cpp") | ("cpp", "c")
+    )
+}
+
 /// Result of language filter matching, includes cached language for reuse.
 struct LanguageMatchResult {
     /// Whether the file matches the filter criteria.
@@ -476,8 +486,11 @@ impl<'a> LanguageFilter<'a> {
 
         let matches = match self.target_language {
             Some(target_name) => {
-                // Language filter active: check if detected language matches target
-                language.is_some_and(|l| l == target_name)
+                // Language filter active: check if detected language matches target.
+                // Treat "c" and "cpp" as compatible (headers are shared).
+                language.is_some_and(|l| {
+                    l == target_name || is_c_cpp_compatible(l, target_name)
+                })
             }
             None => {
                 // No language filter: accept if extension filter passes OR file is supported

@@ -26,6 +26,23 @@ pub fn resolve_bindings(declarations: &mut [BindingDeclaration], index: &Functio
     for decl in declarations.iter_mut() {
         // Phase 1: resolve existing partial references (name -> full FunctionRef)
         resolve_host_function(decl, index);
+
+        // Phase 1.5: validate that host resolution matches the expected host language.
+        // For pybind11/CUDA/TorchLibrary, the host language is always C/C++.
+        // If Phase 1 resolved to a non-C++ file (e.g., .pyi stub), discard the
+        // result so Phase 2 can try a better match or leave it unresolved.
+        if let Some(ref hf) = decl.host_function {
+            let host_must_be_cpp = matches!(
+                decl.system,
+                BindingSystem::Pybind11
+                    | BindingSystem::CudaDispatch
+                    | BindingSystem::TorchLibrary
+            );
+            if host_must_be_cpp && !hf.file.is_empty() && !is_cpp_file(&hf.file) {
+                decl.host_function = None;
+            }
+        }
+
         // Phase 2: synthesize host_function from metadata when detector didn't provide one
         resolve_host_from_metadata(decl, index);
         // Phase 3: resolve target function references
@@ -156,7 +173,9 @@ fn pick_best_candidate<'a>(
             return Some(same_dir[0]);
         }
         if same_dir.len() > 1 {
-            return same_dir.into_iter().min_by_key(|c| c.file.len());
+            return same_dir
+                .into_iter()
+                .min_by(|a, b| a.file.len().cmp(&b.file.len()).then_with(|| a.file.cmp(&b.file)));
         }
     }
 
@@ -168,7 +187,8 @@ fn pick_best_candidate<'a>(
             let depth_a = shared_path_depth(&a.file, declaration_file);
             let depth_b = shared_path_depth(&b.file, declaration_file);
             depth_a.cmp(&depth_b)
-                .then_with(|| b.file.len().cmp(&a.file.len())) // shorter path wins on tie
+                .then_with(|| b.file.len().cmp(&a.file.len()))
+                .then_with(|| a.file.cmp(&b.file))
         })
         .copied()
 }
@@ -525,17 +545,35 @@ fn resolve_host_from_metadata(decl: &mut BindingDeclaration, index: &FunctionInd
     );
 
     // Strategy A: class_name + exposed_name -> class::method lookup
+    //
+    // We call index.lookup_method() directly (instead of try_class_method_lookup)
+    // so we can filter candidates to C/C++ files BEFORE picking the best one.
+    // This prevents .pyi stubs from being chosen as "best" by proximity when
+    // valid C++ candidates exist in the same pool.
     if let Some(ref class_name) = decl.class_name {
-        if let Some(fref) =
-            try_class_method_lookup(class_name, exposed, &declaration_file, index)
-        {
-            if !require_cpp || is_cpp_file(&fref.file) {
-                decl.host_function = Some(fref.clone());
-                return;
+        let norm_method = normalize_cpp_name(exposed);
+        let norm_class = normalize_cpp_name(class_name);
+
+        // Collect all class::method candidates from exact and leaf-only variants
+        let mut cm_candidates: Vec<&FunctionRef> =
+            index.lookup_method(&norm_class, &norm_method);
+        if norm_class.contains("::") {
+            if let Some(last_part) = norm_class.rsplit("::").next() {
+                cm_candidates.extend(index.lookup_method(last_part, &norm_method));
             }
         }
 
+        // Pre-filter to C/C++ files when required, then pick best
+        if require_cpp {
+            cm_candidates.retain(|c| is_cpp_file(&c.file));
+        }
+        if let Some(best) = pick_best_candidate(&cm_candidates, &declaration_file) {
+            decl.host_function = Some(best.clone());
+            return;
+        }
+
         // Try qualified lookup: class_name::exposed_name
+        // Filter result to C++ files.
         let qualified = format!("{}::{}", class_name, exposed);
         if let Some(fref) = try_qualified_lookup(&qualified, &declaration_file, index) {
             if !require_cpp || is_cpp_file(&fref.file) {
@@ -547,12 +585,16 @@ fn resolve_host_from_metadata(decl: &mut BindingDeclaration, index: &FunctionInd
         // Try suffix lookup: maybe the index has a longer prefix.
         // Filter to C/C++ files to avoid cross-language false positives.
         let suffix_matches = index.lookup_by_suffix(&qualified);
-        let filtered: Vec<_> = if require_cpp {
-            suffix_matches.iter().filter(|c| is_cpp_file(&c.file)).copied().collect()
+        let suffix_filtered: Vec<_> = if require_cpp {
+            suffix_matches
+                .iter()
+                .filter(|c| is_cpp_file(&c.file))
+                .copied()
+                .collect()
         } else {
             suffix_matches
         };
-        if let Some(best) = pick_best_candidate(&filtered, &declaration_file) {
+        if let Some(best) = pick_best_candidate(&suffix_filtered, &declaration_file) {
             decl.host_function = Some(best.clone());
             return;
         }
@@ -570,13 +612,17 @@ fn resolve_host_from_metadata(decl: &mut BindingDeclaration, index: &FunctionInd
     // Filter to host language files to avoid cross-language false positives.
     let candidates = index.lookup(exposed);
     let cpp_candidates: Vec<&FunctionRef> = if require_cpp {
-        candidates.iter().filter(|c| is_cpp_file(&c.file)).copied().collect()
+        candidates
+            .iter()
+            .filter(|c| is_cpp_file(&c.file))
+            .copied()
+            .collect()
     } else {
         candidates.iter().copied().collect()
     };
 
     if cpp_candidates.len() == 1 {
-        decl.host_function = Some((*cpp_candidates[0]).clone());
+        decl.host_function = Some(cpp_candidates[0].clone());
         return;
     }
     if cpp_candidates.len() > 1 {
@@ -590,7 +636,7 @@ fn resolve_host_from_metadata(decl: &mut BindingDeclaration, index: &FunctionInd
                 .copied()
                 .collect();
             if same_dir.len() == 1 {
-                decl.host_function = Some((*same_dir[0]).clone());
+                decl.host_function = Some(same_dir[0].clone());
             }
         }
     }

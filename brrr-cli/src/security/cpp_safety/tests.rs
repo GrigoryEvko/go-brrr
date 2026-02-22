@@ -874,3 +874,314 @@ void assemble_data() {
     let uctx = findings_with_rule(&findings, "UCTX-006");
     assert!(uctx.is_empty(), "Should NOT flag function with 'asm' in name or comment");
 }
+
+// ── TSAF: Type Safety Extension tests ─────────────────────────────────
+
+#[test]
+fn test_tsaf001_optional_unchecked_value() {
+    let findings = scan_cpp(r#"
+#include <optional>
+std::optional<int> get_value();
+void use_it() {
+    auto opt = get_value();
+    int x = opt.value();
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-001");
+    assert!(!tsaf.is_empty(), "Should flag .value() on optional without has_value() check");
+}
+
+#[test]
+fn test_tsaf001_optional_guarded_clean() {
+    let findings = scan_cpp(r#"
+#include <optional>
+void safe_use(std::optional<int> opt) {
+    if (opt.has_value()) {
+        int x = opt.value();
+    }
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-001");
+    assert!(tsaf.is_empty(), "Should NOT flag .value() guarded by has_value()");
+}
+
+#[test]
+fn test_tsaf001_optional_boolean_guard_clean() {
+    let findings = scan_cpp(r#"
+#include <optional>
+void safe_use(std::optional<int> opt) {
+    if (opt) {
+        int x = opt.value();
+    }
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-001");
+    assert!(tsaf.is_empty(), "Should NOT flag .value() guarded by if(opt)");
+}
+
+#[test]
+fn test_tsaf001_value_or_clean() {
+    let findings = scan_cpp(r#"
+#include <optional>
+void safe_use(std::optional<int> opt) {
+    int x = opt.value_or(42);
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-001");
+    assert!(tsaf.is_empty(), "Should NOT flag .value_or()");
+}
+
+#[test]
+fn test_tsaf003_variant_get_unchecked() {
+    let findings = scan_cpp(r#"
+#include <variant>
+void use_variant(std::variant<int, std::string> v) {
+    int x = std::get<int>(v);
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-003");
+    assert!(!tsaf.is_empty(), "Should flag std::get without holds_alternative check");
+}
+
+#[test]
+fn test_tsaf003_variant_get_guarded_clean() {
+    let findings = scan_cpp(r#"
+#include <variant>
+void safe_use(std::variant<int, std::string> v) {
+    if (std::holds_alternative<int>(v)) {
+        int x = std::get<int>(v);
+    }
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-003");
+    assert!(tsaf.is_empty(), "Should NOT flag std::get guarded by holds_alternative");
+}
+
+#[test]
+fn test_tsaf003_variant_visit_clean() {
+    let findings = scan_cpp(r#"
+#include <variant>
+void safe_use(std::variant<int, std::string> v) {
+    std::visit([](auto& val) { /* handle */ }, v);
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-003");
+    assert!(tsaf.is_empty(), "Should NOT flag std::visit usage");
+}
+
+#[test]
+fn test_tsaf004_smart_ptr_unchecked() {
+    let findings = scan_cpp(r#"
+#include <memory>
+void use_ptr() {
+    std::unique_ptr<int> ptr = make_unique<int>(42);
+    ptr->do_something();
+    int x = *ptr;
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-004");
+    assert!(!tsaf.is_empty(), "Should flag smart pointer deref without null check");
+}
+
+#[test]
+fn test_tsaf004_smart_ptr_guarded_clean() {
+    let findings = scan_cpp(r#"
+#include <memory>
+void safe_use(std::unique_ptr<int> ptr) {
+    if (ptr != nullptr) {
+        int x = *ptr;
+    }
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-004");
+    assert!(tsaf.is_empty(), "Should NOT flag smart pointer deref guarded by null check");
+}
+
+#[test]
+fn test_tsaf005_any_cast_unchecked() {
+    let findings = scan_cpp(r#"
+#include <any>
+void use_any(std::any a) {
+    int x = std::any_cast<int>(a);
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-005");
+    assert!(!tsaf.is_empty(), "Should flag any_cast without type check");
+}
+
+#[test]
+fn test_tsaf005_any_cast_pointer_form_clean() {
+    let findings = scan_cpp(r#"
+#include <any>
+void safe_use(std::any a) {
+    auto* p = std::any_cast<int>(&a);
+    if (p) { /* safe */ }
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-005");
+    assert!(tsaf.is_empty(), "Should NOT flag any_cast with pointer form (address-of argument)");
+}
+
+// ── TSAF: Pattern Matching tests ──────────────────────────────────────
+
+#[test]
+fn test_tsaf007_switch_implicit_fallthrough() {
+    let findings = scan_cpp(r#"
+void process(int x) {
+    switch (x) {
+        case 1:
+            do_something();
+        case 2:
+            do_other();
+            break;
+    }
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-007");
+    assert!(!tsaf.is_empty(), "Should flag case 1 without break (implicit fallthrough)");
+}
+
+#[test]
+fn test_tsaf007_switch_with_break_clean() {
+    let findings = scan_cpp(r#"
+void process(int x) {
+    switch (x) {
+        case 1:
+            do_something();
+            break;
+        case 2:
+            do_other();
+            break;
+    }
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-007");
+    assert!(tsaf.is_empty(), "Should NOT flag cases with break");
+}
+
+#[test]
+fn test_tsaf007_switch_with_return_clean() {
+    let findings = scan_cpp(r#"
+int process(int x) {
+    switch (x) {
+        case 1:
+            return 10;
+        case 2:
+            return 20;
+    }
+    return 0;
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-007");
+    assert!(tsaf.is_empty(), "Should NOT flag cases with return");
+}
+
+#[test]
+fn test_tsaf007_switch_fallthrough_attribute_clean() {
+    let findings = scan_cpp(r#"
+void process(int x) {
+    switch (x) {
+        case 1:
+            do_something();
+            [[fallthrough]];
+        case 2:
+            do_other();
+            break;
+    }
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-007");
+    assert!(tsaf.is_empty(), "Should NOT flag [[fallthrough]] attributed cases");
+}
+
+#[test]
+fn test_tsaf007_empty_case_grouping_clean() {
+    let findings = scan_cpp(r#"
+void process(int x) {
+    switch (x) {
+        case 1:
+        case 2:
+        case 3:
+            do_something();
+            break;
+    }
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-007");
+    assert!(tsaf.is_empty(), "Should NOT flag empty case labels (intentional grouping)");
+}
+
+#[test]
+fn test_tsaf008_switch_on_bool() {
+    let findings = scan_cpp(r#"
+void process(bool b) {
+    switch (b) {
+        case true:
+            yes();
+            break;
+        case false:
+            no();
+            break;
+    }
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-008");
+    assert!(!tsaf.is_empty(), "Should flag switch on bool");
+}
+
+#[test]
+fn test_tsaf009_switch_no_default() {
+    let findings = scan_cpp(r#"
+void process(int x) {
+    switch (x) {
+        case 1:
+            a();
+            break;
+        case 2:
+            b();
+            break;
+    }
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-009");
+    assert!(!tsaf.is_empty(), "Should flag switch without default case");
+}
+
+#[test]
+fn test_tsaf009_switch_with_default_clean() {
+    let findings = scan_cpp(r#"
+void process(int x) {
+    switch (x) {
+        case 1:
+            a();
+            break;
+        default:
+            fallback();
+            break;
+    }
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-009");
+    assert!(tsaf.is_empty(), "Should NOT flag switch with default case");
+    let tsaf6 = findings_with_rule(&findings, "TSAF-006");
+    assert!(tsaf6.is_empty(), "Should NOT flag TSAF-006 either when default is present");
+}
+
+#[test]
+fn test_tsaf006_enum_switch_no_default() {
+    let findings = scan_cpp(r#"
+enum class Color { Red, Green, Blue };
+void paint(Color c) {
+    switch (c) {
+        case Color::Red:
+            red();
+            break;
+        case Color::Green:
+            green();
+            break;
+    }
+}
+"#);
+    let tsaf = findings_with_rule(&findings, "TSAF-006");
+    assert!(!tsaf.is_empty(), "Should flag enum switch without default (missing Blue case)");
+}

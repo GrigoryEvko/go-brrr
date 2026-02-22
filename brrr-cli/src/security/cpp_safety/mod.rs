@@ -1,6 +1,6 @@
 //! C++26 Safety Axiom Analyzer.
 //!
-//! Enforces 7 safety axioms plus performance and anti-pattern rules (38 rules total).
+//! Enforces 7 safety axioms plus performance and anti-pattern rules (62+ rules total).
 //!
 //! **Safety Axioms** (from the Crucible model):
 //! - **MemSafe** (Critical): No use-after-free, double-free, buffer overflow
@@ -21,7 +21,9 @@
 mod checkers;
 mod helpers;
 mod lifetime;
+mod pattern_match;
 pub(crate) mod rules;
+mod type_safety_ext;
 mod types;
 mod unsafe_ctx;
 
@@ -121,6 +123,8 @@ pub fn scan_file_cpp_safety(
     lifetime::check_return_ref_to_local(source_str, &file_path, is_cpp, &mut findings);
     lifetime::check_lambda_ref_escape(source_str, &file_path, is_cpp, &mut findings);
     unsafe_ctx::check_unsafe_context(source_str, &file_path, is_cpp, &mut findings);
+    type_safety_ext::check_type_safety_ext(source_str, &file_path, is_cpp, &mut findings);
+    pattern_match::check_pattern_match(source_str, &file_path, is_cpp, &mut findings);
 
     // Apply filters
     let filtered = findings

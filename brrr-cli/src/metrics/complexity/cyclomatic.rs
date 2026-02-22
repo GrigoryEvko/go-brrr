@@ -635,6 +635,12 @@ pub fn analyze_file_complexity(
 
 /// Internal function to analyze all functions in a file.
 ///
+/// Uses batch CFG extraction to parse the file only once, then builds
+/// CFGs for all functions from the same parse tree. This avoids the
+/// O(N * parse_time) overhead of re-reading and re-parsing per function,
+/// which caused effective hangs on files with hundreds of functions
+/// (e.g., TensorImpl.h with 288 functions in PyTorch).
+///
 /// Returns a tuple of (successful analyses, errors encountered).
 fn analyze_file_functions(
     file: &Path,
@@ -643,7 +649,80 @@ fn analyze_file_functions(
     let mut results = Vec::new();
     let mut errors = Vec::new();
 
-    // Extract module info to get function list
+    let file_str = match file.to_str() {
+        Some(s) => s,
+        None => {
+            errors.push(AnalysisError {
+                file: file.to_path_buf(),
+                message: "Invalid file path encoding".to_string(),
+            });
+            return (results, errors);
+        }
+    };
+
+    // Extract all CFGs from the file in a single pass (one read, one parse).
+    match CfgBuilder::extract_all_from_file(file_str) {
+        Ok(cfg_results) => {
+            for (func_name, cfg_result) in cfg_results {
+                match cfg_result {
+                    Ok(cfg) => {
+                        let start_line = cfg.blocks.values()
+                            .map(|b| b.start_line)
+                            .filter(|l| *l > 0)
+                            .min()
+                            .unwrap_or(0);
+                        let end_line = cfg.blocks.values()
+                            .map(|b| b.end_line)
+                            .max()
+                            .unwrap_or(start_line);
+                        let mut cc = CyclomaticComplexity::from_cfg(
+                            &cfg, file, start_line, end_line,
+                        );
+                        // Use the qualified name from batch extraction
+                        // (e.g. "Calculator.add") instead of the raw name
+                        // from the CFG builder (e.g. "add").
+                        cc.function_name = func_name;
+                        results.push(cc);
+                    }
+                    Err(e) => {
+                        debug!("Failed CFG for {}: {}", func_name, e);
+                        // Fallback: estimate complexity = 1
+                        results.push(CyclomaticComplexity {
+                            function_name: func_name,
+                            file: file.to_path_buf(),
+                            line: 0,
+                            end_line: 0,
+                            complexity: 1,
+                            risk_level: RiskLevel::from_complexity(1),
+                            decision_points: 0,
+                            nodes: 0,
+                            edges: 0,
+                        });
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            // Batch extraction failed entirely -- fall back to AstExtractor
+            // approach with per-function CFG extraction (slow but correct).
+            debug!("Batch CFG extraction failed for {}: {}", file.display(), e);
+            return analyze_file_functions_fallback(file, _threshold);
+        }
+    }
+
+    (results, errors)
+}
+
+/// Fallback per-function analysis when batch CFG extraction fails.
+///
+/// This is the original O(N * parse) approach, kept as a safety net.
+fn analyze_file_functions_fallback(
+    file: &Path,
+    _threshold: Option<u32>,
+) -> (Vec<CyclomaticComplexity>, Vec<AnalysisError>) {
+    let mut results = Vec::new();
+    let mut errors = Vec::new();
+
     let module = match AstExtractor::extract_file(file) {
         Ok(m) => m,
         Err(e) => {
@@ -666,7 +745,6 @@ fn analyze_file_functions(
         }
     };
 
-    // Analyze top-level functions
     for func in &module.functions {
         let start_line = func.line_number;
         let end_line = func.end_line_number.unwrap_or(start_line);
@@ -674,7 +752,6 @@ fn analyze_file_functions(
             Ok(complexity) => results.push(complexity),
             Err(e) => {
                 debug!("Failed to analyze function {}: {}", func.name, e);
-                // Fall back to simple estimation from function info
                 if let Some(complexity) = estimate_complexity_from_function(func, file) {
                     results.push(complexity);
                 }
@@ -682,7 +759,6 @@ fn analyze_file_functions(
         }
     }
 
-    // Analyze class methods
     for class in &module.classes {
         for method in &class.methods {
             let qualified_name = format!("{}.{}", class.name, method.name);
@@ -690,7 +766,6 @@ fn analyze_file_functions(
             let end_line = method.end_line_number.unwrap_or(start_line);
             match analyze_function(file_str, &qualified_name, start_line, end_line) {
                 Ok(mut complexity) => {
-                    // Keep the qualified name for methods
                     complexity.function_name = qualified_name;
                     results.push(complexity);
                 }

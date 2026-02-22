@@ -558,6 +558,189 @@ impl CfgBuilder {
         let function_node = Self::find_function_node(&tree, source_bytes, lang, function)?;
         lang.build_cfg(function_node, source_bytes)
     }
+
+    /// Extract CFG for a named function from a pre-parsed tree.
+    ///
+    /// Avoids re-reading and re-parsing the file when multiple functions
+    /// need to be analyzed from the same file. This is critical for
+    /// performance on files with many functions.
+    ///
+    /// # Arguments
+    /// * `tree` - Pre-parsed tree-sitter tree
+    /// * `source` - Source code bytes (must match the tree)
+    /// * `lang` - Language implementation
+    /// * `function_name` - Name of the function to extract CFG for
+    ///
+    /// # Returns
+    /// * `Result<CFGInfo>` - The control flow graph or an error
+    pub fn extract_from_tree(
+        tree: &tree_sitter::Tree,
+        source: &[u8],
+        lang: &dyn crate::lang::Language,
+        function_name: &str,
+    ) -> Result<CFGInfo> {
+        let function_node = Self::find_function_node(tree, source, lang, function_name)?;
+        lang.build_cfg(function_node, source)
+    }
+
+    /// Extract CFGs for all functions in a file in a single pass.
+    ///
+    /// Reads the file once, parses it once, then iterates all function nodes
+    /// and builds CFGs for each. This avoids the O(N * parse_time) overhead
+    /// of calling `extract_from_file` per-function.
+    ///
+    /// # Arguments
+    /// * `file` - Path to the source file
+    ///
+    /// # Returns
+    /// A vec of `(function_name, Result<CFGInfo>)` for each function found.
+    pub fn extract_all_from_file(file: &str) -> Result<Vec<(String, std::result::Result<CFGInfo, BrrrError>)>> {
+        let path = Path::new(file);
+        let registry = LanguageRegistry::global();
+
+        let lang = registry.detect_language(path).ok_or_else(|| {
+            BrrrError::UnsupportedLanguage(
+                path.extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+            )
+        })?;
+
+        let source = std::fs::read(path).map_err(|e| BrrrError::io_with_path(e, path))?;
+        let mut parser = lang.parser_for_path(path)?;
+        let tree = parser
+            .parse(&source, None)
+            .ok_or_else(|| BrrrError::Parse {
+                file: file.to_string(),
+                message: "Failed to parse file".to_string(),
+            })?;
+
+        Self::extract_all_from_tree(&tree, &source, lang, file)
+    }
+
+    /// Extract CFGs for all functions from a pre-parsed tree.
+    ///
+    /// Uses a two-pass approach:
+    /// 1. First pass: find all classes and build a map of byte-range -> class name
+    /// 2. Second pass: find all functions, qualify names for class methods
+    ///
+    /// Functions inside a class body get qualified names (e.g. "Calculator.add").
+    fn extract_all_from_tree(
+        tree: &tree_sitter::Tree,
+        source: &[u8],
+        lang: &dyn crate::lang::Language,
+        _file_label: &str,
+    ) -> Result<Vec<(String, std::result::Result<CFGInfo, BrrrError>)>> {
+        let ts_lang = tree.language();
+
+        // Pass 1: build class range map for name qualification.
+        // Maps (start_byte, end_byte) -> class_name so we can detect
+        // if a function node is inside a class.
+        let mut class_ranges: Vec<(usize, usize, String)> = Vec::new();
+        let class_query_str = lang.class_query();
+        if let Ok(class_query) = Query::new(&ts_lang, class_query_str) {
+            let class_capture_idx = class_query.capture_index_for_name("class");
+            let class_name_idx = class_query.capture_index_for_name("name");
+
+            let mut class_cursor = QueryCursor::new();
+            let mut class_matches = class_cursor.matches(&class_query, tree.root_node(), source);
+
+            while let Some(match_) = class_matches.next() {
+                let class_node = if let Some(idx) = class_capture_idx {
+                    match_
+                        .captures
+                        .iter()
+                        .find(|c| c.index == idx)
+                        .map(|c| c.node)
+                } else {
+                    match_.captures.first().map(|c| c.node)
+                };
+
+                let class_name = class_name_idx.and_then(|idx| {
+                    match_
+                        .captures
+                        .iter()
+                        .find(|c| c.index == idx)
+                        .and_then(|c| {
+                            std::str::from_utf8(&source[c.node.start_byte()..c.node.end_byte()])
+                                .ok()
+                        })
+                });
+
+                if let (Some(cn), Some(name)) = (class_node, class_name) {
+                    class_ranges.push((cn.start_byte(), cn.end_byte(), name.to_string()));
+                }
+            }
+        }
+
+        // Pass 2: find all functions and build CFGs.
+        let mut results = Vec::new();
+        let query_str = lang.function_query();
+
+        let query = Query::new(&ts_lang, query_str).map_err(|e| {
+            BrrrError::TreeSitter(format_query_error(lang.name(), "function", query_str, &e))
+        })?;
+
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), source);
+
+        let function_capture_idx = query.capture_index_for_name("function");
+        let name_capture_idx = query.capture_index_for_name("name");
+
+        let mut seen_ranges: Vec<(usize, usize)> = Vec::new();
+
+        while let Some(match_) = matches.next() {
+            let func_node = if let Some(idx) = function_capture_idx {
+                match_
+                    .captures
+                    .iter()
+                    .find(|c| c.index == idx)
+                    .map(|c| c.node)
+            } else {
+                match_.captures.first().map(|c| c.node)
+            };
+
+            let name_node = if let Some(idx) = name_capture_idx {
+                match_
+                    .captures
+                    .iter()
+                    .find(|c| c.index == idx)
+                    .map(|c| c.node)
+            } else {
+                None
+            };
+
+            if let (Some(func_node), Some(name_node)) = (func_node, name_node) {
+                let start = func_node.start_byte();
+                let end = func_node.end_byte();
+                let overlaps = seen_ranges.iter().any(|(s, e)| start < *e && *s < end);
+                if overlaps {
+                    continue;
+                }
+                seen_ranges.push((start, end));
+
+                let raw_name =
+                    std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
+                        .unwrap_or("")
+                        .to_string();
+
+                // Qualify name if this function is inside a class.
+                let func_start = func_node.start_byte();
+                let qualified_name = class_ranges
+                    .iter()
+                    .find(|(cs, ce, _)| func_start >= *cs && func_start < *ce)
+                    .map(|(_, _, cn)| format!("{}.{}", cn, raw_name))
+                    .unwrap_or(raw_name);
+
+                let unwrapped = Self::unwrap_decorated_function(func_node);
+                let cfg_result = lang.build_cfg(unwrapped, source);
+                results.push((qualified_name, cfg_result));
+            }
+        }
+
+        Ok(results)
+    }
 }
 
 #[cfg(test)]

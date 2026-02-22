@@ -776,6 +776,9 @@ impl TeiClient {
     // =========================================================================
 
     /// Create the gRPC channel with optimized settings.
+    ///
+    /// Wraps the tonic connect in a hard tokio timeout as a safety net —
+    /// tonic's connect_timeout can silently hang on some systems/configurations.
     async fn create_channel(config: &TeiClientConfig) -> Result<Channel> {
         let endpoint = Endpoint::from_shared(config.endpoint.clone())
             .map_err(|e| TeiError::Config(e.to_string()))?
@@ -783,12 +786,18 @@ impl TeiClient {
             .tcp_keepalive(Some(Duration::from_secs(config.keepalive_secs)))
             .http2_keep_alive_interval(Duration::from_secs(config.keepalive_secs))
             .keep_alive_timeout(Duration::from_secs(10))
-            .connect_timeout(Duration::from_secs(10));
+            .connect_timeout(Duration::from_secs(5));
 
-        endpoint
-            .connect()
-            .await
-            .map_err(|e| TeiError::Connection(e.to_string()))
+        // Hard 10s outer timeout — tonic's connect_timeout is unreliable on
+        // some platforms (e.g. when nothing listens but connection isn't refused).
+        match tokio::time::timeout(Duration::from_secs(10), endpoint.connect()).await {
+            Ok(Ok(channel)) => Ok(channel),
+            Ok(Err(e)) => Err(TeiError::Connection(e.to_string())),
+            Err(_elapsed) => Err(TeiError::Connection(format!(
+                "connection to {} timed out after 10s — is the TEI server running?",
+                config.endpoint
+            ))),
+        }
     }
 
     /// Get a clone of the current channel.

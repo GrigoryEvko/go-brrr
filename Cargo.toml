@@ -43,13 +43,22 @@ futures = "0.3"
 # Testing
 pretty_assertions = "1"
 
+# =============================================================================
+# DO NOT TOUCH THIS PROFILE! Fast dev-release builds. Use release-crate for
+# publishing. LTO off + 16 codegen units = fast incremental recompiles.
+# =============================================================================
 [profile.release]
-lto = "thin"
-codegen-units = 1
-opt-level = 3
+opt-level = 2
+codegen-units = 4
+lto = false
+incremental = true
 
+# Full optimization for crates.io publishing only
 [profile.release-crate]
 inherits = "release"
+opt-level = 3
+codegen-units = 1
 lto = "fat"
 strip = true
 panic = "abort"
+incremental = false

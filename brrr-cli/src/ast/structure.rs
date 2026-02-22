@@ -95,9 +95,14 @@ pub fn code_structure(
         .filter(|e| {
             // Filter by language if specified
             if let Some(target_name) = resolved_lang_name {
-                registry
-                    .detect_language(e.path())
-                    .is_some_and(|l| l.name() == target_name)
+                registry.detect_language(e.path()).is_some_and(|l| {
+                    let detected = l.name();
+                    detected == target_name
+                        || matches!(
+                            (detected, target_name),
+                            ("c", "cpp") | ("cpp", "c")
+                        )
+                })
             } else {
                 // Include all supported languages
                 registry.detect_language(e.path()).is_some()

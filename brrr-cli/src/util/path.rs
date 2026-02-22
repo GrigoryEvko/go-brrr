@@ -203,7 +203,9 @@ const EXTENSION_TO_LANG: &[(&str, &str)] = &[
     ("java", "java"),
     // C
     ("c", "c"),
-    ("h", "c"),
+    // C/C++ headers: mapped to "cpp" to match the language registry
+    // (the registry resolves .h → cpp since cpp is registered after c)
+    ("h", "cpp"),
     // C++
     ("cpp", "cpp"),
     ("cc", "cpp"),
