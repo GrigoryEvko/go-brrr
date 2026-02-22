@@ -385,6 +385,12 @@ impl RefinementSimplifierRule {
     /// Check for int{x >= 0} that could be nat.
     fn check_int_to_nat(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
+        let file_name = file.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        // Prims.fst literally defines `type nat = x:int{x >= 0}` -- don't
+        // suggest replacing the definition with itself.
+        let is_prims = file_name.starts_with("Prims.");
 
         for (line_idx, line) in content.lines().enumerate() {
             let line_num = line_idx + 1;
@@ -408,9 +414,20 @@ impl RefinementSimplifierRule {
                     let start_col = byte_to_char_col(line, full_match.start());
                     let end_col = byte_to_char_col(line, full_match.end());
 
+                    // In Prims or type-definition lines, this IS the definition
+                    let is_type_def = is_prims
+                        || trimmed.starts_with("type ")
+                        || trimmed.starts_with("let nat")
+                        || trimmed.starts_with("let pos");
+                    let severity = if is_type_def {
+                        DiagnosticSeverity::Hint
+                    } else {
+                        DiagnosticSeverity::Info
+                    };
+
                     diagnostics.push(Diagnostic {
                         rule: RuleCode::FST012,
-                        severity: DiagnosticSeverity::Info,
+                        severity,
                         file: file.to_path_buf(),
                         range: Range::new(line_num, start_col, line_num, end_col),
                         message: format!(
@@ -450,6 +467,10 @@ impl RefinementSimplifierRule {
     /// Check for int{x > 0} that could be pos.
     fn check_int_to_pos(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
+        let file_name = file.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let is_prims = file_name.starts_with("Prims.");
 
         for (line_idx, line) in content.lines().enumerate() {
             let line_num = line_idx + 1;
@@ -473,9 +494,19 @@ impl RefinementSimplifierRule {
                     let start_col = byte_to_char_col(line, full_match.start());
                     let end_col = byte_to_char_col(line, full_match.end());
 
+                    let is_type_def = is_prims
+                        || trimmed.starts_with("type ")
+                        || trimmed.starts_with("let nat")
+                        || trimmed.starts_with("let pos");
+                    let severity = if is_type_def {
+                        DiagnosticSeverity::Hint
+                    } else {
+                        DiagnosticSeverity::Info
+                    };
+
                     diagnostics.push(Diagnostic {
                         rule: RuleCode::FST012,
-                        severity: DiagnosticSeverity::Info,
+                        severity,
                         file: file.to_path_buf(),
                         range: Range::new(line_num, start_col, line_num, end_col),
                         message: format!(
@@ -620,8 +651,24 @@ impl RefinementSimplifierRule {
     /// - `erased (erased t)` - double erasure is redundant
     /// - `reveal (hide x)` - round-trip that can be eliminated
     /// - `hide (reveal x)` - round-trip that can be eliminated
+    ///
+    /// Severity logic for hide/reveal:
+    /// - In specification contexts (val, ensures, Lemma, SMTPat, .fsti files
+    ///   defining Ghost/erased APIs), the round-trip IS the specification --
+    ///   demoted to Hint.
+    /// - In implementation code (.fst), kept as Info (suggestive, not urgent).
     fn check_ghost_erased_simplifications(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
+        let file_name = file.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+
+        // Files that define Ghost/erased API -- round-trips are the spec itself
+        let is_ghost_api_module = file_name.starts_with("FStar.Ghost")
+            || file_name.starts_with("FStar.Bytes")
+            || file_name.starts_with("FStar.Vector")
+            || file_name.starts_with("FStar.IFC")
+            || file_name.starts_with("FStar.ConstantTime");
 
         for (line_idx, line) in content.lines().enumerate() {
             let line_num = line_idx + 1;
@@ -639,7 +686,7 @@ impl RefinementSimplifierRule {
                         let end_col = byte_to_char_col(line, m.end());
                         diagnostics.push(Diagnostic {
                             rule: RuleCode::FST012,
-                            severity: DiagnosticSeverity::Warning,
+                            severity: DiagnosticSeverity::Info,
                             file: file.to_path_buf(),
                             range: Range::new(line_num, start_col, line_num, end_col),
                             message: "Double erasure: `erased (erased t)` is redundant. \
@@ -651,6 +698,15 @@ impl RefinementSimplifierRule {
                 }
             }
 
+            // Determine if this line is a specification context where
+            // hide/reveal round-trips are part of the spec, not simplifiable code
+            let is_spec_context = is_ghost_api_module
+                || trimmed.starts_with("val ")
+                || trimmed.starts_with("assume val ")
+                || trimmed.contains("ensures")
+                || trimmed.contains("Lemma")
+                || trimmed.contains("SMTPat");
+
             // Check for reveal(hide x) round-trip
             for caps in REVEAL_HIDE.captures_iter(line) {
                 let full_match = { let Some(m) = caps.get(0) else { continue }; m };
@@ -660,9 +716,17 @@ impl RefinementSimplifierRule {
                 let var = caps.get(1).map(|m| m.as_str()).unwrap_or("x");
                 let start_col = byte_to_char_col(line, full_match.start());
                 let end_col = byte_to_char_col(line, full_match.end());
+
+                // In spec contexts, the round-trip documents the identity property
+                let severity = if is_spec_context {
+                    DiagnosticSeverity::Hint
+                } else {
+                    DiagnosticSeverity::Info
+                };
+
                 diagnostics.push(Diagnostic {
                     rule: RuleCode::FST012,
-                    severity: DiagnosticSeverity::Warning,
+                    severity,
                     file: file.to_path_buf(),
                     range: Range::new(line_num, start_col, line_num, end_col),
                     message: format!(
@@ -693,9 +757,15 @@ impl RefinementSimplifierRule {
                 let var = caps.get(1).map(|m| m.as_str()).unwrap_or("x");
                 let start_col = byte_to_char_col(line, full_match.start());
                 let end_col = byte_to_char_col(line, full_match.end());
+                let severity = if is_spec_context {
+                    DiagnosticSeverity::Hint
+                } else {
+                    DiagnosticSeverity::Info
+                };
+
                 diagnostics.push(Diagnostic {
                     rule: RuleCode::FST012,
-                    severity: DiagnosticSeverity::Warning,
+                    severity,
                     file: file.to_path_buf(),
                     range: Range::new(line_num, start_col, line_num, end_col),
                     message: format!(
@@ -727,9 +797,14 @@ impl RefinementSimplifierRule {
                 let var2 = caps.get(2).map(|m| m.as_str()).unwrap_or("b");
                 let start_col = byte_to_char_col(line, full_match.start());
                 let end_col = byte_to_char_col(line, full_match.end());
+                // squash (a == b) is standard propositional equality in F*.
+                // Used extensively in tactic lemmas where == (prop) is the
+                // correct choice over = (decidable eqtype). Demote to Hint
+                // since this is rarely simplifiable -- the author chose == for
+                // a reason (heterogeneous equality, non-eqtype, tactic context).
                 diagnostics.push(Diagnostic {
                     rule: RuleCode::FST012,
-                    severity: DiagnosticSeverity::Info,
+                    severity: DiagnosticSeverity::Hint,
                     file: file.to_path_buf(),
                     range: Range::new(line_num, start_col, line_num, end_col),
                     message: format!(

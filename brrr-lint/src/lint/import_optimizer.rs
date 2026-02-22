@@ -47,9 +47,12 @@ pub enum BroadnessLevel {
 impl BroadnessLevel {
     fn severity(self) -> DiagnosticSeverity {
         match self {
+            // Critical: top-level namespaces (`open FStar`) are not real modules
             BroadnessLevel::Critical => DiagnosticSeverity::Error,
-            BroadnessLevel::High => DiagnosticSeverity::Warning,
-            BroadnessLevel::Medium => DiagnosticSeverity::Info,
+            // High/Medium: umbrella and large modules are a style preference,
+            // not a correctness issue. Demoted to Info to avoid noise.
+            BroadnessLevel::High => DiagnosticSeverity::Info,
+            BroadnessLevel::Medium => DiagnosticSeverity::Hint,
         }
     }
 
@@ -422,6 +425,55 @@ impl CircularImportType {
     }
 }
 
+/// Extract the top-level namespace of a module path.
+///
+/// For `FStar.Tactics.V2.Derived` returns `FStar.Tactics`.
+/// For `FStar.Reflection.V2` returns `FStar.Reflection`.
+/// For `FStar.All` returns `FStar`.
+/// For `Prims` returns `Prims`.
+///
+/// This groups modules into their logical subsystem so we can determine
+/// when an umbrella import is natural (within the same subsystem).
+fn umbrella_namespace(module: &str) -> &str {
+    // Take the first two components: FStar.Tactics, FStar.Reflection, etc.
+    let mut dots = 0;
+    for (i, c) in module.char_indices() {
+        if c == '.' {
+            dots += 1;
+            if dots == 2 {
+                return &module[..i];
+            }
+        }
+    }
+    // Fewer than 2 dots: return the whole thing
+    module
+}
+
+/// Check whether two namespaces are tightly coupled such that importing
+/// one from the other is expected and should not be flagged.
+///
+/// F*'s Tactics system is deeply intertwined with Reflection: every tactic
+/// inspects and manipulates terms via Reflection. Similarly, Reflection
+/// modules use Tactics for proof automation. Flagging `open FStar.Reflection.V2`
+/// inside `FStar.Tactics.Canon` would produce 30+ false positives on ulib.
+fn namespaces_are_coupled(ns_a: &str, ns_b: &str) -> bool {
+    if ns_a == ns_b {
+        return true;
+    }
+    // Tactics <-> Reflection are tightly coupled
+    let coupled_pairs: &[(&str, &str)] = &[
+        ("FStar.Tactics", "FStar.Reflection"),
+        ("FStar.Stubs", "FStar.Reflection"),
+        ("FStar.Stubs", "FStar.Tactics"),
+    ];
+    for &(a, b) in coupled_pairs {
+        if (ns_a == a && ns_b == b) || (ns_a == b && ns_b == a) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Analyze circular import relationship between current module and imported module.
 fn analyze_circular_import(current_module: &Option<String>, imported: &str) -> CircularImportType {
     if let Some(current) = current_module {
@@ -494,6 +546,64 @@ fn generate_qualified_fix(open: &OpenStatement, file: &Path) -> Fix {
     )
 }
 
+/// Determine if an `include` statement is an aggregation pattern.
+///
+/// Returns true when the include is part of a standard F* module
+/// composition pattern, meaning the diagnostic should be suppressed.
+///
+/// Aggregation patterns:
+/// 1. Including a direct sub-module: `FStar.Seq` includes `FStar.Seq.Base`
+/// 2. Including a sibling with shared prefix: `FStar.All` includes `FStar.ST`
+/// 3. Including a Stubs/internal module: `FStar.Reflection.V2` includes
+///    `FStar.Stubs.Reflection.V2.Data`
+/// 4. Including bootstrap modules: `FStar.Prelude` includes `Prims`
+/// 5. Including modules in the whitelisted opens set (these are designed
+///    to be composed into aggregate modules)
+fn is_aggregation_include(current_module: &Option<String>, included: &str) -> bool {
+    let Some(current) = current_module else {
+        return false;
+    };
+
+    // Pattern 1: Sub-module inclusion (most common aggregation pattern)
+    // FStar.Seq includes FStar.Seq.Base -> included starts with current + "."
+    if included.starts_with(&format!("{}.", current)) {
+        return true;
+    }
+
+    // Pattern 2: Parent aggregation -- parent module includes its parts
+    // FStar.List.Pure includes FStar.List.Tot (sibling)
+    // FStar.All includes FStar.ST, FStar.Exn (siblings under FStar)
+    // Both current and included share a common prefix
+    if let Some(parent) = current.rsplit_once('.').map(|(p, _)| p) {
+        if included.starts_with(&format!("{}.", parent)) {
+            return true;
+        }
+    }
+
+    // Pattern 3: Including Stubs/internal implementation modules
+    // FStar.Reflection.V2 includes FStar.Stubs.Reflection.V2.Data
+    // FStar.Stubs.Tactics.Types includes FStar.Stubs.Tactics.Common
+    if included.contains(".Stubs.") || current.contains(".Stubs.") {
+        return true;
+    }
+
+    // Pattern 4: Bootstrapping -- FStar.Prelude includes Prims
+    // These are fundamental module composition at the language level
+    if WHITELISTED_OPENS.contains(included) {
+        return true;
+    }
+
+    // Pattern 5: Same or coupled top-level namespace. The current module
+    // is an aggregate building from closely related subsystems.
+    // FStar.Tactics.V2.Bare includes FStar.Reflection.V2 (coupled ns)
+    // FStar.Seq includes FStar.Seq.Base (same ns)
+    if namespaces_are_coupled(umbrella_namespace(current), umbrella_namespace(included)) {
+        return true;
+    }
+
+    false
+}
+
 /// FST008: Import Optimizer rule.
 ///
 /// Detects import patterns that can be improved for better verification
@@ -520,28 +630,50 @@ impl ImportOptimizerRule {
     }
 
     /// Check for heavy module imports that may slow verification.
-    fn check_heavy_modules(&self, open: &OpenStatement, file: &Path) -> Option<Diagnostic> {
-        if HEAVY_MODULES.contains(open.module_path.as_str()) {
-            Some(Diagnostic {
-                rule: RuleCode::FST008,
-                severity: DiagnosticSeverity::Info,
-                file: file.to_path_buf(),
-                range: Range::new(
-                    open.line,
-                    open.col,
-                    open.line,
-                    open.col + open.line_text.trim().len(),
-                ),
-                message: format!(
-                    "[FST008-H] Heavy import: `{}` may significantly slow verification. \
-                     Consider selective import or ensure it's necessary.",
-                    open.module_path
-                ),
-                fix: None,
-            })
-        } else {
-            None
+    ///
+    /// Suppresses the warning when the current module is within the same
+    /// subsystem as the heavy import. For example, `FStar.Tactics.Canon`
+    /// importing `FStar.Tactics.V2.Derived` is necessary and expected --
+    /// every tactics module needs the derived combinators.
+    fn check_heavy_modules(
+        &self,
+        open: &OpenStatement,
+        current_module: &Option<String>,
+        file: &Path,
+    ) -> Option<Diagnostic> {
+        if !HEAVY_MODULES.contains(open.module_path.as_str()) {
+            return None;
         }
+
+        // Suppress when current module is in the same or coupled subsystem.
+        // FStar.Tactics.Canon importing FStar.Tactics.V2.Derived -> suppress (same ns)
+        // FStar.Tactics.Auto importing FStar.Reflection -> suppress (coupled ns)
+        // FStar.Reflection.V2.Arith importing FStar.Reflection -> suppress (same ns)
+        if let Some(current) = current_module {
+            let current_ns = umbrella_namespace(current);
+            let import_ns = umbrella_namespace(&open.module_path);
+            if namespaces_are_coupled(current_ns, import_ns) {
+                return None;
+            }
+        }
+
+        Some(Diagnostic {
+            rule: RuleCode::FST008,
+            severity: DiagnosticSeverity::Info,
+            file: file.to_path_buf(),
+            range: Range::new(
+                open.line,
+                open.col,
+                open.line,
+                open.col + open.line_text.trim().len(),
+            ),
+            message: format!(
+                "[FST008-H] Heavy import: `{}` may significantly slow verification. \
+                 Consider selective import or ensure it's necessary.",
+                open.module_path
+            ),
+            fix: None,
+        })
     }
 
     /// Check for broad imports where selective would suffice.
@@ -656,12 +788,16 @@ impl ImportOptimizerRule {
     ///
     /// Only reports truly problematic circular imports:
     /// - Self-import (Error): Module opens itself -- always a bug
-    /// - Child imports parent (Warning): `A.B` opens `A` -- may cause dependency cycle
     ///
-    /// Parent-imports-child (`A` opens `A.B`) is suppressed because it is a
-    /// completely normal pattern in F*. Parent modules routinely open their
-    /// child sub-modules to compose functionality, and F* resolves this via
-    /// interface files (.fsti).
+    /// Child-imports-parent (`A.B` opens `A`) is suppressed because it is a
+    /// completely normal and pervasive pattern in F*. The standard library uses
+    /// this extensively: `FStar.Seq.Permutation` opens `FStar.Seq`,
+    /// `FStar.HyperStack.ST` opens `FStar.HyperStack`, etc. F* resolves
+    /// dependencies via interface files (.fsti), so there is no circular
+    /// dependency risk. Flagging this would produce 17+ false positives on ulib.
+    ///
+    /// Parent-imports-child (`A` opens `A.B`) is similarly suppressed -- parent
+    /// modules routinely open child sub-modules to compose functionality.
     fn check_circular_import(
         &self,
         open: &OpenStatement,
@@ -670,11 +806,11 @@ impl ImportOptimizerRule {
     ) -> Option<Diagnostic> {
         let circular_type = analyze_circular_import(current_module, &open.module_path);
 
-        // Only report self-import and child-imports-parent.
-        // ParentImportsChild is a normal F* pattern, not a code smell.
-        if circular_type == CircularImportType::None
-            || circular_type == CircularImportType::ParentImportsChild
-        {
+        // Only report self-import. Both child-imports-parent and parent-imports-child
+        // are normal F* patterns that do not indicate bugs:
+        // - Child-imports-parent: FStar.Seq.Permutation opens FStar.Seq (pervasive)
+        // - Parent-imports-child: FStar.Seq opens FStar.Seq.Base (aggregation)
+        if circular_type != CircularImportType::SelfImport {
             return None;
         }
 
@@ -699,12 +835,44 @@ impl ImportOptimizerRule {
     /// Detects `open FStar`, `open LowStar`, `open Hacl` etc. which are
     /// namespace prefixes, not real modules. Also flags umbrella modules
     /// that bring too many names into scope.
+    ///
+    /// Suppresses umbrella warnings when the current module is within the
+    /// umbrella's namespace (e.g., `FStar.Tactics.Canon` opening
+    /// `FStar.Tactics.V2` is standard practice within the tactics library).
     fn check_broad_namespace(
         &self,
         open: &OpenStatement,
+        current_module: &Option<String>,
         file: &Path,
     ) -> Option<Diagnostic> {
         if let Some(level) = BROAD_MODULES.get(open.module_path.as_str()) {
+            // For High/Medium (umbrella modules), suppress when the current module
+            // is within the same or a coupled namespace. Examples:
+            //   FStar.Tactics.Canon opening FStar.Tactics.V2 -> suppress (same ns)
+            //   FStar.Tactics.Canon opening FStar.Reflection.V2 -> suppress (coupled)
+            //   FStar.Reflection.V2.Arith opening FStar.Reflection.V2 -> suppress (same ns)
+            //   FStar.IO opening FStar.All -> suppress (FStar.All is standard)
+            //   FStar.List.fst opening FStar.All -> suppress (FStar.All is standard)
+            //
+            // The rationale: within the standard library's tactics/reflection
+            // subsystem, these umbrella opens are the idiomatic and only way to
+            // get the required names in scope. Tactics code necessarily uses
+            // Reflection for term inspection/manipulation. Flagging these produces
+            // 30+ false positives on ulib alone.
+            if *level != BroadnessLevel::Critical {
+                if let Some(current) = current_module {
+                    let umbrella_ns = umbrella_namespace(&open.module_path);
+                    let current_ns = umbrella_namespace(current);
+
+                    if current.starts_with(&format!("{}.", open.module_path))
+                        || namespaces_are_coupled(current_ns, umbrella_ns)
+                        || open.module_path == "FStar.All"
+                    {
+                        return None;
+                    }
+                }
+            }
+
             let suggestion = match *level {
                 BroadnessLevel::Critical => format!(
                     "Use a specific submodule instead (e.g., `open {}.List.Tot` or `open {}.Seq`).",
@@ -747,8 +915,18 @@ impl ImportOptimizerRule {
     /// `include` in F* brings ALL names from the included module into scope
     /// and makes them appear as if defined in the current module. This is
     /// more invasive than `open` and should be used sparingly.
+    ///
+    /// However, `include` is the standard F* mechanism for building aggregate
+    /// modules. For example:
+    /// - `FStar.Seq` includes `FStar.Seq.Base` + `FStar.Seq.Properties`
+    /// - `FStar.List.Tot` includes `FStar.List.Tot.Base` + `FStar.List.Tot.Properties`
+    /// - `FStar.Reflection.V2` includes all reflection sub-modules
+    /// - `FStar.Prelude` includes `Prims`, `FStar.Pervasives`, etc.
+    ///
+    /// These aggregation patterns are suppressed to avoid false positives.
     fn check_include_statements(
         &self,
+        current_module: &Option<String>,
         file: &Path,
         content: &str,
     ) -> Vec<Diagnostic> {
@@ -761,26 +939,44 @@ impl ImportOptimizerRule {
                 let module_path = module_match.as_str();
                 let line_num = line_idx + 1;
 
-                // Check if included module is in broadness database
+                // Suppress aggregation patterns: when a module includes its
+                // own sub-modules or closely related sibling modules.
+                // Examples:
+                //   FStar.Seq includes FStar.Seq.Base (sub-module)
+                //   FStar.List.Tot includes FStar.List.Tot.Base (sub-module)
+                //   FStar.Reflection.V1 includes FStar.Reflection.V1.Derived (sub-module)
+                //   FStar.Reflection.V1 includes FStar.Stubs.Reflection.Types (cross-subsystem)
+                //   FStar.Prelude includes Prims, FStar.Pervasives (bootstrapping)
+                //   FStar.All includes FStar.ST (effect composition)
+                if is_aggregation_include(current_module, module_path) {
+                    continue;
+                }
+
+                // Check if included module is in broadness database (bare namespaces)
                 if let Some(level) = BROAD_MODULES.get(module_path) {
-                    diagnostics.push(Diagnostic {
-                        rule: RuleCode::FST008,
-                        severity: level.severity(),
-                        file: file.to_path_buf(),
-                        range: Range::point(line_num, 1),
-                        message: format!(
-                            "[FST008-I] Broad include: `include {}` is a {} and brings all its \
-                             definitions into the current module's namespace. Use `open` instead, \
-                             or include a more specific submodule.",
-                            module_path,
-                            level.label()
-                        ),
-                        fix: None,
-                    });
+                    // Only flag Critical (bare namespaces like `include FStar`)
+                    if *level == BroadnessLevel::Critical {
+                        diagnostics.push(Diagnostic {
+                            rule: RuleCode::FST008,
+                            severity: level.severity(),
+                            file: file.to_path_buf(),
+                            range: Range::point(line_num, 1),
+                            message: format!(
+                                "[FST008-I] Broad include: `include {}` is a {} and brings all its \
+                                 definitions into the current module's namespace. Use `open` instead, \
+                                 or include a more specific submodule.",
+                                module_path,
+                                level.label()
+                            ),
+                            fix: None,
+                        });
+                    }
+                    // High/Medium umbrella includes are normal aggregation
                 } else if HEAVY_MODULES.contains(module_path) {
+                    // Heavy include in non-aggregation context
                     diagnostics.push(Diagnostic {
                         rule: RuleCode::FST008,
-                        severity: DiagnosticSeverity::Warning,
+                        severity: DiagnosticSeverity::Info,
                         file: file.to_path_buf(),
                         range: Range::point(line_num, 1),
                         message: format!(
@@ -795,7 +991,7 @@ impl ImportOptimizerRule {
                     // General include warning - include is more invasive than open
                     diagnostics.push(Diagnostic {
                         rule: RuleCode::FST008,
-                        severity: DiagnosticSeverity::Info,
+                        severity: DiagnosticSeverity::Hint,
                         file: file.to_path_buf(),
                         range: Range::point(line_num, 1),
                         message: format!(
@@ -875,14 +1071,14 @@ impl Rule for ImportOptimizerRule {
                 .unwrap_or_default();
 
             // Check for overly broad namespace opens (FST008-G)
-            if let Some(diag) = self.check_broad_namespace(open, file) {
+            if let Some(diag) = self.check_broad_namespace(open, &analysis.current_module, file) {
                 diagnostics.push(diag);
                 // Skip other checks for this open -- it's fundamentally wrong
                 continue;
             }
 
             // Check for heavy module imports (always check first)
-            if let Some(diag) = self.check_heavy_modules(open, file) {
+            if let Some(diag) = self.check_heavy_modules(open, &analysis.current_module, file) {
                 diagnostics.push(diag);
             }
 
@@ -910,7 +1106,7 @@ impl Rule for ImportOptimizerRule {
         }
 
         // Check include statements (FST008-I)
-        diagnostics.extend(self.check_include_statements(file, content));
+        diagnostics.extend(self.check_include_statements(&analysis.current_module, file, content));
 
         diagnostics
     }
@@ -1019,8 +1215,12 @@ let helper x = x + 1
     }
 
     #[test]
-    fn test_parent_child_circular() {
-        // Module opening its parent
+    fn test_parent_child_circular_suppressed() {
+        // Child importing parent is a completely normal F* pattern:
+        // FStar.Seq.Permutation opens FStar.Seq, FStar.HyperStack.ST opens
+        // FStar.HyperStack, etc. F* resolves dependencies via .fsti files,
+        // so there is no circular dependency risk. Suppressed to avoid 17+
+        // false positives on ulib.
         let content = r#"module Test.Sub.Child
 
 open Test.Sub
@@ -1032,13 +1232,8 @@ let x = 1
 
         let circular = diagnostics.iter().find(|d| d.message.contains("FST008-D"));
         assert!(
-            circular.is_some(),
-            "Should detect parent-child circular dependency"
-        );
-        // Should be a warning for child importing parent
-        assert!(
-            circular.unwrap().message.contains("Parent import"),
-            "Should identify as parent import"
+            circular.is_none(),
+            "Child importing parent should NOT trigger FST008-D (normal F* pattern)"
         );
     }
 
@@ -1089,8 +1284,9 @@ let x = 1
     }
 
     #[test]
-    fn test_deep_parent_import() {
-        // Deep child module opening parent
+    fn test_deep_parent_import_suppressed() {
+        // Deep child importing parent is also a normal F* pattern and should
+        // not trigger FST008-D.
         let content = r#"module A.B.C.D
 
 open A.B
@@ -1101,10 +1297,9 @@ let x = 1
         let diagnostics = rule.check(&PathBuf::from("test.fst"), content);
 
         let circular = diagnostics.iter().find(|d| d.message.contains("FST008-D"));
-        assert!(circular.is_some(), "Should detect deep parent import");
         assert!(
-            circular.unwrap().message.contains("Parent import"),
-            "Should identify as parent import"
+            circular.is_none(),
+            "Deep child importing parent should NOT trigger FST008-D (normal F* pattern)"
         );
     }
 
@@ -1870,8 +2065,10 @@ let x = length [1; 2; 3]
     }
 
     #[test]
-    fn test_open_fstar_all_is_high_broadness() {
-        // FStar.All is a real module but an umbrella re-exporter -- High/Warning
+    fn test_open_fstar_all_suppressed() {
+        // FStar.All is a standard F* effect combinator module used pervasively
+        // in FStar.List, FStar.Option, FStar.IO, etc. It is always suppressed
+        // because it provides the `All` effect which many modules need.
         let content = r#"module Test
 
 open FStar.All
@@ -1882,11 +2079,32 @@ let x = 1
         let diagnostics = rule.check(&PathBuf::from("test.fst"), content);
 
         let broad = diagnostics.iter().find(|d| d.message.contains("FST008-G"));
-        assert!(broad.is_some(), "FStar.All should trigger FST008-G");
+        assert!(
+            broad.is_none(),
+            "FStar.All should be suppressed (standard effect combinator)"
+        );
+    }
+
+    #[test]
+    fn test_open_umbrella_from_outside_is_info() {
+        // Opening an umbrella module like FStar.Tactics.V2 from outside the
+        // Tactics namespace should produce Info (not Warning), since it's
+        // a style preference, not a correctness issue.
+        let content = r#"module MyProject.Utils
+
+open FStar.Tactics.V2
+
+let x = 1
+"#;
+        let rule = ImportOptimizerRule::new();
+        let diagnostics = rule.check(&PathBuf::from("test.fst"), content);
+
+        let broad = diagnostics.iter().find(|d| d.message.contains("FST008-G"));
+        assert!(broad.is_some(), "Umbrella module should trigger FST008-G from outside namespace");
         assert_eq!(
             broad.unwrap().severity,
-            DiagnosticSeverity::Warning,
-            "Umbrella module should be Warning severity"
+            DiagnosticSeverity::Info,
+            "Umbrella module should be Info severity (style preference, not correctness)"
         );
     }
 
@@ -1919,7 +2137,9 @@ let x = 1
     // ========================================================================
 
     #[test]
-    fn test_include_statement_info() {
+    fn test_include_statement_hint() {
+        // General include statements are demoted to Hint since include is
+        // a common and valid F* pattern for module aggregation.
         let content = r#"module Test
 
 include Spec.Hash.Definitions
@@ -1936,8 +2156,8 @@ let x = 1
         );
         assert_eq!(
             include_diag.unwrap().severity,
-            DiagnosticSeverity::Info,
-            "Normal include should be Info severity"
+            DiagnosticSeverity::Hint,
+            "Normal include should be Hint severity"
         );
     }
 
@@ -2007,8 +2227,8 @@ let x = length [1; 2; 3]
     #[test]
     fn test_broadness_level_properties() {
         assert_eq!(BroadnessLevel::Critical.severity(), DiagnosticSeverity::Error);
-        assert_eq!(BroadnessLevel::High.severity(), DiagnosticSeverity::Warning);
-        assert_eq!(BroadnessLevel::Medium.severity(), DiagnosticSeverity::Info);
+        assert_eq!(BroadnessLevel::High.severity(), DiagnosticSeverity::Info);
+        assert_eq!(BroadnessLevel::Medium.severity(), DiagnosticSeverity::Hint);
 
         assert!(BroadnessLevel::Critical.label().contains("namespace"));
         assert!(BroadnessLevel::High.label().contains("umbrella"));

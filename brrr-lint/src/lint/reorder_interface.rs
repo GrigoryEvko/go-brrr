@@ -291,29 +291,52 @@ fn extract_qualifiers(block: &DeclarationBlock) -> Vec<String> {
 
 /// Count implicit arguments in a val signature or let definition.
 ///
-/// In F* val signatures: `val foo : #t:type -> #n:nat -> ...`
-/// In F* let definitions: `let foo #t #n x = ...`
+/// F* implicit arguments are marked with `#`:
+///   val-style:  `val foo : #t:Type -> #n:nat -> ...`
+///   val-binder: `val foo (#t: Type) (#n #m: nat) : ...`  (grouped binders)
+///   let-style:  `let foo #t #n x = ...`
+///   let-binder: `let foo (#t: Type) (#n: nat) x = ...`
 ///
-/// Counts occurrences of `#` that precede an identifier (implicit parameter).
+/// We search the ENTIRE declaration text for `#<ident>` patterns, skipping
+/// the `val`/`let` keyword and the declaration name itself. This handles
+/// grouped binders `(#n #m: pos)` where `#` appears before the first colon.
 fn count_implicit_args(block: &DeclarationBlock) -> usize {
     lazy_static! {
-        // Match implicit args in val signatures: #name:type or (#name:type)
-        static ref VAL_IMPLICIT: Regex = Regex::new(r"#[a-zA-Z_][\w']*\s*:").unwrap_or_else(|e| panic!("regex: {e}"));
-        // Match implicit args in let definitions: #name (without colon)
-        static ref LET_IMPLICIT: Regex = Regex::new(r"#[a-zA-Z_][\w']*(?:\s|$)").unwrap_or_else(|e| panic!("regex: {e}"));
+        // Match `#name` -- an implicit parameter marker. The `#` must be
+        // followed by an F* identifier (letter/underscore then word chars
+        // and primes). We require a trailing context of colon, whitespace,
+        // `)`, or end-of-string to avoid matching inside comments/strings
+        // that happen to contain `#`.
+        static ref IMPLICIT_ARG: Regex = Regex::new(r"#[a-zA-Z_][\w']*(?:\s*:|[\s)$])").unwrap_or_else(|e| panic!("regex: {e}"));
     }
 
     let text = block.lines.join(" ");
 
     match block.block_type {
         BlockType::Val => {
-            // In val signatures, look for #name: patterns after the colon
-            if let Some(colon_pos) = text.find(':') {
-                let sig = &text[colon_pos..];
-                VAL_IMPLICIT.find_iter(sig).count()
+            // Search the ENTIRE text after `val <name>` for `#ident` patterns.
+            // F* val declarations can use two styles:
+            //   val foo : #t:Type -> ...          (traditional)
+            //   val foo (#n #m: pos) (a: t) : ... (binder-style)
+            // In binder-style, `#` appears BEFORE the first colon, inside
+            // parenthesized groups. The old approach of searching after the
+            // first colon missed these entirely.
+            //
+            // We skip past `val <name>` to avoid matching `#` in the name.
+            let trimmed = text.trim();
+            // Skip "val" keyword
+            let after_val = if let Some(rest) = trimmed.strip_prefix("val") {
+                rest.trim_start()
             } else {
-                0
-            }
+                return 0;
+            };
+            // Skip the declaration name (first identifier)
+            let after_name = if let Some(pos) = after_val.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '\'') {
+                &after_val[pos..]
+            } else {
+                return 0;
+            };
+            IMPLICIT_ARG.find_iter(after_name).count()
         }
         BlockType::Let | BlockType::UnfoldLet | BlockType::InlineLet => {
             // In let definitions, count # before = sign
@@ -330,7 +353,7 @@ fn count_implicit_args(block: &DeclarationBlock) -> usize {
                     })
                 {
                     let param_section = &trimmed[space_after_name..];
-                    LET_IMPLICIT.find_iter(param_section).count()
+                    IMPLICIT_ARG.find_iter(param_section).count()
                 } else {
                     0
                 }
@@ -1208,18 +1231,22 @@ impl Rule for ReorderInterfaceRule {
             });
         }
 
-        // Report orphan declarations (without typo matches)
+        // Report orphan declarations (without typo matches).
+        // Demoted to Info: in F*, val declarations can be satisfied by class
+        // instance methods, operator overloads, or compiler-internal mechanisms
+        // that the regex parser cannot detect. The F* compiler will reject truly
+        // missing implementations, so this is informational.
         for (name, typo_match, line) in &consistency.orphan_declarations {
             if typo_match.is_none() {
                 let message = format!(
                     "Orphan declaration: `{}` is declared in interface but has no \
-                     implementation in .fst. Is this intentional (assume val/type) \
-                     or is the implementation missing?",
+                     implementation in .fst. This may be satisfied by a class instance, \
+                     operator overload, or compiler mechanism.",
                     name
                 );
                 diagnostics.push(Diagnostic {
                     rule: RuleCode::FST002,
-                    severity: DiagnosticSeverity::Warning,
+                    severity: DiagnosticSeverity::Info,
                     file: fsti_file.to_path_buf(),
                     range: Range::point(*line, 1),
                     message,
@@ -1286,8 +1313,24 @@ impl Rule for ReorderInterfaceRule {
                     } else {
                         fst_qualifiers.join(", ")
                     };
+                    // In F*, extraction qualifiers on a val in the .fsti are
+                    // inherited by the let in the .fst. The implementation does
+                    // NOT need to repeat inline_for_extraction/noextract -- the
+                    // compiler picks them up from the interface. So when the
+                    // interface has qualifiers but the implementation has none,
+                    // this is standard practice, not a defect.
+                    let severity = if fst_qualifiers.is_empty() && !fsti_qualifiers.is_empty() {
+                        // Interface has qualifiers, impl has none -> inherited (normal)
+                        DiagnosticSeverity::Info
+                    } else if fsti_qualifiers.is_empty() && !fst_qualifiers.is_empty() {
+                        // Impl has qualifiers not in interface -> suspicious
+                        DiagnosticSeverity::Warning
+                    } else {
+                        // Both have qualifiers but they differ -> genuine mismatch
+                        DiagnosticSeverity::Warning
+                    };
                     (
-                        DiagnosticSeverity::Warning,
+                        severity,
                         format!(
                             "Qualifier mismatch for `{}`: .fsti has [{}] but .fst has [{}]. \
                              Extraction qualifiers (inline_for_extraction, noextract) should match.",
@@ -1299,19 +1342,31 @@ impl Rule for ReorderInterfaceRule {
                 InterfaceMismatchKind::ImplicitArgCountMismatch {
                     fsti_count,
                     fst_count,
-                } => (
-                    DiagnosticSeverity::Warning,
-                    format!(
-                        "Implicit argument count mismatch for `{}`: \
-                         .fsti val has {} implicit arg{} but .fst let has {}. \
-                         Mismatched implicits can cause confusing type errors.",
-                        mismatch.name,
-                        fsti_count,
-                        if *fsti_count == 1 { "" } else { "s" },
-                        fst_count
-                    ),
-                    &fsti_file.to_path_buf(),
-                ),
+                } => {
+                    // In F*, it is completely normal for:
+                    // - Implementation to have MORE implicits than interface
+                    //   (interface abstracts them away, standard practice)
+                    // - Implementation to have FEWER explicit implicits than interface
+                    //   (implicits can be inferred from val signature, e.g.
+                    //    val f : #a:Type -> ... / let f x = ... without repeating #a)
+                    //
+                    // The F* type checker enforces consistency at compile time,
+                    // so regex-based counting is inherently imprecise. Demote to Info
+                    // since this is informational, not a defect.
+                    (
+                        DiagnosticSeverity::Info,
+                        format!(
+                            "Implicit argument count differs for `{}`: \
+                             .fsti val has {} implicit arg{} but .fst let has {} \
+                             (F* infers/abstracts implicits across interface boundaries).",
+                            mismatch.name,
+                            fsti_count,
+                            if *fsti_count == 1 { "" } else { "s" },
+                            fst_count
+                        ),
+                        &fsti_file.to_path_buf(),
+                    )
+                }
                 InterfaceMismatchKind::FriendWithoutAbstractTypes { friend_module } => (
                     DiagnosticSeverity::Info,
                     format!(
@@ -1353,18 +1408,17 @@ impl Rule for ReorderInterfaceRule {
                     .collect();
 
                 if !critical_warnings.is_empty() {
-                    // Report the issue but WITHOUT a fix - it's too dangerous.
-                    // Demoted to Warning: this is an autofix limitation (e.g. module
-                    // abbreviations or friend declarations), NOT an actual code defect.
-                    // The underlying F* code compiles correctly.
+                    // Forward reference detection is heuristic. F* handles
+                    // module-level scoping and mutual recursion that our
+                    // block-level analysis cannot model. When autofix is also
+                    // blocked, this is purely informational.
                     diagnostics.push(Diagnostic {
                         rule: RuleCode::FST002,
-                        severity: DiagnosticSeverity::Warning,
+                        severity: DiagnosticSeverity::Info,
                         file: fsti_file.to_path_buf(),
                         range: Range::point(1, 1),
                         message: format!(
-                            "Interface has forward reference issues, but AUTOFIX IS BLOCKED due to {} critical validation error(s). \
-                             Manual intervention required.",
+                            "Interface may have forward reference issues (autofix blocked due to {} validation error(s)).",
                             critical_warnings.len()
                         ),
                         fix: None, // NO FIX - validation failed
@@ -1437,29 +1491,28 @@ impl Rule for ReorderInterfaceRule {
 
                 let first_line = movements.first().map(|(_, old, _)| *old + 1).unwrap_or(1);
 
-                // Demoted to Warning: the linter's forward-reference analysis
-                // is heuristic and may flag patterns that F* actually accepts
-                // (e.g. mutual recursion handled by the checker, or declarations
-                // resolved through module-level scoping). The suggested fix is
-                // offered as a recommendation, not a confirmed error.
+                // Forward-reference analysis is heuristic. F* handles
+                // module-level scoping, mutual recursion, and other patterns
+                // that our block-level analysis may flag incorrectly. The
+                // suggested fix is offered as a recommendation via Info.
                 diagnostics.push(Diagnostic {
                     rule: RuleCode::FST002,
-                    severity: DiagnosticSeverity::Warning,
+                    severity: DiagnosticSeverity::Info,
                     file: fsti_file.to_path_buf(),
                     range: Range::point(first_line, 1),
                     message,
                     fix: Some(fix),
                 });
 
-                // Add warning if many declarations are moving
+                // Add info note if many declarations are moving
                 if movements.len() > 10 {
                     diagnostics.push(Diagnostic {
                         rule: RuleCode::FST002,
-                        severity: DiagnosticSeverity::Warning,
+                        severity: DiagnosticSeverity::Info,
                         file: fsti_file.to_path_buf(),
                         range: Range::point(1, 1),
                         message: format!(
-                            "WARNING: {} declarations will move. Review the changes carefully before applying.",
+                            "Note: {} declarations will move. Review the changes carefully before applying.",
                             movements.len()
                         ),
                         fix: None,
@@ -1501,12 +1554,12 @@ impl Rule for ReorderInterfaceRule {
                 diagnostics
             }
             Err(errors) => {
-                // Demoted to Warning: reorder algorithm hit a limitation,
-                // not an actual defect in the source file.
+                // Reorder algorithm hit a limitation -- this is a tool
+                // limitation, not a defect in the source file.
                 for err in errors {
                     diagnostics.push(Diagnostic {
                         rule: RuleCode::FST002,
-                        severity: DiagnosticSeverity::Warning,
+                        severity: DiagnosticSeverity::Info,
                         file: fsti_file.to_path_buf(),
                         range: Range::point(1, 1),
                         message: format!("Cannot reorder: {}", err),
@@ -3193,6 +3246,43 @@ let translate p dx dy = { x = p.x + dx; y = p.y + dy }
             1,
         );
         assert_eq!(count_implicit_args(&block), 2);
+    }
+
+    #[test]
+    fn test_count_implicit_args_val_grouped_binder() {
+        // F* grouped binder syntax: val bv_uext (#n #m: pos) (a: bv_t n) : Tot ...
+        // Both #n and #m are implicit arguments in a single parenthesized group.
+        let block = DeclarationBlock::new(
+            BlockType::Val,
+            vec!["bv_uext".to_string()],
+            vec!["val bv_uext (#n #m: pos) (a: bv_t n) : Tot (normalize (bv_t (m + n)))\n".to_string()],
+            1,
+        );
+        assert_eq!(count_implicit_args(&block), 2, "grouped binder (#n #m: pos) has 2 implicits");
+    }
+
+    #[test]
+    fn test_count_implicit_args_val_binder_style() {
+        // val with binder-style implicits (no colon-separated signature)
+        let block = DeclarationBlock::new(
+            BlockType::Val,
+            vec!["process".to_string()],
+            vec!["val process (#t: Type) (#n: nat) (xs: list t) : nat\n".to_string()],
+            1,
+        );
+        assert_eq!(count_implicit_args(&block), 2, "binder-style (#t: Type) (#n: nat) has 2 implicits");
+    }
+
+    #[test]
+    fn test_count_implicit_args_val_mixed_binder_and_arrow() {
+        // val with both binder-style and arrow-style implicits
+        let block = DeclarationBlock::new(
+            BlockType::Val,
+            vec!["calc_step".to_string()],
+            vec!["val calc_step (#a #b: Type) : #rel:(a -> a -> Type) -> c:a -> unit\n".to_string()],
+            1,
+        );
+        assert_eq!(count_implicit_args(&block), 3, "2 grouped + 1 arrow-style = 3 implicits");
     }
 
     #[test]

@@ -124,6 +124,15 @@ lazy_static! {
     static ref LEMMA_VAL_PATTERN: Regex = Regex::new(
         r"(?m)(?::\s*Lemma\b|(?:->|:)\s*Lemma\b|:\s*squash\b|(?:->|:)\s*squash\b)"
     ).unwrap_or_else(|e| panic!("regex: {e}"));
+
+    /// Pattern to detect refinement types: `{x | ...}` or `{x : ... | ...}`
+    static ref REFINEMENT_PATTERN: Regex = Regex::new(r"\{[^}]*\|").unwrap_or_else(|e| panic!("regex: {e}"));
+
+    /// Pattern to count explicit named parameters: `(name: ...)` or `(name : ...)`
+    static ref NAMED_PARAM_PATTERN: Regex = Regex::new(r"\(\s*#?\w+\s*:").unwrap_or_else(|e| panic!("regex: {e}"));
+
+    /// Pattern to detect regular (non-doc) F* comments: `(* ... *)` but NOT `(** ... *)`
+    static ref REGULAR_COMMENT: Regex = Regex::new(r"^\s*\(\*(?!\*)").unwrap_or_else(|e| panic!("regex: {e}"));
 }
 
 /// Extract parameter names from an F* function signature.
@@ -772,6 +781,80 @@ impl DocCheckerRule {
     fn is_lemma_val(block_text: &str) -> bool {
         LEMMA_VAL_PATTERN.is_match(block_text)
     }
+
+    /// Check if a val signature is "complex enough" to be self-documenting.
+    ///
+    /// In F*, a type signature with multiple arrows, refinement types, named
+    /// parameters, or effect annotations provides comprehensive documentation
+    /// of what the function does. For example:
+    ///   `val uint8_to_uint32: a:U8.t -> Tot (b:U32.t{U32.v b = U8.v a})`
+    /// is completely self-documenting via the types and refinements.
+    ///
+    /// Returns true if the signature has enough structure to document itself:
+    /// - 2+ function arrows (`->`)
+    /// - Any refinement types (`{...| ...}`)
+    /// - 2+ named parameters (`(name: type)`)
+    /// - Any effect annotation (requires/ensures)
+    fn has_complex_signature(block_text: &str) -> bool {
+        let arrow_count = block_text.matches("->").count();
+        let has_refinement = REFINEMENT_PATTERN.is_match(block_text);
+        let named_params = NAMED_PARAM_PATTERN.find_iter(block_text).count();
+        let has_contract = REQUIRES_CLAUSE.is_match(block_text)
+            || ENSURES_CLAUSE.is_match(block_text);
+
+        // Any of these makes the signature self-documenting
+        arrow_count >= 2 || has_refinement || named_params >= 2 || has_contract
+    }
+
+    /// Check if there's a regular (non-doc) comment within a few lines before a block.
+    ///
+    /// In F*'s ulib, many declarations use regular comments `(* ... *)` instead of
+    /// doc comments `(** ... *)`. These are functionally equivalent documentation.
+    /// For example, FStar.Map.fsti uses:
+    ///   `(* sel m k : Look up key 'k' in map 'm' *)`
+    ///   `val sel: ...`
+    ///
+    /// Returns true if a regular comment exists within `max_distance` lines
+    /// before the block start (skipping blank lines).
+    fn has_nearby_regular_comment(
+        source_lines: &[&str],
+        block_start_line: usize,
+        max_distance: usize,
+    ) -> bool {
+        if block_start_line < 2 {
+            return false;
+        }
+
+        // Scan up to max_distance lines before the block (0-indexed from block_start_line-2)
+        let start_idx = block_start_line.saturating_sub(2);
+        let stop_idx = start_idx.saturating_sub(max_distance + 2);
+
+        let mut idx = start_idx;
+        let mut non_blank_checked = 0;
+        while idx >= stop_idx.max(0) && non_blank_checked < max_distance {
+            if let Some(line) = source_lines.get(idx) {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    // Skip blank lines without counting them
+                } else if REGULAR_COMMENT.is_match(trimmed) || trimmed.ends_with("*)") {
+                    return true;
+                } else if DOC_BLOCK.is_match(trimmed) || DOC_TRIPLE.is_match(trimmed) {
+                    // This is a doc comment -- the existing doc detection handles it
+                    return false;
+                } else {
+                    // Hit a non-comment line (e.g., another declaration)
+                    return false;
+                }
+                non_blank_checked += 1;
+            }
+            if idx == 0 {
+                break;
+            }
+            idx -= 1;
+        }
+
+        false
+    }
 }
 
 impl Default for DocCheckerRule {
@@ -806,7 +889,9 @@ impl Rule for DocCheckerRule {
 
         let is_fsti = file.extension().is_some_and(|ext| ext == "fsti");
 
-        // Check module-level documentation for .fsti files
+        // Check module-level documentation for .fsti files.
+        // Demoted to Hint: nice-to-have, not a necessity. Most ulib .fsti files
+        // lack module-level doc comments and the module name + contents are sufficient.
         if is_fsti && !has_module_doc_comment(content) {
             let module_name = Self::extract_module_name(content)
                 .unwrap_or_else(|| "this module".to_string());
@@ -828,7 +913,7 @@ impl Rule for DocCheckerRule {
 
             diagnostics.push(Diagnostic {
                 rule: RuleCode::FST013,
-                severity: DiagnosticSeverity::Info,
+                severity: DiagnosticSeverity::Hint,
                 file: file.to_path_buf(),
                 range: Range::point(1, 1),
                 message: format!(
@@ -892,16 +977,42 @@ impl Rule for DocCheckerRule {
                         _ => "declaration",
                     };
 
-                    // Determine severity: always Info for missing docs.
+                    // Determine severity using a graduated model based on how
+                    // self-documenting the declaration already is.
                     //
-                    // In F*, formal specifications (requires/ensures) and rich type
-                    // signatures serve as machine-checked documentation. Escalating to
-                    // Warning for these cases is counterproductive -- the formal spec
-                    // IS the documentation, and it's more precise than prose.
+                    // In F*, type signatures serve as machine-checked documentation:
+                    // - Refinement types specify exact constraints
+                    // - requires/ensures clauses are formal contracts
+                    // - Named parameters with types explain inputs
+                    // - Effect annotations describe side effects
                     //
-                    // Warning severity is reserved for doc QUALITY issues on existing
-                    // comments, not for missing docs on self-documenting declarations.
-                    let severity = DiagnosticSeverity::Info;
+                    // Severity rules:
+                    // 1. .fst files (implementation): always Hint (docs belong in .fsti)
+                    // 2. Nearby regular comment `(* ... *)`: Hint (already documented informally)
+                    // 3. Complex signature (2+ arrows, refinements, named params): Hint
+                    // 4. Contracts (requires/ensures): Hint (formal spec IS documentation)
+                    // 5. Only truly bare, simple vals in .fsti: Info
+
+                    let has_nearby_comment = Self::has_nearby_regular_comment(
+                        &source_lines, block.start_line, 3,
+                    );
+                    let has_complex_sig = block.block_type == BlockType::Val
+                        && Self::has_complex_signature(&block_text);
+                    let has_contract = Self::has_complex_contract(&block_text);
+
+                    let severity = if !is_fsti {
+                        // .fst implementation files: docs are nice-to-have
+                        DiagnosticSeverity::Hint
+                    } else if has_nearby_comment {
+                        // Already has informal documentation via regular (* ... *)
+                        DiagnosticSeverity::Hint
+                    } else if has_complex_sig || has_contract {
+                        // Type signature is self-documenting
+                        DiagnosticSeverity::Hint
+                    } else {
+                        // Truly undocumented public declaration in .fsti
+                        DiagnosticSeverity::Info
+                    };
 
                     // Build message with extra context for complex declarations
                     let extra = if block.block_type == BlockType::Type {
@@ -918,9 +1029,7 @@ impl Rule for DocCheckerRule {
                             }
                             _ => String::new(),
                         }
-                    } else if Self::has_complex_contract(&block_text) {
-                        // Non-Lemma vals with contracts (e.g., ST, Stack effects)
-                        // still get a note, but at Info severity since the spec helps.
+                    } else if has_contract {
                         " This function has requires/ensures contract.".to_string()
                     } else {
                         String::new()

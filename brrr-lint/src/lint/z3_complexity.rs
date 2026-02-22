@@ -42,8 +42,13 @@ lazy_static! {
     /// Decreases clause (can appear as annotation or inline)
     static ref DECREASES_CLAUSE: Regex = Regex::new(r"\(decreases\s|\bdecreases\s*\{").unwrap_or_else(|e| panic!("regex: {e}"));
 
-    /// High z3rlimit pragma
+    /// High z3rlimit pragma: #set-options (global/file-wide)
     static ref Z3RLIMIT: Regex = Regex::new(r#"#set-options\s*"[^"]*z3rlimit\s+(\d+)"#).unwrap_or_else(|e| panic!("regex: {e}"));
+    /// Scoped z3rlimit: #push-options (deliberately scoped, lower severity)
+    static ref Z3RLIMIT_PUSH: Regex = Regex::new(r#"#push-options\s*"[^"]*z3rlimit\s+(\d+)"#).unwrap_or_else(|e| panic!("regex: {e}"));
+    /// Reset z3rlimit: #reset-options (common in legacy code)
+    static ref Z3RLIMIT_RESET: Regex = Regex::new(r#"#reset-options\s*"[^"]*z3rlimit\s+(\d+)"#).unwrap_or_else(|e| panic!("regex: {e}"));
+    /// Inline z3rlimit (fallback for any other context)
     static ref Z3RLIMIT_INLINE: Regex = Regex::new(r"z3rlimit\s+(\d+)").unwrap_or_else(|e| panic!("regex: {e}"));
 
     /// Match expression start - captures the discriminant (may be multi-word like `inspect t`)
@@ -78,12 +83,13 @@ lazy_static! {
 /// FST007: Z3 Complexity Analyzer
 ///
 /// Configurable thresholds for detecting Z3 performance anti-patterns.
+/// Tuned for production F* codebases: math libraries, ulib, HACL*, etc.
 pub struct Z3ComplexityRule {
-    /// Maximum allowed quantifier nesting depth before warning
+    /// Maximum allowed quantifier nesting depth before warning (default: 6)
     pub max_quantifier_depth: usize,
-    /// Maximum match branches before suggesting split
+    /// Maximum match branches before suggesting split (default: 15)
     pub max_match_branches: usize,
-    /// z3rlimit threshold above which to warn
+    /// z3rlimit threshold above which to warn (default: 300)
     pub max_z3rlimit: u32,
     /// Number of lines to look ahead for SMTPat after quantifier
     pub smtpat_lookahead_lines: usize,
@@ -92,9 +98,9 @@ pub struct Z3ComplexityRule {
 impl Z3ComplexityRule {
     pub fn new() -> Self {
         Self {
-            max_quantifier_depth: 3,
-            max_match_branches: 10,
-            max_z3rlimit: 100,
+            max_quantifier_depth: 6,
+            max_match_branches: 15,
+            max_z3rlimit: 300,
             smtpat_lookahead_lines: 5,
         }
     }
@@ -214,11 +220,12 @@ impl Z3ComplexityRule {
 
     /// Check if we're in a specification context where quantifiers don't need triggers.
     ///
-    /// This includes val declarations, requires clauses, and ensures clauses
-    /// that are not part of lemma postconditions requiring automatic instantiation.
+    /// This includes val declarations, requires clauses, ensures clauses,
+    /// type definitions, and non-Lemma function definitions where quantifiers
+    /// are used purely for specification, not for Z3 instantiation.
     fn is_specification_context(&self, lines: &[&str], line_idx: usize) -> bool {
-        // Look back for context markers
-        let lookback = 10.min(line_idx);
+        // Look back for context markers (expanded range)
+        let lookback = 15.min(line_idx);
         for i in (line_idx.saturating_sub(lookback)..=line_idx).rev() {
             let line = lines[i].trim();
 
@@ -227,14 +234,26 @@ impl Z3ComplexityRule {
                 return true;
             }
 
+            // type definitions use quantifiers for specification
+            if line.starts_with("type ") || line.starts_with("noeq type ") {
+                return true;
+            }
+
             // If we hit a let/let rec, check if it's a Lemma
-            if line.starts_with("let ") {
-                // Continue checking - Lemmas need triggers, other lets don't
+            if line.starts_with("let ") || line.starts_with("and ") {
+                // Lemmas need triggers; other lets don't
                 return !line.contains("Lemma");
             }
 
-            // requires clauses are specification
-            if line.starts_with("(requires") || line.contains("requires ") {
+            // requires/ensures clauses are specification
+            if line.starts_with("(requires") || line.contains("requires ")
+               || line.starts_with("(ensures") || line.contains("ensures ")
+            {
+                return true;
+            }
+
+            // assume/unfold_let_value and similar pragmas
+            if line.starts_with("assume ") {
                 return true;
             }
         }
@@ -246,15 +265,33 @@ impl Z3ComplexityRule {
     ///
     /// Multiplication of two variables (not constants) creates non-linear
     /// arithmetic constraints that Z3 struggles with.
+    ///
+    /// Demoted to Hint: NLA is ubiquitous in math/verification libraries
+    /// (FStar.Int, FStar.Math.Lemmas, HACL*, etc.). Regex-based detection
+    /// cannot distinguish problematic NLA from intentional specifications.
     fn check_nonlinear_arithmetic(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
+        let mut in_block_comment = false;
 
         for (line_idx, line) in content.lines().enumerate() {
             let line_num = line_idx + 1;
-
-            // Skip comment lines
             let trimmed = line.trim();
-            if trimmed.starts_with("(*") || trimmed.starts_with("//") {
+
+            // Track multiline block comments (* ... *)
+            if in_block_comment {
+                if trimmed.contains("*)") {
+                    in_block_comment = false;
+                }
+                continue;
+            }
+            if trimmed.starts_with("(*") {
+                if !trimmed.contains("*)") {
+                    in_block_comment = true;
+                }
+                continue;
+            }
+            // Skip single-line comments
+            if trimmed.starts_with("//") {
                 continue;
             }
 
@@ -272,28 +309,24 @@ impl Z3ComplexityRule {
                     continue;
                 }
 
-                // All non-linear arithmetic is Info level. Regex-based detection
-                // cannot determine whether NLA is problematic in context (e.g., math
-                // libraries, lemma specifications, or code with proper SMT hints).
-                // Emitting Warning for every `a * b` is far too noisy on real codebases.
-                let var1_safe = SAFE_VARS.contains(&var1);
-                let var2_safe = SAFE_VARS.contains(&var2);
-                let detail = if var1_safe && var2_safe {
-                    format!(
-                        "Non-linear arithmetic `{} * {}` detected. While common for indexing, \
-                         this can cause Z3 difficulty if verification times out.",
-                        var1, var2
-                    )
-                } else {
-                    format!(
-                        "Non-linear arithmetic `{} * {}` may cause Z3 difficulty. \
-                         Consider using linear approximations or lemmas if verification times out.",
-                        var1, var2
-                    )
-                };
+                // Skip if the `*` appears inside a comment on this line
+                // (handles inline comments like `// a * b`)
+                if let Some(comment_start) = line.find("//") {
+                    if let Some(m) = caps.get(0) {
+                        if m.start() >= comment_start {
+                            continue;
+                        }
+                    }
+                }
+
+                let detail = format!(
+                    "Non-linear arithmetic `{} * {}` may cause Z3 difficulty. \
+                     Consider using linear approximations or lemmas if verification times out.",
+                    var1, var2
+                );
                 diagnostics.push(Diagnostic {
                     rule: RuleCode::FST007,
-                    severity: DiagnosticSeverity::Info,
+                    severity: DiagnosticSeverity::Hint,
                     file: file.to_path_buf(),
                     range: Range::point(line_num, 1),
                     message: detail,
@@ -755,11 +788,20 @@ impl Z3ComplexityRule {
                     .iter()
                     .any(|ctx| Self::discriminants_overlap(&ctx.discriminant, &discriminant));
 
-                // Determine if we should warn and at what severity
-                let should_warn = if same_discriminant_matched {
-                    // Matching same variable at multiple levels is suspicious
+                // Determine if we should warn and at what severity.
+                //
+                // Depth 2 and 3 are very common in F* (e.g., nested option/result
+                // matching, tactic implementations). Only depth 4+ is concerning.
+                //
+                // Same-discriminant detection has high FP rate due to multi-word
+                // discriminants (e.g., `find_path edges i root []` extracts `[]`
+                // as the base, matching unrelated calls). Demoted to Info.
+                let should_warn = if same_discriminant_matched && depth >= 2 {
+                    // Matching same variable at multiple levels -- Info only
+                    // because regex-based extraction of the "base variable" from
+                    // multi-word discriminants is inherently unreliable.
                     Some((
-                        DiagnosticSeverity::Warning,
+                        DiagnosticSeverity::Hint,
                         format!(
                             "Nested match on potentially same discriminant '{}' (depth {}). \
                              Matching the same expression at multiple levels may indicate \
@@ -767,8 +809,8 @@ impl Z3ComplexityRule {
                             discriminant, depth
                         ),
                     ))
-                } else if depth >= 3 {
-                    // Deep nesting (3+) is always concerning
+                } else if depth >= 4 {
+                    // Deep nesting (4+) is genuinely concerning
                     Some((
                         DiagnosticSeverity::Info,
                         format!(
@@ -779,7 +821,7 @@ impl Z3ComplexityRule {
                         ),
                     ))
                 } else {
-                    // Depth 2 with different discriminants is common and fine - NO WARNING
+                    // Depth 2-3 with different discriminants is common and fine
                     None
                 };
 
@@ -902,7 +944,7 @@ impl Z3ComplexityRule {
 
                     diagnostics.push(Diagnostic {
                         rule: RuleCode::FST007,
-                        severity: DiagnosticSeverity::Info,
+                        severity: DiagnosticSeverity::Hint,
                         file: file.to_path_buf(),
                         range: Range::point(line_num, 1),
                         message: format!(
@@ -1015,7 +1057,7 @@ impl Z3ComplexityRule {
                 if has_quantifier {
                     diagnostics.push(Diagnostic {
                         rule: RuleCode::FST007,
-                        severity: DiagnosticSeverity::Info,
+                        severity: DiagnosticSeverity::Hint,
                         file: file.to_path_buf(),
                         range: Range::point(line_num, 1),
                         message: "assert with quantifier may cause Z3 difficulty. \
@@ -1032,7 +1074,7 @@ impl Z3ComplexityRule {
                     if QUANTIFIER_KEYWORD.is_match(&full_assert) {
                         diagnostics.push(Diagnostic {
                             rule: RuleCode::FST007,
-                            severity: DiagnosticSeverity::Info,
+                            severity: DiagnosticSeverity::Hint,
                             file: file.to_path_buf(),
                             range: Range::point(line_num, 1),
                             message: "assert with quantifier may cause Z3 difficulty. \
@@ -1051,58 +1093,72 @@ impl Z3ComplexityRule {
     /// Check for high z3rlimit settings.
     ///
     /// High rlimits are often a symptom of proof complexity issues rather
-    /// than a proper solution.
+    /// than a proper solution. However, production proofs legitimately need
+    /// high values (up to 200-300 is normal for complex proofs in HACL*/ulib).
+    ///
+    /// Severity tiers:
+    /// - `#push-options` scoped: Hint (deliberately scoped, best practice)
+    /// - `#set-options`/`#reset-options` file-wide: Info for threshold..1000, Warning for >= 1000
+    /// - Truly extreme (>= 1000): Warning regardless of context
     fn check_z3rlimit(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
+        let extreme_threshold: u32 = 1000;
 
         for (line_idx, line) in content.lines().enumerate() {
             let line_num = line_idx + 1;
 
-            // Check #set-options pattern
-            if let Some(caps) = Z3RLIMIT.captures(line) {
-                if let Some(limit_match) = caps.get(1) {
-                    if let Ok(limit) = limit_match.as_str().parse::<u32>() {
-                        if limit > self.max_z3rlimit {
-                            diagnostics.push(Diagnostic {
-                                rule: RuleCode::FST007,
-                                severity: DiagnosticSeverity::Info,
-                                file: file.to_path_buf(),
-                                range: Range::point(line_num, 1),
-                                message: format!(
-                                    "High z3rlimit {} exceeds threshold {}. \
-                                     Consider splitting the proof or adding intermediate lemmas.",
-                                    limit, self.max_z3rlimit
-                                ),
-                                fix: None,
-                            });
-                        }
-                    }
-                }
+            // Try specific patterns first, then fall back to inline
+            let (limit, is_scoped) = if let Some(caps) = Z3RLIMIT_PUSH.captures(line) {
+                // #push-options is scoped -- best practice, lower severity
+                let v = caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok()).unwrap_or(0);
+                (v, true)
+            } else if let Some(caps) = Z3RLIMIT.captures(line) {
+                // #set-options is file-wide
+                let v = caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok()).unwrap_or(0);
+                (v, false)
+            } else if let Some(caps) = Z3RLIMIT_RESET.captures(line) {
+                // #reset-options is file-wide
+                let v = caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok()).unwrap_or(0);
+                (v, false)
+            } else if Z3RLIMIT_INLINE.is_match(line) {
+                // Inline z3rlimit (in attributes or other contexts)
+                let caps = Z3RLIMIT_INLINE.captures(line).unwrap();
+                let v = caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok()).unwrap_or(0);
+                (v, false)
+            } else {
+                continue;
+            };
+
+            if limit <= self.max_z3rlimit {
+                continue;
             }
 
-            // Also check inline z3rlimit (in attributes)
-            if !Z3RLIMIT.is_match(line) {
-                if let Some(caps) = Z3RLIMIT_INLINE.captures(line) {
-                    if let Some(limit_match) = caps.get(1) {
-                        if let Ok(limit) = limit_match.as_str().parse::<u32>() {
-                            if limit > self.max_z3rlimit {
-                                diagnostics.push(Diagnostic {
-                                    rule: RuleCode::FST007,
-                                    severity: DiagnosticSeverity::Info,
-                                    file: file.to_path_buf(),
-                                    range: Range::point(line_num, 1),
-                                    message: format!(
-                                        "High z3rlimit {} exceeds threshold {}. \
-                                         Consider splitting the proof or adding intermediate lemmas.",
-                                        limit, self.max_z3rlimit
-                                    ),
-                                    fix: None,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
+            let severity = if limit >= extreme_threshold {
+                DiagnosticSeverity::Warning
+            } else if is_scoped {
+                DiagnosticSeverity::Hint
+            } else {
+                DiagnosticSeverity::Info
+            };
+
+            let scoped_note = if is_scoped {
+                " (scoped with #push-options)"
+            } else {
+                ""
+            };
+
+            diagnostics.push(Diagnostic {
+                rule: RuleCode::FST007,
+                severity,
+                file: file.to_path_buf(),
+                range: Range::point(line_num, 1),
+                message: format!(
+                    "High z3rlimit {}{} exceeds threshold {}. \
+                     Consider splitting the proof or adding intermediate lemmas.",
+                    limit, scoped_note, self.max_z3rlimit
+                ),
+                fix: None,
+            });
         }
 
         diagnostics
@@ -1244,8 +1300,8 @@ let lemma_or (x:int) : Lemma
         let rule = Z3ComplexityRule::new();
         let content = "let result = a * b + c";
         let diags = rule.check(&make_path(), content);
-        // Non-linear arithmetic is always Info level (too noisy for Warning)
-        assert!(diags.iter().any(|d| d.message.contains("Non-linear") && d.severity == DiagnosticSeverity::Info));
+        // Non-linear arithmetic is Hint level (too noisy for Info on real codebases)
+        assert!(diags.iter().any(|d| d.message.contains("Non-linear") && d.severity == DiagnosticSeverity::Hint));
     }
 
     #[test]
@@ -1262,12 +1318,12 @@ let lemma_or (x:int) : Lemma
         let rule = Z3ComplexityRule::new();
         let content = "let index = i * len";
         let diags = rule.check(&make_path(), content);
-        // Should produce Info level, not Warning
-        let info_diags: Vec<_> = diags
+        // Should produce Hint level
+        let hint_diags: Vec<_> = diags
             .iter()
-            .filter(|d| d.message.contains("Non-linear") && d.severity == DiagnosticSeverity::Info)
+            .filter(|d| d.message.contains("Non-linear") && d.severity == DiagnosticSeverity::Hint)
             .collect();
-        assert!(!info_diags.is_empty());
+        assert!(!hint_diags.is_empty());
     }
 
     #[test]
@@ -1293,7 +1349,8 @@ let lemma_or (x:int) : Lemma
     #[test]
     fn test_acceptable_z3rlimit() {
         let rule = Z3ComplexityRule::new();
-        let content = r#"#set-options "--z3rlimit 50""#;
+        // 200 is well within production range (threshold is 300)
+        let content = r#"#set-options "--z3rlimit 200""#;
         let diags = rule.check(&make_path(), content);
         assert!(!diags.iter().any(|d| d.message.contains("z3rlimit")));
     }
@@ -1301,15 +1358,37 @@ let lemma_or (x:int) : Lemma
     #[test]
     fn test_z3rlimit_boundary() {
         let rule = Z3ComplexityRule::new();
-        // Exactly at threshold should not warn
-        let content = r#"#set-options "--z3rlimit 100""#;
+        // Exactly at threshold (300) should not warn
+        let content = r#"#set-options "--z3rlimit 300""#;
         let diags = rule.check(&make_path(), content);
         assert!(!diags.iter().any(|d| d.message.contains("z3rlimit")));
 
         // Just over threshold should warn
-        let content2 = r#"#set-options "--z3rlimit 101""#;
+        let content2 = r#"#set-options "--z3rlimit 301""#;
         let diags2 = rule.check(&make_path(), content2);
-        assert!(diags2.iter().any(|d| d.message.contains("z3rlimit 101")));
+        assert!(diags2.iter().any(|d| d.message.contains("z3rlimit 301")));
+    }
+
+    #[test]
+    fn test_push_options_z3rlimit_is_hint() {
+        let rule = Z3ComplexityRule::new();
+        // #push-options is deliberately scoped -- should be Hint, not Info
+        let content = r#"#push-options "--z3rlimit 500""#;
+        let diags = rule.check(&make_path(), content);
+        assert!(diags.iter().any(|d|
+            d.message.contains("z3rlimit 500") && d.severity == DiagnosticSeverity::Hint
+        ));
+    }
+
+    #[test]
+    fn test_extreme_z3rlimit_is_warning() {
+        let rule = Z3ComplexityRule::new();
+        // Extreme values (>= 1000) should always be Warning
+        let content = r#"#set-options "--z3rlimit 1000""#;
+        let diags = rule.check(&make_path(), content);
+        assert!(diags.iter().any(|d|
+            d.message.contains("z3rlimit 1000") && d.severity == DiagnosticSeverity::Warning
+        ));
     }
 
     // ========== Recursive without decreases tests ==========
@@ -1409,9 +1488,10 @@ let rec repeat_left lo hi a f acc =
     #[test]
     fn test_deep_quantifier_nesting() {
         let rule = Z3ComplexityRule::new();
+        // Need 7+ levels to exceed threshold of 6
         let content = r#"
 let deep_nesting : Lemma
-  (forall (x:int). forall (y:int). forall (z:int). forall (w:int). x + y + z + w >= 0)
+  (forall (a:int). forall (b:int). forall (c:int). forall (d:int). forall (e:int). forall (f:int). forall (g:int). a + b + c + d + e + f + g >= 0)
 = ()
 "#;
         let diags = rule.check(&make_path(), content);
@@ -1425,22 +1505,23 @@ let deep_nesting : Lemma
     #[test]
     fn test_acceptable_quantifier_nesting() {
         let rule = Z3ComplexityRule::new();
+        // Depth 4 is well within threshold (6)
         let content = r#"
 let shallow_nesting : Lemma
-  (forall (x:int). forall (y:int). x + y >= 0)
+  (forall (x:int). forall (y:int). forall (z:int). forall (w:int). x + y + z + w >= 0)
 = ()
 "#;
         let diags = rule.check(&make_path(), content);
-        // Depth 2 should be acceptable (threshold is 3)
         assert!(!diags.iter().any(|d| d.message.contains("nesting depth")));
     }
 
     #[test]
     fn test_mixed_quantifier_nesting() {
         let rule = Z3ComplexityRule::new();
+        // 8 levels of mixed forall/exists exceeds threshold of 6
         let content = r#"
 let mixed_quantifiers : Lemma
-  (forall (x:int). exists (y:int). forall (z:int). exists (w:int). x < y /\ z < w)
+  (forall (a:int). exists (b:int). forall (c:int). exists (d:int). forall (e:int). exists (f:int). forall (g:int). exists (h:int). a < b /\ c < d)
 = ()
 "#;
         let diags = rule.check(&make_path(), content);
@@ -1452,9 +1533,9 @@ let mixed_quantifiers : Lemma
     #[test]
     fn test_large_match() {
         let rule = Z3ComplexityRule::new();
-        // Create a match with more than 10 branches (new default threshold)
+        // Create a match with more than 15 branches (new default threshold)
         let mut content = String::from("let big_match x = match x with\n");
-        for i in 0..15 {
+        for i in 0..20 {
             content.push_str(&format!("  | Case{} -> {}\n", i, i));
         }
         let diags = rule.check(&make_path(), &content);
@@ -1493,9 +1574,9 @@ let nested_match x y = match x with
     }
 
     #[test]
-    fn test_nested_match_depth3_warns() {
+    fn test_nested_match_depth3_no_warning() {
         let rule = Z3ComplexityRule::new();
-        // Depth 3 should always warn regardless of discriminants
+        // Depth 3 should NOT warn (threshold raised to 4)
         let content = r#"
 let triple_match x y z = match x with
   | None -> 0
@@ -1508,19 +1589,44 @@ let triple_match x y z = match x with
           | Some c -> a + b + c
 "#;
         let diags = rule.check(&make_path(), content);
-        // Should detect exactly 1 warning at depth 3 (not depth 2)
+        let nested_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("Deeply nested match"))
+            .collect();
+        assert_eq!(nested_diags.len(), 0, "Depth 3 should not warn (threshold is 4)");
+    }
+
+    #[test]
+    fn test_nested_match_depth4_warns() {
+        let rule = Z3ComplexityRule::new();
+        // Depth 4 should warn
+        let content = r#"
+let quad_match w x y z = match w with
+  | None -> 0
+  | Some a ->
+    match x with
+      | None -> a
+      | Some b ->
+        match y with
+          | None -> a + b
+          | Some c ->
+            match z with
+              | None -> a + b + c
+              | Some d -> a + b + c + d
+"#;
+        let diags = rule.check(&make_path(), content);
         let nested_diags: Vec<_> = diags
             .iter()
             .filter(|d| d.message.contains("Deeply nested match"))
             .collect();
         assert_eq!(nested_diags.len(), 1);
-        assert!(nested_diags[0].message.contains("depth 3"));
+        assert!(nested_diags[0].message.contains("depth 4"));
     }
 
     #[test]
-    fn test_nested_match_same_discriminant_warns() {
+    fn test_nested_match_same_discriminant_hint() {
         let rule = Z3ComplexityRule::new();
-        // Matching the same variable at multiple levels SHOULD warn
+        // Matching the same variable at multiple levels should emit Hint
         let content = r#"
 let suspicious_match x = match x with
   | Some (Some a) ->
@@ -1530,9 +1636,9 @@ let suspicious_match x = match x with
   | _ -> 0
 "#;
         let diags = rule.check(&make_path(), content);
-        // Should warn about same discriminant
+        // Should hint about same discriminant (demoted from Warning due to FP rate)
         assert!(diags.iter().any(|d|
-            d.message.contains("same discriminant") && d.severity == DiagnosticSeverity::Warning
+            d.message.contains("same discriminant") && d.severity == DiagnosticSeverity::Hint
         ));
     }
 
@@ -1639,7 +1745,6 @@ let foo = 1
         rule.max_z3rlimit = 50;
 
         // Test stricter quantifier depth (need 4 foralls to exceed depth 2)
-        // The depth detection increments when there's another forall ahead
         let content1 =
             r#"(forall (x:int). forall (y:int). forall (z:int). forall (w:int). x >= 0)"#;
         let diags1 = rule.check(&make_path(), content1);
@@ -1649,6 +1754,23 @@ let foo = 1
         let content2 = r#"#set-options "--z3rlimit 60""#;
         let diags2 = rule.check(&make_path(), content2);
         assert!(diags2.iter().any(|d| d.message.contains("z3rlimit 60")));
+    }
+
+    #[test]
+    fn test_nla_in_block_comment_no_warning() {
+        let rule = Z3ComplexityRule::new();
+        // NLA inside a multiline comment should NOT warn
+        let content = r#"
+(* This model is realized by
+   struct {uintX_t size; char *bytes} in C *)
+let foo = 1
+"#;
+        let diags = rule.check(&make_path(), content);
+        assert!(
+            !diags.iter().any(|d| d.message.contains("Non-linear")),
+            "NLA in block comment should not warn: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 
     // ========== Wildcard in non-last position tests ==========
@@ -1779,9 +1901,9 @@ let z = 1
     #[test]
     fn test_match_at_exact_threshold_no_warning() {
         let rule = Z3ComplexityRule::new();
-        // Exactly 10 branches (threshold) should NOT warn
+        // Exactly 15 branches (threshold) should NOT warn
         let mut content = String::from("let f x = match x with\n");
-        for i in 0..10 {
+        for i in 0..15 {
             content.push_str(&format!("  | C{} -> {}\n", i, i));
         }
         let diags = rule.check(&make_path(), &content);
@@ -1794,9 +1916,9 @@ let z = 1
     #[test]
     fn test_match_one_over_threshold_warns() {
         let rule = Z3ComplexityRule::new();
-        // 11 branches (threshold + 1) SHOULD warn
+        // 16 branches (threshold + 1) SHOULD warn
         let mut content = String::from("let f x = match x with\n");
-        for i in 0..11 {
+        for i in 0..16 {
             content.push_str(&format!("  | C{} -> {}\n", i, i));
         }
         let diags = rule.check(&make_path(), &content);

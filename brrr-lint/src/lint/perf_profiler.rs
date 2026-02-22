@@ -452,6 +452,10 @@ impl PerfProfilerRule {
     /// `admit()` unconditionally discharges the current proof obligation
     /// without any verification. This is a development-time escape hatch
     /// and must not appear in production-verified code.
+    ///
+    /// Severity: Info. In expert-written code (ulib, HACL*), admit() is used
+    /// intentionally in FFI wrappers, tactic effect definitions, and experimental
+    /// modules. Warning-level would flood these codebases with noise.
     fn check_admit_calls(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
 
@@ -464,7 +468,7 @@ impl PerfProfilerRule {
             if ADMIT_CALL.is_match(line) {
                 diagnostics.push(Diagnostic {
                     rule: RuleCode::FST016,
-                    severity: DiagnosticSeverity::Warning,
+                    severity: DiagnosticSeverity::Info,
                     file: file.to_path_buf(),
                     range: Range::point(line_idx + 1, 1),
                     message: "`admit()` bypasses all verification for this proof obligation. \
@@ -482,6 +486,12 @@ impl PerfProfilerRule {
     ///
     /// `assume val` introduces unverified axioms. A few are acceptable
     /// for FFI bindings, but many indicate incomplete verification.
+    ///
+    /// Threshold: 10 (raised from 5). In ulib and Low*, FFI-heavy modules
+    /// (LowStar.Endianness, LowStar.Printf, FStar.Crypto) routinely have
+    /// 10-30 assume vals for external C/OCaml bindings.
+    ///
+    /// Severity: Info. These are architectural decisions, not bugs.
     fn check_assume_val_count(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
 
@@ -495,10 +505,10 @@ impl PerfProfilerRule {
             })
             .count();
 
-        if assume_count > 5 {
+        if assume_count > 10 {
             diagnostics.push(Diagnostic {
                 rule: RuleCode::FST016,
-                severity: DiagnosticSeverity::Warning,
+                severity: DiagnosticSeverity::Info,
                 file: file.to_path_buf(),
                 range: Range::point(1, 1),
                 message: format!(
@@ -656,8 +666,10 @@ impl Rule for PerfProfilerRule {
         }
 
         // Check for many SMTPat annotations (can cause pattern explosion)
+        // Threshold 50: ulib math modules (FStar.Math.Lemmas, FStar.Seq.Properties)
+        // routinely have 30-50+ patterns. Only flag truly excessive counts.
         let smtpat_count = SMTPAT_MANY.find_iter(content).count();
-        if smtpat_count > 20 {
+        if smtpat_count > 50 {
             diagnostics.push(Diagnostic {
                 rule: RuleCode::FST016,
                 severity: DiagnosticSeverity::Info,
@@ -893,7 +905,7 @@ let test () =
     }
 
     #[test]
-    fn test_smtpat_count() {
+    fn test_smtpat_count_below_threshold() {
         let rule = PerfProfilerRule::new();
         let mut content = String::new();
         for i in 0..25 {
@@ -903,9 +915,27 @@ let test () =
             ));
         }
         let diagnostics = rule.check(&test_file(), &content);
-        assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message.contains("SMTPat"));
-        assert!(diagnostics[0].message.contains("25"));
+        assert!(
+            !diagnostics.iter().any(|d| d.message.contains("SMTPat")),
+            "25 SMTPat annotations should be below threshold (50)"
+        );
+    }
+
+    #[test]
+    fn test_smtpat_count_above_threshold() {
+        let rule = PerfProfilerRule::new();
+        let mut content = String::new();
+        for i in 0..55 {
+            content.push_str(&format!(
+                "val lemma_{} : x:int -> Lemma (requires True) (ensures True) [SMTPat (x + {})]\n",
+                i, i
+            ));
+        }
+        let diagnostics = rule.check(&test_file(), &content);
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains("SMTPat") && d.message.contains("55")),
+            "55 SMTPat annotations should trigger Info"
+        );
     }
 
     // ---------------------------------------------------------------
@@ -1281,8 +1311,8 @@ let lemma_foo x : Lemma (x >= 0) =
 "#;
         let diagnostics = rule.check(&test_file(), content);
         assert!(
-            diagnostics.iter().any(|d| d.message.contains("admit()")),
-            "admit() call should be detected"
+            diagnostics.iter().any(|d| d.message.contains("admit()") && d.severity == DiagnosticSeverity::Info),
+            "admit() call should be detected as Info"
         );
     }
 
@@ -1309,13 +1339,13 @@ let foo x = x
     fn test_excessive_assume_val() {
         let rule = PerfProfilerRule::new();
         let mut content = String::from("module Foo\n");
-        for i in 0..7 {
+        for i in 0..12 {
             content.push_str(&format!("assume val f{} : int -> int\n", i));
         }
         let diagnostics = rule.check(&test_file(), &content);
         assert!(
-            diagnostics.iter().any(|d| d.message.contains("assume val")),
-            "Excessive assume val should trigger warning"
+            diagnostics.iter().any(|d| d.message.contains("assume val") && d.severity == DiagnosticSeverity::Info),
+            "Excessive assume val (>10) should trigger Info"
         );
     }
 

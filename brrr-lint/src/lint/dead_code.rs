@@ -64,8 +64,10 @@ lazy_static! {
 
     /// Known safe functions whose results can be discarded (proof/side-effect).
     /// These return unit or are called for their proof obligations, not their value.
+    /// Includes tactic combinators (implies_intro, forall_intro, etc.) whose results
+    /// (binders) are commonly discarded when the introduced hypothesis isn't needed.
     static ref SAFE_DISCARD_FUNCS: Regex = Regex::new(
-        r"^(?:assert|assert_norm|assert_by_tactic|assume|allow_inversion|print|print_string|IO\.print_string|B\.recall|recall|norm_spec|Classical\.|FStar\.Classical\.|[@\[])"
+        r"^(?:assert|assert_norm|assert_by_tactic|assume|allow_inversion|print|print_string|IO\.print_string|B\.recall|recall|norm_spec|Classical\.|FStar\.Classical\.|FStar\.Squash\.|implies_intro|forall_intro|forall_intros|intro|intros|repeat|trytac|t_destruct|decompose|forward_round|quick_close|cut|mono_lem|dump|focus|[@\[])"
     ).unwrap_or_else(|e| panic!("regex: {e}"));
 
     /// Pattern matching `[@unused]` or `[@@unused]` attributes.
@@ -130,9 +132,13 @@ lazy_static! {
     /// Pattern for `[@opaque]` attribute (older syntax for opaque_to_smt).
     static ref OPAQUE_ATTR: Regex = Regex::new(r"\[@+\s*opaque\s*\]").unwrap_or_else(|e| panic!("regex: {e}"));
 
-    /// Pattern for `irreducible` attribute.
+    /// Pattern for `irreducible` attribute (bracketed form).
     /// Irreducible definitions don't unfold but are still semantically used.
     static ref IRREDUCIBLE_ATTR: Regex = Regex::new(r"\[@+\s*irreducible\s*\]").unwrap_or_else(|e| panic!("regex: {e}"));
+
+    /// Pattern for bare `irreducible` keyword (used before `let` without brackets).
+    /// Example: `irreducible\nlet labeled (r : range) ...`
+    static ref BARE_IRREDUCIBLE: Regex = Regex::new(r"(?:^|\n)\s*irreducible\s*\n").unwrap_or_else(|e| panic!("regex: {e}"));
 
     /// Pattern for `assume val` declarations (axioms).
     /// CRITICAL: Assume vals are axioms - removing them can break proofs.
@@ -256,7 +262,12 @@ impl DeadCodeRule {
         }
 
         // Irreducible definitions don't unfold but are used
-        if IRREDUCIBLE_ATTR.is_match(block_text) {
+        if IRREDUCIBLE_ATTR.is_match(block_text) || BARE_IRREDUCIBLE.is_match(block_text) {
+            return true;
+        }
+
+        // Bare `irreducible` keyword at start of block text (without brackets)
+        if block_text.trim_start().starts_with("irreducible") {
             return true;
         }
 
@@ -301,6 +312,41 @@ impl DeadCodeRule {
     /// If a module has friends, private bindings might be used by those friends.
     fn has_friend_declarations(&self, content: &str) -> bool {
         content.lines().any(|line| FRIEND_DECL.is_match(line))
+    }
+
+    /// Check if a .fst file has a companion .fsti interface file.
+    ///
+    /// When a .fsti exists, function signatures are constrained by the interface.
+    /// Parameters in the .fst implementation must match the .fsti declaration,
+    /// so "unused" parameters cannot be renamed or removed by the implementor.
+    fn has_companion_fsti(&self, file: &Path) -> bool {
+        if !file.extension().map_or(false, |ext| ext == "fst") {
+            return false;
+        }
+        // Check for .fsti companion: Foo.fst -> Foo.fsti
+        let mut fsti_path = file.to_path_buf();
+        let mut name = file.file_name().unwrap_or_default().to_os_string();
+        name.push("i"); // .fst -> .fsti
+        fsti_path.set_file_name(name);
+        fsti_path.exists()
+    }
+
+    /// Check if a function has a trivial proof body (`= ()` or `= admit()`).
+    ///
+    /// In F*, lemma implementations commonly have params that exist only to
+    /// instantiate types/specifications. The body is trivially `()` because
+    /// the type checker does all the proof work. These "unused" params are
+    /// intentional and should be demoted to Info severity.
+    fn has_trivial_proof_body(&self, block_text: &str) -> bool {
+        // Find the last `=` that's likely the body definition
+        // (not inside refinement types `{x = 0}`)
+        // Heuristic: check if the block ends with `= ()` or `= admit ()`
+        lazy_static! {
+            static ref TRIVIAL_BODY: Regex = Regex::new(
+                r"=\s*(?:\(\)|admit\s*\(\s*\))\s*$"
+            ).unwrap_or_else(|e| panic!("regex: {e}"));
+        }
+        TRIVIAL_BODY.is_match(block_text.trim())
     }
 
     /// Check if the module is a Spec.* module (verification-only specification).
@@ -691,6 +737,17 @@ impl DeadCodeRule {
         let (_, blocks) = parse_fstar_file(content);
         let lines: Vec<&str> = content.lines().collect();
 
+        // Interface files (.fsti): let definitions are part of the public API.
+        // Parameters are part of the interface contract -- don't flag them.
+        if self.is_interface_file(file) {
+            return diagnostics;
+        }
+
+        // Check if this .fst has a companion .fsti (interface-mandated signatures).
+        // When a .fsti exists, function params are constrained by the interface --
+        // the implementor cannot rename or remove them. Demote to Info.
+        let has_companion_fsti = self.has_companion_fsti(file);
+
         for block in &blocks {
             // Only check let bindings, NOT val declarations.
             // Val declarations are type signatures - they have no body.
@@ -725,6 +782,12 @@ impl DeadCodeRule {
                 continue;
             }
 
+            // Detect lemma-style functions where body is trivially `= ()` or `= admit()`.
+            // In F*, these are proof obligations where params exist only to instantiate
+            // types/specs. The type checker does all the work; the body is trivial.
+            // Demote these to Info since unused params are intentional.
+            let is_trivial_body = self.has_trivial_proof_body(&text);
+
             // Extract parameter names from the text (anywhere in the block).
             // PARAM_EXTRACT_RE matches `(name :` which is F*'s parameter syntax.
             for caps in PARAM_EXTRACT_RE.captures_iter(&text) {
@@ -732,6 +795,19 @@ impl DeadCodeRule {
                     continue;
                 };
                 let param = param_match.as_str();
+
+                // CRITICAL: Filter out false positives from F*'s `::` (cons) operator.
+                // The regex `(name :` also matches `(x::rest)` because `::` starts
+                // with `:`. Check: if the character after the match is `:`, this is
+                // a cons `::`, not a parameter annotation `(name : type)`.
+                let match_end = full_match.end();
+                if match_end < text.len() {
+                    let next_char = text.as_bytes()[match_end];
+                    if next_char == b':' {
+                        // This is `(x::...` -- a cons pattern, not a parameter.
+                        continue;
+                    }
+                }
 
                 // Skip if already underscore-prefixed (intentionally unused)
                 if param.starts_with('_') {
@@ -780,9 +856,20 @@ impl DeadCodeRule {
                             .with_requires_review(false)  // No review needed for safe rename
                         });
 
+                        // Severity logic:
+                        // - Info if this is a trivial proof body (= ()) -- params are
+                        //   intentionally type-level only in F* lemma patterns
+                        // - Info if companion .fsti exists -- params are interface-mandated
+                        // - Warning otherwise (genuine unused parameter)
+                        let severity = if is_trivial_body || has_companion_fsti {
+                            DiagnosticSeverity::Info
+                        } else {
+                            DiagnosticSeverity::Warning
+                        };
+
                         diagnostics.push(Diagnostic {
                             rule: RuleCode::FST005,
-                            severity: DiagnosticSeverity::Warning,
+                            severity,
                             file: file.to_path_buf(),
                             range: Range::point(block.start_line, 1),
                             message: format!(
@@ -1035,6 +1122,13 @@ impl DeadCodeRule {
     ///
     /// In F*, a wildcard `| _ ->` matches everything, so any branches
     /// after it are unreachable.
+    ///
+    /// IMPORTANT: This uses heuristics and can produce false positives with:
+    /// - Inline matches: `(match x with | A -> 1 | _ -> 0)` on one line
+    /// - Nested matches at the same indentation level
+    /// To reduce FPs, we skip wildcards that appear on lines containing
+    /// both `match` and `| _ ->` (inline sub-matches), and we skip
+    /// wildcards inside parenthesized expressions.
     fn check_unreachable_branches(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
         let lines: Vec<&str> = content.lines().collect();
@@ -1051,8 +1145,10 @@ impl DeadCodeRule {
             // Calculate current line's indentation
             let current_indent = line.len() - line.trim_start().len();
 
-            // Track match expressions
-            if stripped.starts_with("match ") || stripped.contains(" match ") {
+            // Track match expressions (only top-level, not inline sub-matches)
+            if (stripped.starts_with("match ") || stripped.contains(" match "))
+                && !self.is_inline_match(stripped)
+            {
                 in_match = true;
                 found_wildcard = false;
                 match_indent = current_indent;
@@ -1062,12 +1158,21 @@ impl DeadCodeRule {
                 // Check for wildcard pattern, but NOT guarded wildcards.
                 // `| _ ->` catches everything (unguarded wildcard).
                 // `| _ when cond ->` does NOT catch everything (guarded wildcard).
+                //
+                // CRITICAL: Skip wildcards that are part of inline matches.
+                // A line like `(match x with | Some y -> f y | _ -> ())` contains
+                // `| _ ->` but it belongs to the inline match, not the outer one.
                 if MATCH_WILDCARD.is_match(stripped)
                     && !MATCH_GUARDED_WILDCARD.is_match(stripped)
                     && !found_wildcard
+                    && !self.is_inline_match(stripped)
                 {
-                    found_wildcard = true;
-                    wildcard_line = line_num;
+                    // Also skip if the wildcard is inside parentheses on this line
+                    // (indicates a sub-expression match, not a top-level arm)
+                    if !self.wildcard_in_parens(stripped) {
+                        found_wildcard = true;
+                        wildcard_line = line_num;
+                    }
                 }
                 // Check for branch after wildcard (unreachable)
                 else if found_wildcard && stripped.starts_with('|') {
@@ -1111,6 +1216,39 @@ impl DeadCodeRule {
         }
 
         diagnostics
+    }
+
+    /// Check if a line contains an inline match expression.
+    ///
+    /// An inline match has both `match ... with` and branch arms on the same
+    /// line. Example: `(match x with | Some y -> f y | _ -> ())`
+    /// These should not trigger the outer wildcard detection.
+    fn is_inline_match(&self, line: &str) -> bool {
+        // An inline match has "match" and at least one "|" and "->" all on one line
+        (line.contains("match ") || line.contains("match\t"))
+            && line.contains(" with ")
+            && line.contains("| ")
+            && line.contains(" -> ")
+    }
+
+    /// Check if the `| _ ->` wildcard in a line is inside parentheses.
+    ///
+    /// In F*, `(match x with | _ -> e)` is a sub-expression. The wildcard
+    /// belongs to the inner match and should not flag outer branches.
+    fn wildcard_in_parens(&self, line: &str) -> bool {
+        // Simple heuristic: if the line starts with `(` (after trimming) and
+        // contains `| _ ->`, the wildcard is inside a parenthesized expr.
+        if line.starts_with('(') && MATCH_WILDCARD.is_match(line) {
+            return true;
+        }
+        // Also check: if `| _ ->` is preceded by `(match` somewhere on the line
+        if let Some(wildcard_pos) = line.find("| _ ->") {
+            let before = &line[..wildcard_pos];
+            if before.contains("(match ") || before.contains("begin match ") {
+                return true;
+            }
+        }
+        false
     }
 }
 

@@ -1738,6 +1738,13 @@ impl ProofHintsRule {
     /// `assert false` in F* derives anything via False elimination. If this is
     /// in a proof, it means the proof state is contradictory (which may be
     /// intentional for reductio proofs, but is often a logic error).
+    ///
+    /// Severity: Info (not Warning), because:
+    /// - In verified F* code (e.g. ulib), `assert false` in a branch means
+    ///   "this case is impossible, and I've derived a contradiction to prove it."
+    ///   The verifier checks the proof obligation, so correct code is correct.
+    /// - This is standard reductio ad absurdum technique, not a code smell.
+    /// - Pattern: `if x = x' then assert False else ...` is idiomatic F*.
     fn check_assert_false_patterns(&self, file: &Path, content: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
 
@@ -1751,14 +1758,14 @@ impl ProofHintsRule {
             if ASSERT_FALSE_RE.is_match(line) {
                 diagnostics.push(Diagnostic {
                     rule: RuleCode::FST009,
-                    severity: DiagnosticSeverity::Warning,
+                    severity: DiagnosticSeverity::Info,
                     file: file.to_path_buf(),
                     range: Range::point(line_num, 1),
                     message: format!(
-                        "[{}] Warning: `assert false` derives anything via False elimination. \
-                         This means the proof state is contradictory. If intentional \
-                         (reductio ad absurdum), document the reasoning. Otherwise, this \
-                         may indicate a logic error in your proof.",
+                        "[{}] `assert false` derives anything via False elimination. \
+                         This means the proof state is contradictory -- standard \
+                         reductio ad absurdum if used in a branch that should be \
+                         impossible. Document the reasoning if not obvious.",
                         HintCategory::ProofTechnique.as_str(),
                     ),
                     fix: None,

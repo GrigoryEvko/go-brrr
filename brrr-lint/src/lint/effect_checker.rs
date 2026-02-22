@@ -829,9 +829,13 @@ impl EffectCheckerRule {
 
             if ADMIT_PATTERN.is_match(&code_only) {
                 let col = Self::find_column(line, &ADMIT_COLUMN);
+                // In verified F* code (especially ulib), admit() is used intentionally
+                // in experimental/TODO modules. The F* typechecker itself flags unverified
+                // admits during verification. Demote to Info since this linter cannot
+                // distinguish "genuine TODO" from "verification bypass".
                 diagnostics.push(Diagnostic {
                     rule: RuleCode::FST011,
-                    severity: DiagnosticSeverity::Warning,
+                    severity: DiagnosticSeverity::Info,
                     file: file.to_path_buf(),
                     range: Range::point(line_num, col),
                     message: "`admit()` bypasses verification - remove before production. \
@@ -865,9 +869,12 @@ impl EffectCheckerRule {
 
             if MAGIC_PATTERN.is_match(&code_only) {
                 let col = Self::find_column(line, &MAGIC_COLUMN);
+                // magic() is used intentionally in foundational modules (Prims.fst,
+                // FStar.Pervasives.fst) as a building block. The F* typechecker
+                // already flags magic() during verification. Demote to Info.
                 diagnostics.push(Diagnostic {
                     rule: RuleCode::FST011,
-                    severity: DiagnosticSeverity::Warning,
+                    severity: DiagnosticSeverity::Info,
                     file: file.to_path_buf(),
                     range: Range::point(line_num, col),
                     message: "`magic()` produces arbitrary values of any type - \
@@ -901,9 +908,14 @@ impl EffectCheckerRule {
 
             if UNSAFE_COERCE.is_match(&code_only) {
                 if let Some(m) = UNSAFE_COERCE.find(line) {
+                    // unsafe_coerce is intentionally used in core F* infrastructure
+                    // (Prims.fst, FStar.Tactics.Effect.fsti) and cannot be flagged as
+                    // Error without producing false positives on verified ulib code.
+                    // Demoted to Warning: the linter flags it for review, but the
+                    // F* type checker is the authoritative source for type safety.
                     diagnostics.push(Diagnostic {
                         rule: RuleCode::FST011,
-                        severity: DiagnosticSeverity::Error,
+                        severity: DiagnosticSeverity::Warning,
                         file: file.to_path_buf(),
                         range: Range::point(line_num, m.start() + 1),
                         message:
@@ -1028,9 +1040,12 @@ impl EffectCheckerRule {
             // Check for assume (expr) but NOT assume val (handled separately)
             if ASSUME_EXPR.is_match(&code_only) && !ASSUME_VAL_RE.is_match(&code_only) {
                 if let Some(m) = ASSUME_EXPR.find(line) {
+                    // In verified F* codebases, assume(expr) is used as an axiom
+                    // building block (e.g., in FStar.Classical, FStar.Squash).
+                    // F* itself tracks assumed obligations. Demote to Info.
                     diagnostics.push(Diagnostic {
                         rule: RuleCode::FST011,
-                        severity: DiagnosticSeverity::Warning,
+                        severity: DiagnosticSeverity::Info,
                         file: file.to_path_buf(),
                         range: Range::point(line_num, m.start() + 1),
                         message: "`assume (...)` bypasses verification for a specific condition. \
@@ -1147,9 +1162,11 @@ impl EffectCheckerRule {
                     || trimmed.contains("(FStar.Pervasives.undefined")
                     || trimmed.contains("Pervasives.undefined)")
                 {
+                    // Like admit() and magic(), `undefined` is flagged by the F*
+                    // typechecker during verification. Demote to Info.
                     diagnostics.push(Diagnostic {
                         rule: RuleCode::FST011,
-                        severity: DiagnosticSeverity::Warning,
+                        severity: DiagnosticSeverity::Info,
                         file: file.to_path_buf(),
                         range: Range::point(line_num, 1),
                         message: "`undefined` produces a value of any type without proof. \
@@ -1184,16 +1201,20 @@ impl EffectCheckerRule {
             let code_only = strip_comments_and_strings(line);
 
             if ASSERT_FALSE_RE.is_match(&code_only) {
+                // In verified F* code, `assert false` is a valid proof technique:
+                // reductio ad absurdum. When F* verifies the file, any `assert false`
+                // that passes verification means the proof state IS genuinely
+                // contradictory. Demote to Info -- the F* verifier is the authority here.
                 diagnostics.push(Diagnostic {
                     rule: RuleCode::FST011,
-                    severity: DiagnosticSeverity::Warning,
+                    severity: DiagnosticSeverity::Info,
                     file: file.to_path_buf(),
                     range: Range::point(line_num, 1),
                     message: "`assert false` (or `assert False`) derives anything via False \
                               elimination. If the proof state is genuinely contradictory \
-                              (reductio ad absurdum), document the reasoning. Otherwise, \
-                              this may indicate a logic error where subsequent code is \
-                              vacuously verified."
+                              (reductio ad absurdum), this is a valid proof technique. \
+                              Otherwise, this may indicate a logic error where subsequent \
+                              code is vacuously verified."
                         .to_string(),
                     fix: None,
                 });
@@ -1221,9 +1242,13 @@ impl EffectCheckerRule {
             let code_only = strip_comments_and_strings(line);
 
             if SYNTH_TADMIT_PATTERN.is_match(&code_only) {
+                // Demoted to Warning: synth_by_tactic + tadmit is used
+                // deliberately in experimental/bootstrapping code in ulib.
+                // Like admit(), it's a verification bypass that should be
+                // flagged for review but not treated as a hard error.
                 diagnostics.push(Diagnostic {
                     rule: RuleCode::FST011,
-                    severity: DiagnosticSeverity::Error,
+                    severity: DiagnosticSeverity::Warning,
                     file: file.to_path_buf(),
                     range: Range::point(line_num, 1),
                     message: "`synth_by_tactic` with `tadmit()` is a hidden admit. \
@@ -1482,17 +1507,24 @@ impl EffectCheckerRule {
                 if let Some(callee_eff) = callee_effect {
                     // Tot cannot call effectful functions
                     if !Effect::Tot.can_call(callee_eff) {
-                        // If the call is unqualified and the bare name is ambiguous
-                        // (exists in both Tot and effectful databases), demote to Warning
-                        let is_ambiguous = call.qualified.is_none()
-                            && EFFECTFUL_FUNCTIONS.contains_key(call.bare.as_str())
-                            && (TOT_BUILTINS.contains(call.bare.as_str())
-                                || ["index", "upd", "sub", "get", "read", "hide", "reveal"]
-                                    .contains(&call.bare.as_str()));
-                        let severity = if is_ambiguous {
-                            DiagnosticSeverity::Warning
+                        // Severity depends on the callee effect:
+                        //
+                        // Ghost/GTot/Lemma → Info: In F*, Tot functions routinely call
+                        // ghost and lemma functions. This is standard proof-carrying code:
+                        //   - Lemma calls: inline proof obligations (erased at extraction)
+                        //   - Ghost/GTot calls: specification positions, erased monad
+                        //   - F* itself verifies these are used correctly
+                        //
+                        // ST/Exn/ML/All → Warning: These are genuinely effectful and
+                        // should not appear in Tot code. However, without module resolution
+                        // the linter may misidentify names (e.g., `sub`, `index`, `sel`).
+                        let severity = if callee_eff.is_ghost()
+                            || callee_eff == Effect::GTot
+                            || callee_eff == Effect::Lemma
+                        {
+                            DiagnosticSeverity::Info
                         } else {
-                            DiagnosticSeverity::Error
+                            DiagnosticSeverity::Warning
                         };
 
                         diagnostics.push(Diagnostic {
@@ -1581,9 +1613,13 @@ impl EffectCheckerRule {
 
                 for (callee_name, line_num) in calls {
                     if ghost_bindings.contains_key(&callee_name) {
+                        // Demoted to Warning: ghost bindings CAN appear in
+                        // inline_for_extraction contexts in specification positions
+                        // (requires/ensures) or erased type parameters. The F*
+                        // compiler enforces the actual ghost/computational boundary.
                         diagnostics.push(Diagnostic {
                             rule: RuleCode::FST011,
-                            severity: DiagnosticSeverity::Error,
+                            severity: DiagnosticSeverity::Warning,
                             file: file.to_path_buf(),
                             range: Range::point(line_num, 1),
                             message: format!(
@@ -1751,7 +1787,7 @@ impl EffectCheckerRule {
             }
         }
 
-        // Known built-in effect names
+        // Known built-in effect names (includes user-defined effects from ulib/experimental)
         let builtin_effects: HashSet<&str> = [
             "PURE", "GHOST", "DIV", "STATE", "EXN", "ALL",
             "Pure", "Ghost", "Tot", "GTot", "Lemma",
@@ -1759,6 +1795,11 @@ impl EffectCheckerRule {
             "Exn", "Ex", "All", "ML", "Tac", "TAC",
             "StackInline", "Unsafe", "St", "STL", "GST",
             "TacH", "TacS", "TacRO", "TacF",
+            // Experimental monotonic state effects (FStar.MST, FStar.NMST)
+            "MSTATE", "MSTATETOT", "NMSTATE", "NMSTATETOT",
+            "MST", "NMST", "MSTTotal", "NMSTTotal",
+            // WP-based effect variants
+            "EXT", "ISTATE",
         ].iter().copied().collect();
 
         for block in &blocks {
@@ -2101,9 +2142,10 @@ mod tests {
         let content = "let lemma_foo () : Lemma True = admit()";
         let diags = rule.check(&make_path(), content);
         assert!(diags.iter().any(|d| d.message.contains("admit()")));
+        // admit() is Info severity (F* typechecker is the authority)
         assert!(diags
             .iter()
-            .any(|d| d.severity == DiagnosticSeverity::Warning));
+            .any(|d| d.severity == DiagnosticSeverity::Info && d.message.contains("admit()")));
     }
 
     #[test]
@@ -2120,9 +2162,10 @@ mod tests {
         let content = "let bad_value : int = magic()";
         let diags = rule.check(&make_path(), content);
         assert!(diags.iter().any(|d| d.message.contains("magic()")));
+        // magic() is Info severity (used intentionally in foundational modules)
         assert!(diags
             .iter()
-            .any(|d| d.severity == DiagnosticSeverity::Warning && d.message.contains("magic()")));
+            .any(|d| d.severity == DiagnosticSeverity::Info && d.message.contains("magic()")));
     }
 
     #[test]
@@ -2131,9 +2174,10 @@ mod tests {
         let content = "let coerced = unsafe_coerce x";
         let diags = rule.check(&make_path(), content);
         assert!(diags.iter().any(|d| d.message.contains("unsafe_coerce")));
+        // Demoted to Warning: unsafe_coerce is intentionally used in F* core infrastructure
         assert!(diags
             .iter()
-            .any(|d| d.severity == DiagnosticSeverity::Error));
+            .any(|d| d.severity == DiagnosticSeverity::Warning && d.message.contains("unsafe_coerce")));
     }
 
     #[test]
@@ -2469,9 +2513,10 @@ inline_for_extraction let extracted_fn () =
             "Expected assume(expr) diagnostic, got: {:?}",
             diags
         );
+        // assume(expr) is Info severity (F* tracks assumed obligations)
         assert!(diags
             .iter()
-            .any(|d| d.severity == DiagnosticSeverity::Warning));
+            .any(|d| d.severity == DiagnosticSeverity::Info && d.message.contains("assume (...")));
     }
 
     #[test]
