@@ -2500,11 +2500,11 @@ impl Rule for RevealInTotRule {
     }
 }
 
-/// Check if a line contains an explicit `Tot` effect annotation.
+/// Check if a line contains an explicit `Tot` as the RETURN effect of a definition.
 ///
-/// Matches patterns like `: Tot`, `-> Tot`, `Pure` followed by Tot-like indicators.
+/// Only matches `Tot` as the function's own return effect, NOT `Tot` inside
+/// parameter types like `(f:a -> Tot b)`.
 fn has_explicit_tot(line: &str) -> bool {
-    // Look for standalone `Tot` preceded by `:` or `->`.
     let bytes = line.as_bytes();
     let len = bytes.len();
     let mut i = 0;
@@ -2514,10 +2514,17 @@ fn has_explicit_tot(line: &str) -> bool {
             let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
             let after_ok = i + 3 >= len || !is_ident_char(bytes[i + 3]);
             if before_ok && after_ok {
-                // Check that it's in a type position (after `:` or `->` or `=`).
                 let prefix = line[..i].trim_end();
                 if prefix.ends_with(':') || prefix.ends_with("->") {
-                    return true;
+                    // Verify this Tot is NOT inside parentheses (parameter type).
+                    // Count unclosed '(' before this position.
+                    let paren_depth: i32 = line[..i].chars()
+                        .map(|c| match c { '(' => 1, ')' => -1, _ => 0 })
+                        .sum();
+                    if paren_depth <= 0 {
+                        return true;
+                    }
+                    // paren_depth > 0 means Tot is inside a parameter type like (f:a -> Tot b)
                 }
             }
         }
