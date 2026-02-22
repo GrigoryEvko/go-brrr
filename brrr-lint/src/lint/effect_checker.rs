@@ -559,12 +559,25 @@ fn is_comment_line(line: &str) -> bool {
 ///
 /// Looks for effect annotations in the function signature (e.g., `-> Tot int`).
 /// Returns None if no explicit effect annotation is found.
+///
+/// IMPORTANT: Takes the LAST match, not the first. In F* signatures like
+///   `let f (#al: (bool -> Tot Type)) : Lemma ...`
+/// the first match would be `Tot` from the parameter type, but the actual
+/// function return effect is `Lemma` (the last one). The return effect always
+/// comes after all parameter types.
 fn extract_function_effect(block: &DeclarationBlock) -> Option<Effect> {
     let text = block.lines.join("");
-    EFFECT_ANNOTATION_RE
-        .captures(&text)
-        .and_then(|c| c.get(1))
-        .and_then(|m| Effect::parse(m.as_str()))
+    // Take the LAST effect annotation match -- that's the return effect.
+    // Earlier matches are effects inside parameter types (e.g., `(x: nat -> Tot Type)`).
+    let mut last_effect: Option<Effect> = None;
+    for caps in EFFECT_ANNOTATION_RE.captures_iter(&text) {
+        if let Some(m) = caps.get(1) {
+            if let Some(eff) = Effect::parse(m.as_str()) {
+                last_effect = Some(eff);
+            }
+        }
+    }
+    last_effect
 }
 
 /// Check if a declaration block is an explicit `ghost let` binding.
