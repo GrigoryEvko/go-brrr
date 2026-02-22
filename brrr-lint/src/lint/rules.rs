@@ -44,6 +44,70 @@ pub enum RuleCode {
     FST018,
     /// FST019: LowStar verification performance checker.
     FST019,
+    /// FST020: `(f: a -> b)` in val parses as `(f:a) -> b` — wrap in parens.
+    FST020,
+    /// FST021: F* reserved keyword used as identifier (e.g., `total`, `effect`).
+    FST021,
+    /// FST022: Record with function/abstract fields missing `noeq` qualifier.
+    FST022,
+    /// FST023: Unguarded `forall` in ensures without SMTPat — may cause Z3 divergence.
+    FST023,
+    /// FST024: `decreases` clause references name not bound in function parameters.
+    FST024,
+    /// FST025: `assume type` vs `assume val` confusion — different semantics.
+    FST025,
+    /// FST026: `reveal` used in Tot context — needs GTot (ghost).
+    FST026,
+    /// FST027: `*` operator used without `open FStar.Mul` — `*` means tuple type by default.
+    FST027,
+    /// FST028: Pattern match on implicit argument without `strict_on_arguments`.
+    FST028,
+    /// FST029: `{:pattern (f x)\/(g x)}` is disjunctive SMT trigger, not logical or.
+    FST029,
+    /// FST030: Direct function equality — use `feq`/`on_domain` from FunctionalExtensionality.
+    FST030,
+    /// FST031: `opaque_to_smt` definition used without `reveal_opaque`.
+    FST031,
+    /// FST032: Universe annotation consistency hint.
+    FST032,
+    /// FST033: Suggest tactic (simp, linarith, norm_num) where SMT is overkill.
+    FST033,
+    /// FST034: Equality lemma suitable for `[@@simp]` attribute.
+    FST034,
+    /// FST035: `[@@simp_comm]` lemma needs argument ordering guard.
+    FST035,
+    /// FST036: Suggest `$f` binder for lemma-taking function parameters.
+    FST036,
+    /// FST037: Tot vs GTot mismatch in higher-order erased positions.
+    FST037,
+    /// FST038: Suggest `introduce forall ... with` for universals/implications.
+    FST038,
+    /// FST039: Simple type alias missing `unfold` qualifier.
+    FST039,
+    /// FST040: Attribute target mismatch — `@@@` (val-level) vs `@@` (term-level).
+    FST040,
+    /// FST041: Suppression — `requires True` is intentional, not redundant.
+    FST041,
+    /// FST042: `Lemma post` vs `Lemma (ensures post)` ambiguity.
+    FST042,
+    /// FST043: Tick-variable `'a` vs explicit `#a` implicit consistency.
+    FST043,
+    /// FST044: `let rec` without `decreases` for non-structural recursion.
+    FST044,
+    /// FST045: Suggest `unopteq` when `noeq` used on record without function fields.
+    FST045,
+    /// FST046: Suggest `[@@ erasable]` for proof-only types.
+    FST046,
+    /// FST047: `Prims.sum` (constructive) vs `\/` (propositional) disjunction mismatch.
+    FST047,
+    /// FST048: Complex tactic missing `[@@plugin]` attribute.
+    FST048,
+    /// FST049: `[@@auto]` classification — suggest `auto_safe` or `auto_unsafe`.
+    FST049,
+    /// FST050: Suggest `give_proof`/`get_proof` for squash↔refinement bridge.
+    FST050,
+    /// FST051: Refined type alias missing `[@@do_not_unrefine]` attribute.
+    FST051,
 }
 
 impl RuleCode {
@@ -69,6 +133,38 @@ impl RuleCode {
             "FST017" => Some(RuleCode::FST017),
             "FST018" => Some(RuleCode::FST018),
             "FST019" => Some(RuleCode::FST019),
+            "FST020" => Some(RuleCode::FST020),
+            "FST021" => Some(RuleCode::FST021),
+            "FST022" => Some(RuleCode::FST022),
+            "FST023" => Some(RuleCode::FST023),
+            "FST024" => Some(RuleCode::FST024),
+            "FST025" => Some(RuleCode::FST025),
+            "FST026" => Some(RuleCode::FST026),
+            "FST027" => Some(RuleCode::FST027),
+            "FST028" => Some(RuleCode::FST028),
+            "FST029" => Some(RuleCode::FST029),
+            "FST030" => Some(RuleCode::FST030),
+            "FST031" => Some(RuleCode::FST031),
+            "FST032" => Some(RuleCode::FST032),
+            "FST033" => Some(RuleCode::FST033),
+            "FST034" => Some(RuleCode::FST034),
+            "FST035" => Some(RuleCode::FST035),
+            "FST036" => Some(RuleCode::FST036),
+            "FST037" => Some(RuleCode::FST037),
+            "FST038" => Some(RuleCode::FST038),
+            "FST039" => Some(RuleCode::FST039),
+            "FST040" => Some(RuleCode::FST040),
+            "FST041" => Some(RuleCode::FST041),
+            "FST042" => Some(RuleCode::FST042),
+            "FST043" => Some(RuleCode::FST043),
+            "FST044" => Some(RuleCode::FST044),
+            "FST045" => Some(RuleCode::FST045),
+            "FST046" => Some(RuleCode::FST046),
+            "FST047" => Some(RuleCode::FST047),
+            "FST048" => Some(RuleCode::FST048),
+            "FST049" => Some(RuleCode::FST049),
+            "FST050" => Some(RuleCode::FST050),
+            "FST051" => Some(RuleCode::FST051),
             _ => None,
         }
     }
@@ -95,6 +191,38 @@ impl RuleCode {
             RuleCode::FST017,
             RuleCode::FST018,
             RuleCode::FST019,
+            RuleCode::FST020,
+            RuleCode::FST021,
+            RuleCode::FST022,
+            RuleCode::FST023,
+            RuleCode::FST024,
+            RuleCode::FST025,
+            RuleCode::FST026,
+            RuleCode::FST027,
+            RuleCode::FST028,
+            RuleCode::FST029,
+            RuleCode::FST030,
+            RuleCode::FST031,
+            RuleCode::FST032,
+            RuleCode::FST033,
+            RuleCode::FST034,
+            RuleCode::FST035,
+            RuleCode::FST036,
+            RuleCode::FST037,
+            RuleCode::FST038,
+            RuleCode::FST039,
+            RuleCode::FST040,
+            RuleCode::FST041,
+            RuleCode::FST042,
+            RuleCode::FST043,
+            RuleCode::FST044,
+            RuleCode::FST045,
+            RuleCode::FST046,
+            RuleCode::FST047,
+            RuleCode::FST048,
+            RuleCode::FST049,
+            RuleCode::FST050,
+            RuleCode::FST051,
         ]
     }
 
@@ -109,6 +237,11 @@ impl RuleCode {
                 | RuleCode::FST010
                 | RuleCode::FST012
                 | RuleCode::FST013
+                | RuleCode::FST020
+                | RuleCode::FST022
+                | RuleCode::FST027
+                | RuleCode::FST039
+                | RuleCode::FST045
         )
     }
 
@@ -134,6 +267,38 @@ impl RuleCode {
             RuleCode::FST017 => "security",
             RuleCode::FST018 => "lowstar-buffer",
             RuleCode::FST019 => "lowstar-perf",
+            RuleCode::FST020 => "val-binder-arrow",
+            RuleCode::FST021 => "keyword-as-identifier",
+            RuleCode::FST022 => "missing-noeq",
+            RuleCode::FST023 => "unguarded-forall",
+            RuleCode::FST024 => "decreases-unbound",
+            RuleCode::FST025 => "assume-type-vs-val",
+            RuleCode::FST026 => "reveal-in-tot",
+            RuleCode::FST027 => "missing-mul-open",
+            RuleCode::FST028 => "strict-on-arguments",
+            RuleCode::FST029 => "pattern-disjunction",
+            RuleCode::FST030 => "function-equality",
+            RuleCode::FST031 => "opaque-without-reveal",
+            RuleCode::FST032 => "universe-hint",
+            RuleCode::FST033 => "tactic-suggestion",
+            RuleCode::FST034 => "simp-candidate",
+            RuleCode::FST035 => "simp-comm-guard",
+            RuleCode::FST036 => "dollar-binder",
+            RuleCode::FST037 => "tot-vs-gtot",
+            RuleCode::FST038 => "introduce-with",
+            RuleCode::FST039 => "unfold-alias",
+            RuleCode::FST040 => "attribute-target",
+            RuleCode::FST041 => "requires-true-ok",
+            RuleCode::FST042 => "lemma-ensures-ambiguity",
+            RuleCode::FST043 => "tick-vs-explicit",
+            RuleCode::FST044 => "missing-decreases",
+            RuleCode::FST045 => "noeq-vs-unopteq",
+            RuleCode::FST046 => "erasable-suggestion",
+            RuleCode::FST047 => "sum-vs-or",
+            RuleCode::FST048 => "missing-plugin",
+            RuleCode::FST049 => "auto-classification",
+            RuleCode::FST050 => "squash-bridge",
+            RuleCode::FST051 => "do-not-unrefine",
         }
     }
 
@@ -242,6 +407,166 @@ impl RuleCode {
                  excessive ST.get() heap snapshots, heavy disjointness conjunctions, \
                  excessive assert_norm usage, and missing inline_for_extraction on Low* helpers."
             }
+            RuleCode::FST020 => {
+                "Detects `(f: a -> b)` in val declarations which F* parses as `(f:a) -> b` \
+                 (a parameter named `f` of type `a`, returning `b`). Wrap in double parens: \
+                 `(f: (a -> b))` to get the intended function-typed parameter."
+            }
+            RuleCode::FST021 => {
+                "Detects F* reserved keywords used as identifiers: `total`, `effect`, `match`, \
+                 `friend`, `include`, `module`, `open`, `private`, `unfold`, `inline`. \
+                 These cause cryptic parse errors when used as parameter or binding names."
+            }
+            RuleCode::FST022 => {
+                "Detects records/inductives with function-typed or abstract-typed fields \
+                 missing the `noeq` qualifier. Without `noeq`, F* tries to derive decidable \
+                 equality which fails on function types, causing Error 76."
+            }
+            RuleCode::FST023 => {
+                "Detects unguarded `forall` quantifiers in ensures/lemma postconditions \
+                 without an accompanying SMTPat trigger. Unguarded quantifiers can cause \
+                 Z3 to diverge or produce unstable proofs."
+            }
+            RuleCode::FST024 => {
+                "Detects `decreases` clauses that reference names not bound in the \
+                 function's parameter list. This silently creates a fresh variable \
+                 instead of using the intended parameter."
+            }
+            RuleCode::FST025 => {
+                "Detects confusion between `assume type t` (assumes a type exists) and \
+                 `assume val f : t` (assumes a value exists). Using the wrong one can \
+                 create unsound axioms or fail to compile."
+            }
+            RuleCode::FST026 => {
+                "Detects `reveal` (from FStar.Ghost) used in a Tot computation context. \
+                 `reveal` requires GTot (ghost) context since it unwraps erased values. \
+                 Use `reveal` only in Ghost/Lemma contexts or wrap in `Ghost.elim_pure`."
+            }
+            RuleCode::FST027 => {
+                "Detects arithmetic `*` operator used without `open FStar.Mul`. In F*, \
+                 `*` defaults to the tuple type constructor (e.g., `int * int` is a pair). \
+                 You must `open FStar.Mul` to use `*` as integer multiplication."
+            }
+            RuleCode::FST028 => {
+                "Detects pattern matching on implicit arguments without the `strict_on_arguments` \
+                 attribute. Without this, F* may not reduce the match even when the implicit \
+                 is resolved, leading to verification failures."
+            }
+            RuleCode::FST029 => {
+                "Detects `{:pattern (f x)\\/(g x)}` in SMT triggers which creates a disjunctive \
+                 trigger (two alternative patterns), not a logical OR. This is a common source \
+                 of unexpected SMT behavior. Use `\\/` outside patterns for logical disjunction."
+            }
+            RuleCode::FST030 => {
+                "Detects direct equality comparison of functions (`f == g`). Function equality \
+                 is undecidable in F*. Use `feq` or `on_domain` from \
+                 FStar.FunctionalExtensionality for extensional function equality."
+            }
+            RuleCode::FST031 => {
+                "Detects definitions marked `opaque_to_smt` that are never revealed with \
+                 `reveal_opaque`. An opaque definition hidden from Z3 that is never revealed \
+                 anywhere is likely an oversight — the SMT solver cannot reason about it."
+            }
+            RuleCode::FST032 => {
+                "Provides hints about universe annotations (`u#a`, `Type u#0`). Detects \
+                 inconsistent universe levels in related definitions and suggests explicit \
+                 annotations where universe polymorphism might cause unexpected behavior."
+            }
+            RuleCode::FST033 => {
+                "Suggests F* tactics (simp, linarith, norm_num, ring) where direct SMT \
+                 is overkill or fragile. Detects arithmetic equalities suited for `norm_num`, \
+                 linear inequalities suited for `linarith`, and algebraic identities for `ring`."
+            }
+            RuleCode::FST034 => {
+                "Detects equality lemmas of the form `forall x. f x == g x` or \
+                 `f x == expr` that could be annotated with `[@@simp]` to participate in \
+                 the simplifier's rewriting engine, reducing manual proof burden."
+            }
+            RuleCode::FST035 => {
+                "Detects `[@@simp_comm]` lemmas (commutativity: `f a b == f b a`) that \
+                 lack an argument-ordering guard. Without a guard (e.g., `a <= b`), the \
+                 simplifier may loop infinitely rewriting `f a b → f b a → f a b → ...`."
+            }
+            RuleCode::FST036 => {
+                "Suggests using `$f` binder syntax for function parameters that receive \
+                 lemmas or proof terms. The `$` binder prevents normalization of the \
+                 argument, preserving its structure for the callee."
+            }
+            RuleCode::FST037 => {
+                "Detects Tot vs GTot mismatches in higher-order positions involving erased \
+                 types. A function `erased a -> Tot b` cannot call `reveal` (which requires \
+                 GTot). Use GTot or restructure to avoid ghost/pure boundary violations."
+            }
+            RuleCode::FST038 => {
+                "Suggests using `introduce forall x. P x with ...` or \
+                 `introduce implies P ==> Q with ...` tactic-style proof syntax instead of \
+                 manual `forall_intro`/`implies_intro` when proving universals or implications."
+            }
+            RuleCode::FST039 => {
+                "Detects simple type aliases (`let my_type = existing_type`) missing the \
+                 `unfold` qualifier. Without `unfold`, F* treats the alias as a new definition \
+                 that the normalizer won't automatically expand, causing type mismatches."
+            }
+            RuleCode::FST040 => {
+                "Detects attribute target mismatches: `@@@` (three `@`) applies to the \
+                 enclosing val/let declaration, while `@@` (two `@`) applies to the next term. \
+                 Using the wrong one silently attaches the attribute to the wrong target."
+            }
+            RuleCode::FST041 => {
+                "Suppression rule: `requires True` is intentional in many F* patterns \
+                 (e.g., Stack effect signatures) and should NOT be flagged as redundant. \
+                 This rule documents the pattern as deliberate."
+            }
+            RuleCode::FST042 => {
+                "Detects `Lemma post` (without `ensures`) which in F* means `Lemma (requires post) \
+                 (ensures True)` — the opposite of what most users intend. Use \
+                 `Lemma (ensures post)` to specify the postcondition."
+            }
+            RuleCode::FST043 => {
+                "Detects inconsistent implicit variable syntax: mixing tick-variables (`'a`) \
+                 with explicit implicit binders (`#a:Type`). Suggests consistent style within \
+                 a module for readability."
+            }
+            RuleCode::FST044 => {
+                "Detects `let rec` definitions without a `decreases` clause where the recursion \
+                 is not obviously structural. Non-structural recursion without `decreases` may \
+                 fail to verify or require excessive fuel."
+            }
+            RuleCode::FST045 => {
+                "Suggests replacing `noeq` with `unopteq` on records that have no function-typed \
+                 fields. `unopteq` still prevents F* from attempting equality derivation but \
+                 signals that equality could be opt-in later if needed."
+            }
+            RuleCode::FST046 => {
+                "Suggests adding `[@@ erasable]` attribute to proof-only types that are never \
+                 used computationally. Erasable types are removed during extraction, producing \
+                 cleaner generated code and catching accidental computational use."
+            }
+            RuleCode::FST047 => {
+                "Detects confusion between `Prims.sum` (constructive disjunction with `Inl`/`Inr`) \
+                 and `\\/` (`l_or`, propositional disjunction). Using `sum` in proofs or `\\/` in \
+                 computations leads to extraction issues or proof difficulties."
+            }
+            RuleCode::FST048 => {
+                "Detects complex tactic definitions (using `Tac` effect with multiple steps) \
+                 missing the `[@@plugin]` attribute. Without `plugin`, tactics run interpreted \
+                 rather than compiled, causing significant performance degradation."
+            }
+            RuleCode::FST049 => {
+                "Provides guidance on `[@@auto]` lemma classification. Suggests `auto_safe` for \
+                 lemmas that terminate quickly and are always useful, vs `auto_unsafe` for \
+                 potentially expensive lemmas that should only fire with explicit opt-in."
+            }
+            RuleCode::FST050 => {
+                "Suggests using `give_proof`/`get_proof` from FStar.Squash when bridging between \
+                 squashed propositions (`squash p`) and refinement types (`x:unit{p}`). Manual \
+                 coercion between these is error-prone; the Squash module provides safe bridges."
+            }
+            RuleCode::FST051 => {
+                "Detects refined type aliases missing the `[@@do_not_unrefine]` attribute. \
+                 Without this, F* may silently drop the refinement when normalizing, losing \
+                 the intended invariant. Example: `type pos = x:int{x > 0}` needs the attribute."
+            }
         }
     }
 
@@ -267,6 +592,38 @@ impl RuleCode {
             RuleCode::FST017 => "FST017",
             RuleCode::FST018 => "FST018",
             RuleCode::FST019 => "FST019",
+            RuleCode::FST020 => "FST020",
+            RuleCode::FST021 => "FST021",
+            RuleCode::FST022 => "FST022",
+            RuleCode::FST023 => "FST023",
+            RuleCode::FST024 => "FST024",
+            RuleCode::FST025 => "FST025",
+            RuleCode::FST026 => "FST026",
+            RuleCode::FST027 => "FST027",
+            RuleCode::FST028 => "FST028",
+            RuleCode::FST029 => "FST029",
+            RuleCode::FST030 => "FST030",
+            RuleCode::FST031 => "FST031",
+            RuleCode::FST032 => "FST032",
+            RuleCode::FST033 => "FST033",
+            RuleCode::FST034 => "FST034",
+            RuleCode::FST035 => "FST035",
+            RuleCode::FST036 => "FST036",
+            RuleCode::FST037 => "FST037",
+            RuleCode::FST038 => "FST038",
+            RuleCode::FST039 => "FST039",
+            RuleCode::FST040 => "FST040",
+            RuleCode::FST041 => "FST041",
+            RuleCode::FST042 => "FST042",
+            RuleCode::FST043 => "FST043",
+            RuleCode::FST044 => "FST044",
+            RuleCode::FST045 => "FST045",
+            RuleCode::FST046 => "FST046",
+            RuleCode::FST047 => "FST047",
+            RuleCode::FST048 => "FST048",
+            RuleCode::FST049 => "FST049",
+            RuleCode::FST050 => "FST050",
+            RuleCode::FST051 => "FST051",
         }
     }
 }
@@ -293,6 +650,38 @@ impl fmt::Display for RuleCode {
             RuleCode::FST017 => write!(f, "FST017"),
             RuleCode::FST018 => write!(f, "FST018"),
             RuleCode::FST019 => write!(f, "FST019"),
+            RuleCode::FST020 => write!(f, "FST020"),
+            RuleCode::FST021 => write!(f, "FST021"),
+            RuleCode::FST022 => write!(f, "FST022"),
+            RuleCode::FST023 => write!(f, "FST023"),
+            RuleCode::FST024 => write!(f, "FST024"),
+            RuleCode::FST025 => write!(f, "FST025"),
+            RuleCode::FST026 => write!(f, "FST026"),
+            RuleCode::FST027 => write!(f, "FST027"),
+            RuleCode::FST028 => write!(f, "FST028"),
+            RuleCode::FST029 => write!(f, "FST029"),
+            RuleCode::FST030 => write!(f, "FST030"),
+            RuleCode::FST031 => write!(f, "FST031"),
+            RuleCode::FST032 => write!(f, "FST032"),
+            RuleCode::FST033 => write!(f, "FST033"),
+            RuleCode::FST034 => write!(f, "FST034"),
+            RuleCode::FST035 => write!(f, "FST035"),
+            RuleCode::FST036 => write!(f, "FST036"),
+            RuleCode::FST037 => write!(f, "FST037"),
+            RuleCode::FST038 => write!(f, "FST038"),
+            RuleCode::FST039 => write!(f, "FST039"),
+            RuleCode::FST040 => write!(f, "FST040"),
+            RuleCode::FST041 => write!(f, "FST041"),
+            RuleCode::FST042 => write!(f, "FST042"),
+            RuleCode::FST043 => write!(f, "FST043"),
+            RuleCode::FST044 => write!(f, "FST044"),
+            RuleCode::FST045 => write!(f, "FST045"),
+            RuleCode::FST046 => write!(f, "FST046"),
+            RuleCode::FST047 => write!(f, "FST047"),
+            RuleCode::FST048 => write!(f, "FST048"),
+            RuleCode::FST049 => write!(f, "FST049"),
+            RuleCode::FST050 => write!(f, "FST050"),
+            RuleCode::FST051 => write!(f, "FST051"),
         }
     }
 }
